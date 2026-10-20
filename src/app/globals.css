@@ -2,129 +2,529 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar: var(--sidebar);
-  --color-chart-5: var(--chart-5);
-  --color-chart-4: var(--chart-4);
-  --color-chart-3: var(--chart-3);
-  --color-chart-2: var(--chart-2);
-  --color-chart-1: var(--chart-1);
-  --color-ring: var(--ring);
-  --color-input: var(--input);
-  --color-border: var(--border);
-  --color-destructive: var(--destructive);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent: var(--accent);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-secondary: var(--secondary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-primary: var(--primary);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-popover: var(--popover);
-  --color-card-foreground: var(--card-foreground);
-  --color-card: var(--card);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+@theme {
+  --color-pm-bg: #1c1c1c;
+  --color-pm-sidebar: #212121;
+  --color-pm-border: #303030;
+  --color-pm-accent: #2f67cc;
+  --color-pm-text: #e3e3e3;
+  --color-pm-text-muted: #9a9a9a;
+  --color-pm-text-secondary: #b8b8b8;
+  --color-pm-hover: #252525;
+  --color-pm-row-active: #2c2c2c;
+  --color-pm-surface: #232323;
 }
 
-:root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+/* Paletas de tema — trocadas via [data-theme] no <html> (ver
+   ThemeContext.tsx). Só dark/light existem de verdade hoje; os outros 10
+   temas da tela "Themes" ainda são só preview (ver src/app/types/Theme.ts).
+   Isto reescreve os MESMOS tokens já usados no @theme acima, então qualquer
+   classe Tailwind gerada a partir deles (bg-pm-bg, text-pm-text, etc.)
+   responde à troca de tema automaticamente. */
+[data-theme='dark'] {
+  --color-pm-bg: #1c1c1c;
+  --color-pm-sidebar: #212121;
+  --color-pm-border: #303030;
+  --color-pm-accent: #2f67cc;
+  --color-pm-text: #e3e3e3;
+  --color-pm-text-muted: #9a9a9a;
+  --color-pm-text-secondary: #b8b8b8;
+  --color-pm-hover: #252525;
+  --color-pm-row-active: #2c2c2c;
+  --color-pm-surface: #232323;
 }
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+[data-theme='light'] {
+  --color-pm-bg: #ffffff;
+  --color-pm-sidebar: #f4f4f5;
+  --color-pm-border: #e4e4e7;
+  --color-pm-accent: #ff6c37;
+  --color-pm-text: #18181b;
+  --color-pm-text-muted: #71717a;
+  --color-pm-text-secondary: #3f3f46;
+  --color-pm-hover: #ececed;
+  --color-pm-row-active: #e4e4e7;
+  --color-pm-surface: #f4f4f5;
 }
+
+[data-theme='high-contrast-light'] {
+  --color-pm-bg: #ffffff;
+  --color-pm-sidebar: #f0f0f0;
+  --color-pm-border: #000000;
+  --color-pm-accent: #d32f2f;
+  --color-pm-text: #000000;
+  --color-pm-text-muted: #292929;
+  --color-pm-text-secondary: #1a1a1a;
+  --color-pm-hover: #e0e0e0;
+  --color-pm-row-active: #d0d0d0;
+  --color-pm-surface: #ffffff;
+}
+
+[data-theme='high-contrast-dark'] {
+  --color-pm-bg: #000000;
+  --color-pm-sidebar: #000000;
+  --color-pm-border: #ffffff;
+  --color-pm-accent: #ff6c37;
+  --color-pm-text: #ffffff;
+  --color-pm-text-muted: #cccccc;
+  --color-pm-text-secondary: #e0e0e0;
+  --color-pm-hover: #1a1a1a;
+  --color-pm-row-active: #262626;
+  --color-pm-surface: #000000;
+}
+
+[data-theme='ayu-light'] {
+  --color-pm-bg: #fafafa;
+  --color-pm-sidebar: #f3f3f3;
+  --color-pm-border: #e6e6e6;
+  --color-pm-accent: #ff9940;
+  --color-pm-text: #5c6166;
+  --color-pm-text-muted: #8a9199;
+  --color-pm-text-secondary: #6b7280;
+  --color-pm-hover: #efefef;
+  --color-pm-row-active: #e8e8e8;
+  --color-pm-surface: #f3f3f3;
+}
+
+[data-theme='ayu-dark'] {
+  --color-pm-bg: #0d1017;
+  --color-pm-sidebar: #131721;
+  --color-pm-border: #2a2f3a;
+  --color-pm-accent: #ffb454;
+  --color-pm-text: #bfbdb6;
+  --color-pm-text-muted: #6c7380;
+  --color-pm-text-secondary: #a6a29c;
+  --color-pm-hover: #1a1f2b;
+  --color-pm-row-active: #202534;
+  --color-pm-surface: #131721;
+}
+
+[data-theme='dracula'] {
+  --color-pm-bg: #282a36;
+  --color-pm-sidebar: #21222c;
+  --color-pm-border: #44475a;
+  --color-pm-accent: #bd93f9;
+  --color-pm-text: #f8f8f2;
+  --color-pm-text-muted: #6272a4;
+  --color-pm-text-secondary: #cccccc;
+  --color-pm-hover: #343746;
+  --color-pm-row-active: #3b3d4d;
+  --color-pm-surface: #21222c;
+}
+
+[data-theme='monokai'] {
+  --color-pm-bg: #272822;
+  --color-pm-sidebar: #1e1f1a;
+  --color-pm-border: #49483e;
+  --color-pm-accent: #66d9ef;
+  --color-pm-text: #f8f8f2;
+  --color-pm-text-muted: #75715e;
+  --color-pm-text-secondary: #cfcfc2;
+  --color-pm-hover: #3e3d32;
+  --color-pm-row-active: #49483e;
+  --color-pm-surface: #1e1f1a;
+}
+
+[data-theme='night-owl-light'] {
+  --color-pm-bg: #ffffff;
+  --color-pm-sidebar: #f0f0f0;
+  --color-pm-border: #e0e6ea;
+  --color-pm-accent: #2aa298;
+  --color-pm-text: #403f53;
+  --color-pm-text-muted: #90a7b2;
+  --color-pm-text-secondary: #5f7e97;
+  --color-pm-hover: #f5f5f5;
+  --color-pm-row-active: #e8ecee;
+  --color-pm-surface: #f0f0f0;
+}
+
+[data-theme='night-owl-dark'] {
+  --color-pm-bg: #011627;
+  --color-pm-sidebar: #01111d;
+  --color-pm-border: #1d3b53;
+  --color-pm-accent: #7fdbca;
+  --color-pm-text: #d6deeb;
+  --color-pm-text-muted: #5f7e97;
+  --color-pm-text-secondary: #a4b1cd;
+  --color-pm-hover: #0b2942;
+  --color-pm-row-active: #122d42;
+  --color-pm-surface: #01111d;
+}
+
+[data-theme='solarized-light'] {
+  --color-pm-bg: #fdf6e3;
+  --color-pm-sidebar: #eee8d5;
+  --color-pm-border: #dcd3b5;
+  --color-pm-accent: #b58900;
+  --color-pm-text: #657b83;
+  --color-pm-text-muted: #93a1a1;
+  --color-pm-text-secondary: #586e75;
+  --color-pm-hover: #f5efdc;
+  --color-pm-row-active: #eee8d5;
+  --color-pm-surface: #eee8d5;
+}
+
+[data-theme='solarized-dark'] {
+  --color-pm-bg: #002b36;
+  --color-pm-sidebar: #00212b;
+  --color-pm-border: #0a4b5c;
+  --color-pm-accent: #2aa198;
+  --color-pm-text: #839496;
+  --color-pm-text-muted: #586e75;
+  --color-pm-text-secondary: #93a1a1;
+  --color-pm-hover: #073642;
+  --color-pm-row-active: #0a4b5c;
+  --color-pm-surface: #00212b;
+}
+
+/* Nord — cinza-azulado frio, baixo contraste. */
+[data-theme='nord'] {
+  --color-pm-bg: #2e3440;
+  --color-pm-sidebar: #2b303b;
+  --color-pm-border: #3b4252;
+  --color-pm-accent: #88c0d0;
+  --color-pm-text: #d8dee9;
+  --color-pm-text-muted: #616e88;
+  --color-pm-text-secondary: #c0c6d0;
+  --color-pm-hover: #353c4a;
+  --color-pm-row-active: #434c5e;
+  --color-pm-surface: #2b303b;
+}
+
+/* Gruvbox Dark — quente, bege sobre marrom. */
+[data-theme='gruvbox-dark'] {
+  --color-pm-bg: #282828;
+  --color-pm-sidebar: #1d2021;
+  --color-pm-border: #3c3836;
+  --color-pm-accent: #fe8019;
+  --color-pm-text: #ebdbb2;
+  --color-pm-text-muted: #928374;
+  --color-pm-text-secondary: #d5c4a1;
+  --color-pm-hover: #32302f;
+  --color-pm-row-active: #3c3836;
+  --color-pm-surface: #1d2021;
+}
+
+/* Tokyo Night — azul profundo com acento índigo. */
+[data-theme='tokyo-night'] {
+  --color-pm-bg: #1a1b26;
+  --color-pm-sidebar: #16161e;
+  --color-pm-border: #292e42;
+  --color-pm-accent: #7aa2f7;
+  --color-pm-text: #c0caf5;
+  --color-pm-text-muted: #565f89;
+  --color-pm-text-secondary: #a9b1d6;
+  --color-pm-hover: #1f2335;
+  --color-pm-row-active: #292e42;
+  --color-pm-surface: #16161e;
+}
+
+/* Catppuccin Mocha — pastéis sobre fundo violáceo. */
+[data-theme='catppuccin-mocha'] {
+  --color-pm-bg: #1e1e2e;
+  --color-pm-sidebar: #181825;
+  --color-pm-border: #313244;
+  --color-pm-accent: #cba6f7;
+  --color-pm-text: #cdd6f4;
+  --color-pm-text-muted: #6c7086;
+  --color-pm-text-secondary: #bac2de;
+  --color-pm-hover: #262638;
+  --color-pm-row-active: #313244;
+  --color-pm-surface: #181825;
+}
+
+/* One Dark — o do Atom, cinza-azulado neutro. */
+[data-theme='one-dark'] {
+  --color-pm-bg: #282c34;
+  --color-pm-sidebar: #21252b;
+  --color-pm-border: #3e4451;
+  --color-pm-accent: #61afef;
+  --color-pm-text: #abb2bf;
+  --color-pm-text-muted: #5c6370;
+  --color-pm-text-secondary: #9da5b4;
+  --color-pm-hover: #2c313a;
+  --color-pm-row-active: #3e4451;
+  --color-pm-surface: #21252b;
+}
+
+/* GitHub Dark — o mais próximo do que se vê no navegador o dia todo. */
+[data-theme='github-dark'] {
+  --color-pm-bg: #0d1117;
+  --color-pm-sidebar: #010409;
+  --color-pm-border: #30363d;
+  --color-pm-accent: #58a6ff;
+  --color-pm-text: #e6edf3;
+  --color-pm-text-muted: #7d8590;
+  --color-pm-text-secondary: #c9d1d9;
+  --color-pm-hover: #161b22;
+  --color-pm-row-active: #21262d;
+  --color-pm-surface: #161b22;
+}
+
+/* Reset para o Tauri */
+html, body, #__next {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-pm-bg);
+  color: var(--color-pm-text);
+  overflow: hidden;
+   width: 100%;
+  height: 100%;
+
+}
+
+button,
+input,
+textarea,
+select,
+a {
+  outline: none !important;
+  box-shadow: none !important;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus,
+button:focus-visible,
+button:active,
+
+input:focus,
+input:focus-visible,
+
+textarea:focus,
+textarea:focus-visible,
+
+select:focus,
+select:focus-visible,
+
+a:focus,
+a:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.devflow-loader {
+  position: absolute;
+  top: 0;
+  left: -35%;
+
+  width: 35%;
+  height: 100%;
+
+  border-radius: 999px;
+
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    #047ae7 20%,
+    #38bdf8 50%,
+    #047ae7 80%,
+    transparent 100%
+  );
+
+  filter: blur(0.3px);
+
+  animation: devflow-slide 1s linear infinite;
+}
+
+@keyframes devflow-slide {
+  0% {
+    left: -35%;
+  }
+
+  100% {
+    left: 100%;
+  }
+}
+
+/*animacao*/
+
+.devflow-loader {
+  position: absolute;
+  top: 0;
+
+  width: 35%;
+  height: 100%;
+
+  border-radius: 999px;
+
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(4, 122, 231, 0.15) 10%,
+    #38bdf8 50%,
+    rgba(4, 122, 231, 0.15) 90%,
+    transparent 100%
+  );
+
+  filter: blur(0.4px);
+
+  will-change: transform;
+
+  animation: devflow-slide 1.15s
+    cubic-bezier(0.4, 0, 0.2, 1)
+    infinite;
+}
+
+.devflow-loader::after {
+  content: '';
+
+  position: absolute;
+  inset: 0;
+
+  background: inherit;
+
+  filter: blur(6px);
+
+  opacity: 0.45;
+}
+
+@keyframes devflow-slide {
+  0% {
+    transform: translateX(-140%) scaleX(0.85);
+    opacity: 0;
+  }
+
+  12% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(420%) scaleX(1);
+    opacity: 1;
+  }
+}
+
+
+
+
+
+/* RADIX */
+[data-radix-popper-content-wrapper]:focus,
+[data-state]:focus,
+[role="menuitem"]:focus,
+[role="dialog"]:focus,
+[role="button"]:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Adicione no seu globals.css */
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
+
+/* Garante que o Resizer Handle seja visível ao arrastar */
+[data-panel-group-direction="horizontal"] > [data-panel-resize-handle-enabled="true"]:hover {
+  background-color: var(--color-pm-accent);
+}
+
 
 @layer base {
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #3f3f46; /* zinc-700 */
+    border-radius: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #52525b; /* zinc-600 */
+  }
+
+  /* Para Firefox */
   * {
-    @apply border-border outline-ring/50;
+    scrollbar-width: thin;
+    scrollbar-color: #3f3f46 transparent;
   }
-  body {
-    @apply bg-background text-foreground;
+}
+
+/* globals.css */
+
+/* Scrollbar nativa da tab bar fica totalmente escondida — o WebView2 no
+   Windows não respeita o scrollbar-color/width customizado de forma
+   confiável e cai pro scrollbar nativo (cor de destaque do sistema,
+   sempre reservado). A barra visível é desenhada em React (TabBar.tsx),
+   só aparece no hover e nunca reserva espaço/desloca o layout. */
+.tabbar-scroll {
+  scrollbar-width: none;
+}
+
+.tabbar-scroll::-webkit-scrollbar {
+  display: none !important;
+  height: 0 !important;
+}
+
+/* Scrollbar fina e discreta da árvore de collections (mesmo estilo do
+   restante do app). As setinhas nativas repetidas que apareciam aqui eram
+   um bug à parte (overflow-x-hidden sem overflow-y em cada linha do
+   TreeNode, corrigido lá) — não precisa mais esconder o scrollbar. */
+.tree-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+
+.tree-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tree-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tree-scroll::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 10px;
+}
+
+.tree-scroll::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* Linhas guia da árvore (conectando pasta pai aos filhos, como no Postman):
+   só aparecem com o mouse sobre a árvore, escondidas o resto do tempo. */
+.tree-guide-line {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.tree-scroll:hover .tree-guide-line {
+  opacity: 1;
+}
+
+/* Feedback de "soltar dentro da pasta" ao arrastar um item da árvore —
+   pulso sutil no contorno + glow, pra ficar bem claro que o drop vai
+   inserir DENTRO da pasta (e não antes/depois dela como irmão). */
+@keyframes tree-drop-inside-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 1.5px rgba(60, 137, 224, 0.65), 0 0 0 0 rgba(60, 137, 224, 0.35);
   }
-  html {
-    @apply font-sans;
+  50% {
+    box-shadow: 0 0 0 1.5px rgba(60, 137, 224, 0.95), 0 0 12px 3px rgba(60, 137, 224, 0.4);
   }
+}
+
+.tree-drop-inside {
+  animation: tree-drop-inside-pulse 850ms ease-in-out infinite;
 }

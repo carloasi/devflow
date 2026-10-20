@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# Um push logo após o outro cancela a execução anterior do mesmo branch:
+# sem isso a fila cresce e o resultado que importa (o do último commit)
+# chega por último.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: TypeScript e lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `npm ci` em vez de `npm install`: respeita o lockfile e falha se ele
+      # estiver fora de sincronia com o package.json, que é exatamente o tipo
+      # de divergência que só aparece na máquina de outra pessoa.
+      - run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit -p tsconfig.json
+
+      # Erro reprova; aviso não. A separação é deliberada: hoje há ~290
+      # avisos de dívida herdada (tipagem `any`, regras do React Compiler), e
+      # tratá-los como bloqueio deixaria o CI vermelho de forma permanente —
+      # ou seja, inútil. Ver os comentários em eslint.config.mjs.
+      - name: Lint
+        run: npx eslint src --ext .ts,.tsx
+
+      # Cobrem os módulos puros — criptografia do sync, geração de snippet,
+      # import de OpenAPI e as operações da árvore de collections. São a
+      # parte do código onde um erro é silencioso: nada na tela quebra, o
+      # dado é que sai errado.
+      - name: Testes
+        run: npm test
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Uma plataforma falhando não cancela a outra: quando o problema é de
+      # plataforma, interessa ver as duas respostas de uma vez.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # O Tauri precisa das libs de GTK/WebKit pra sequer compilar no Linux;
+      # sem elas o cargo falha no build script, não no nosso código.
+      - name: Dependências de sistema do Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # As duas plataformas de propósito: `claude_cli.rs` tem 8 blocos
+      # #[cfg(windows)] / #[cfg(not(windows))], e o compilador só enxerga o
+      # ramo da plataforma em que roda. Checando só numa delas, metade do
+      # código condicional nunca seria compilada — que é como o ramo não
+      # Windows chegou ao estado atual sem nunca ter sido construído.
+      - name: Cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets

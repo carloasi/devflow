@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DevFlow
 
-## Getting Started
+Um cliente de API de desktop, local-first, construído com Tauri e Next.js.
 
-First, run the development server:
+Faz o que se espera de um cliente de API — collections, environments, scripts
+de pré e pós-requisição, runner — e três coisas que os outros não fazem:
+
+- **Um agente de IA embutido.** O painel do Claude Code roda dentro do app e
+  enxerga as suas collections através de um servidor MCP local: dá pra pedir
+  "roda essa request e me diz por que deu 401" sem copiar nada pra lugar
+  nenhum.
+- **Teste de carga nativo.** O motor é em Rust, não um script; roda VUs,
+  duração ou iterações, e guarda o histórico.
+- **Sync por GitHub.** As collections vivem num repositório seu, criptografadas
+  com uma senha que só você tem. Sem conta, sem nuvem de terceiro.
+
+> **Status:** em desenvolvimento ativo. Hoje só há build empacotado para
+> Windows; macOS e Linux compilam, mas ainda não foram validados em uso real.
+
+## Capturas de tela
+
+<!-- TODO: adicionar prints. Sugestão de três, nessa ordem:
+     1. A janela principal com uma collection aberta e uma resposta
+     2. O painel do Claude ao lado de uma request
+     3. O painel de teste de carga com o gráfico -->
+
+## Instalação
+
+Baixe o instalador mais recente em [Releases](../../releases).
+
+Como o executável ainda não é assinado, o Windows mostra um aviso do
+SmartScreen e o macOS pede confirmação no Gatekeeper na primeira abertura.
+
+## Rodando a partir do código
+
+Pré-requisitos: [Node 20+](https://nodejs.org) e o
+[toolchain do Rust](https://www.rust-lang.org/tools/install), mais as
+[dependências de sistema do Tauri](https://tauri.app/start/prerequisites/)
+(no Linux: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev` e companhia).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm ci
+npx tauri dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Para gerar o instalador da sua plataforma:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npx tauri build
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Como funciona
 
-## Learn More
+O frontend é Next.js em modo de exportação estática, servido dentro da webview
+do Tauri. O Rust cuida do que o navegador não pode fazer: requisições HTTP sem
+CORS, o motor de teste de carga, o sandbox de scripts (QuickJS), o
+armazenamento seguro de credenciais e o servidor MCP local.
 
-To learn more about Next.js, take a look at the following resources:
+A execução de uma request passa por um caminho só — resolução de variáveis,
+path params, auth, sanitização do body e scripts — usado igualmente pelo botão
+Send, pelo runner, pelo teste de carga e pelas ferramentas do MCP. É o que
+mantém os quatro coerentes entre si.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Documentação
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- [Usando o Claude com o DevFlow](docs/CLAUDE_AGENT.md) — o painel dentro do app
+  e o Claude Code no terminal, via servidor MCP.
+- [Teste de carga](docs/LOAD_TESTING.md) — modos de execução, correlação entre
+  requests e thresholds.
 
-## Deploy on Vercel
+## Contribuindo
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Veja [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Licença
+
+Veja [LICENSE](LICENSE).

@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "postmannext",
-  "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "productName": "DevFlow",
+  "version": "1.3.7",
+  "identifier": "com.DevFlow.dev",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
@@ -12,14 +12,18 @@
   "app": {
     "windows": [
       {
-        "title": "postmannext",
+        "title": "DevFlow",
         "width": 800,
         "height": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "hiddenTitle": false,
+        "decorations": false,
+        "devtools": true
       }
     ],
     "security": {
+   
       "csp": null
     }
   },

@@ -1,11 +1,43 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Inter } from "next/font/google";
 import "./globals.css";
+import { EnvironmentProvider } from "@/components/EnvironmentContext";
+import { ThemeProvider } from "@/components/ThemeContext";
+import { AppUpdateGate } from "@/components/AppUpdateGate";
+import { ErrorLogger } from "@/components/ErrorLogger";
+import { Toaster } from 'sonner';
+
+// Roda ANTES do primeiro paint (script bloqueante no <head>) pra já aplicar
+// o data-theme certo no <html> — sem isso, a tela nasceria sempre no tema
+// default e só trocaria pro tema salvo depois que o React hidratasse
+// (flash visível de tema errado a cada abertura do app).
+const themeInitScript = `
+(function() {
+  try {
+    var sync = localStorage.getItem('devflow_theme_sync_with_system') === 'true';
+    var stored = localStorage.getItem('devflow_theme_id');
+    var theme = 'dark';
+    if (sync) {
+      theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    } else if (stored) {
+      // Qualquer um dos 12 temas salvos (não só light/dark) — ThemeContext.tsx
+      // já valida o id contra a lista THEMES na hidratação; aqui, se o valor
+      // for inválido/antigo, o [data-theme='...'] simplesmente não casa com
+      // nenhum bloco do CSS e cai no fallback (paleta dark do @theme), sem quebrar nada.
+      theme = stored;
+    }
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch (e) {}
+})();
+`;
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
 });
+
+const inter = Inter({ subsets: ["latin"] });
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
@@ -22,12 +54,43 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  
   return (
+
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      // O script inline abaixo seta data-theme no <html> antes do React
+      // hidratar (pra não piscar o tema errado — ver themeInitScript). Isso
+      // sempre diverge do HTML renderizado no servidor (que não tem esse
+      // atributo), então o React acusaria "hydration mismatch" nesse
+      // atributo específico sem isto — é o mesmo padrão usado por libs como
+      // next-themes.
+      suppressHydrationWarning
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
+      <body className={`${inter.className} overflow-hidden`}>
+        <ErrorLogger />
+        {/* Container principal ocupando 100% da viewport */}
+        <div className="flex h-screen w-screen bg-background text-foreground">
+
+          {/* 2. Área de Conteúdo Principal (Direita) */}
+          <main className="flex-1 flex flex-col h-full overflow-hidden">
+            <ThemeProvider>
+              <EnvironmentProvider>
+                <AppUpdateGate>
+                  {children}
+                </AppUpdateGate>
+                <Toaster theme="dark" position="bottom-right" richColors />
+              </EnvironmentProvider>
+            </ThemeProvider>
+          </main>
+
+        </div>
+      </body>
     </html>
   );
 }
+

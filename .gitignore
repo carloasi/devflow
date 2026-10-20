@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# rust / tauri
+# Sem isto o primeiro commit levaria junto os artefatos de build do Rust —
+# alguns gigabytes, e inúteis pra quem clona.
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Configuração local do Claude Code. Não faz parte do DevFlow: são skills e
+# ajustes de quem desenvolve, e a skill de fluxos carrega material interno da
+# empresa (catálogo de endpoints e padrões de auth do Barramento B2B / Portal
+# de Grupos), que não tem por que viajar com o código.
+.claude/

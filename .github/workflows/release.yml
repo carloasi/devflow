@@ -1,0 +1,79 @@
+name: Build
+
+# Dispara na tag (v1.2.3) e também sob demanda, pelo botão do Actions.
+# O manual importa: até o primeiro release sair, é assim que se descobre se o
+# build de macOS e Linux funciona — sem precisar inventar uma tag pra testar.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Uma plataforma quebrada não cancela as outras: na primeira vez que
+      # isto roda, interessa ver os três resultados de uma vez.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            args: ''
+          # macOS 14 é ARM (Apple Silicon). O alvo universal cobre Intel no
+          # mesmo .dmg, evitando publicar dois arquivos e explicar a diferença.
+          - os: macos-14
+            label: macOS (universal)
+            args: '--target universal-apple-darwin'
+          - os: ubuntu-22.04
+            label: Linux
+            args: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Sem os dois alvos o --target universal-apple-darwin falha.
+          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # Ubuntu 22.04 e não 24.04: o Tauri 2 usa webkit2gtk-4.1, e a 24.04
+      # empacota uma combinação de versões que costuma quebrar o build.
+      - name: Dependências de sistema do Tauri
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build
+        run: npx tauri build ${{ matrix.args }}
+
+      # Sem assinatura de código: no Windows aparece o aviso do SmartScreen e
+      # no macOS o Gatekeeper bloqueia na primeira abertura. Resolver isso
+      # exige certificado pago (e conta de desenvolvedor Apple) — fica pra
+      # quando houver release público de verdade.
+      - name: Publicar artefatos
+        uses: actions/upload-artifact@v4
+        with:
+          name: devflow-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg

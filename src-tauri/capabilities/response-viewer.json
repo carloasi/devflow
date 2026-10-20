@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "response-viewer",
+  "description": "Permissões da janela separada de visualização de response — sem decorações nativas, então precisa dos comandos pra desenhar sua própria barra de título (arrastar, minimizar, maximizar, fechar), além do botão de 'sempre no topo'.",
+  "windows": [
+    "response-*"
+  ],
+  "permissions": [
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:webview:allow-set-webview-zoom",
+    "core:event:allow-listen"
+  ]
+}

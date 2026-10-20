@@ -6,6 +6,44 @@
     "main"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-zoom",
+    "core:window:allow-create",
+    "dialog:allow-save",
+    "dialog:default",
+    "fs:allow-write-text-file",
+    "fs:allow-write-file",
+    "fs:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-set-always-on-top",
+    "opener:allow-open-url",
+    "store:default",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://localhost:*" },
+        { "url": "http://127.0.0.1:*" },
+        { "url": "https://login.microsoftonline.com/**" },
+        { "url": "https://general-api-tst.azul.corp*" },
+        { "url": "https://github.com/**" }
+      ]
+    },
+
+    "http:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "https://api.github.com/**" },
+        { "url": "https://raw.githubusercontent.com/**" }
+      ]
+    }
   ]
 }
