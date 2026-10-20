@@ -82,6 +82,7 @@ that already have a suite (`*.test.ts` beside the module):
 | `src/lib/entryDiff.ts` | per-entry comparison of headers and variables: matching by key, repeated keys by occurrence, and that `enabled` is content |
 | `src/lib/applyDiff.ts` | merging only what was chosen: new item position, id and star preserved, and refusing the folder without discarding what was accepted inside |
 | `src/lib/environmentDiff.ts` | matching a variable by key (the pull regenerates ids) and preserving the disabled duplicate when applying |
+| `src/lib/postmanUrl.ts` | that the Postman URL parts always rebuild the raw URL — the port, the scheme, a dotted variable host, and a `:param` segment |
 | `src/lib/diffFields.ts` | where each editable field lives on the node, and that invalid JSON becomes an error instead of entering the request |
 | `src/lib/safeStorage.ts` | that a full quota returns false instead of throwing, and which keys the startup sweep may remove |
 | `src/storage/responseHistoryStore.ts` | that an oversized body becomes an explicit marker rather than truncated, invalid JSON |

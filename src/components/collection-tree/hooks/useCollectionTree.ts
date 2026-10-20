@@ -16,6 +16,7 @@ import {
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { ParsedCurlRequest } from '@/lib/curlParser'
+import { toPostmanUrl as buildPostmanUrl } from '@/lib/postmanUrl'
 
 interface Params {
   items: CollectionItem[]
@@ -95,47 +96,23 @@ function toPostmanAuth(auth: RequestDetails['auth']) {
   return { type: 'noauth' }
 }
 
-// Divide a URL raw em host[]/path[] igual o Postman faz, só usada quando
-// urlexport.host/path não foram preenchidos (caso comum pra requests criadas
-// ou editadas dentro do próprio app, que só mantêm `raw` atualizado).
-function splitHostPath(raw: string): { host: string[]; path: string[] } {
-  const withoutProtocol = raw.replace(/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//, '')
-  const [hostAndPort, ...rest] = withoutProtocol.split('/')
-  const pathAndQuery = rest.join('/')
-  const pathOnly = pathAndQuery.split('?')[0].split('#')[0]
-
-  const host = hostAndPort ? hostAndPort.split('.') : []
-  const path = pathOnly ? pathOnly.split('/').filter(Boolean) : []
-  return { host, path }
-}
-
-// Extrai `?key=value&...` da URL raw pro array `query` do Postman — sem
-// isso, abrir o export no Postman real mostra a aba Params vazia mesmo com
-// query string presente na URL.
-function extractQuery(raw: string): Array<{ key: string; value: string }> {
-  const queryString = raw.split('?')[1]?.split('#')[0]
-  if (!queryString) return []
-  const safeDecode = (v: string) => {
-    try { return decodeURIComponent(v) } catch { return v }
-  }
-  return queryString.split('&').filter(Boolean).map((pair) => {
-    const [key = '', value = ''] = pair.split('=')
-    return { key: safeDecode(key), value: safeDecode(value) }
-  })
-}
-
+/**
+ * URL no formato Postman, SEMPRE derivada do texto cru.
+ *
+ * Antes isto preferia `urlexport.host`/`path`, preenchidos na importação.
+ * Mas editar a URL no app atualiza só o `raw` (ver AppLayout), então numa
+ * request importada e depois editada as duas versões se contradiziam — e o
+ * Postman monta a URL pelas PARTES, ignorando o `raw`. O resultado era um
+ * export apontando para outro endpoint, sem erro e sem aviso: 296 das 8.279
+ * requests de uma base real.
+ *
+ * Derivando do `raw`, elas concordam por construção. `variable` continua
+ * vindo do `urlexport` porque os path params são guardados à parte e
+ * acompanham a edição.
+ */
 function toPostmanUrl(request: RequestDetails) {
   const raw = request.urlexport?.raw ?? request.url ?? ''
-  const hasHostPath = !!(request.urlexport?.host?.length || request.urlexport?.path?.length)
-  const derived = hasHostPath ? null : splitHostPath(raw)
-
-  return {
-    raw,
-    host:     hasHostPath ? request.urlexport!.host : derived!.host,
-    path:     hasHostPath ? request.urlexport!.path : derived!.path,
-    query:    extractQuery(raw),
-    variable: request.urlexport?.variable ?? [],
-  }
+  return buildPostmanUrl(raw, request.urlexport?.variable ?? [])
 }
 
 function toPostmanEvents(scripts: RequestDetails['scripts']) {
@@ -219,14 +196,6 @@ function isJsonString(str: string): boolean {
   } catch {
     return false
   }
-}
-
-function parseFormData(body: string) {
-  try {
-    const parsed = JSON.parse(body)
-    if (Array.isArray(parsed)) return parsed
-  } catch {}
-  return []
 }
 
 /** Monta só o bloco `request: {...}` do formato Postman — reaproveitado

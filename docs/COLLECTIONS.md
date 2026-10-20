@@ -114,28 +114,30 @@ Environment export matches Postman's format: `values[]` with
 `_postman_exported_at` and `_postman_exported_using`. The `color` field is a
 DevFlow extension that Postman ignores.
 
+### How URLs are built
+
+Postman rebuilds a URL from its **parts** — `protocol`, `host`, `port`,
+`path`, `query` — and ignores `raw` entirely: `Url.update()` only parses a
+string, and given an object it reads the parts. So the parts are what
+actually travels.
+
+DevFlow derives all of them from the raw URL on every export
+(`src/lib/postmanUrl.ts`), which is why they cannot drift apart. Variables
+are respected: `{{base.url}}` stays one host label instead of being split at
+the dot, and `{{host}}:{{port}}` keeps its port.
+
+This used to prefer the host and path stored at import time, which editing a
+URL never updated. On one real 8,279-request data set that exported 296
+requests (3.6%) pointing at a different endpoint than the app showed, 108
+silently downgraded from https to http, and 113 missing their port. All three
+now measure zero on the same data.
+
 ### Known gaps
 
 These are measured, not theoretical.
-
-**URL parts can contradict the raw URL.** `toPostmanUrl` prefers
-`urlexport.host` / `path` when they exist, but editing a URL in the app updates
-only `raw`. For a request that was imported from Postman and later edited, the
-parts go stale — and **Postman rebuilds the URL from the parts and ignores
-`raw`** (`Url.toString()` in `postman-collection`). The exported request then
-points somewhere else, silently. On one real 8,279-request data set, 296 (3.6%)
-were affected.
-
-**`protocol` and `port` are not emitted.** An `https://` URL exported from a
-raw string loses the scheme, and `localhost:5001` loses the port, for the same
-reason — the parts never carry them. URLs that start with `{{variable}}` are
-unaffected, which is the overwhelming majority in practice.
 
 **`disabledDefaultHeaders` has no equivalent** in the v2.1 format. If you
 switched a default header off, Postman will still send its own.
 
 **gRPC requests are excluded.** The v2.1 format has no gRPC. They are left out
 rather than exported as broken HTTP.
-
-If you are moving work to Postman and any of this matters, check the URLs of
-requests you have edited since importing.
