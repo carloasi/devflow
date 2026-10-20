@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { ChevronDown, Save, FolderOpen, Pencil, Trash2, Check, X, RefreshCw, Copy, Search, AlertTriangle, Pin, PinOff, Workflow, FilePlus } from 'lucide-react';
 import { Tab } from '@/app/types/Tab';
+import type { TabGroup } from '@/lib/tabGroups';
 
 export interface TabSession {
   id: string;
@@ -10,7 +11,30 @@ export interface TabSession {
   tabs: Tab[];
   activeTabId: string | null;
   savedAt: number;
-  pinned?: boolean; //
+  pinned?: boolean;
+  /**
+   * Workspace em que a sessão foi salva.
+   *
+   * Abas apontam para requests por id, e id só existe dentro de um
+   * workspace. Sem este campo não havia como saber que uma sessão pertence a
+   * outro lugar — restaurá-la abria abas órfãs, e salvar uma delas não
+   * gravava em canto nenhum.
+   *
+   * Opcional porque sessões salvas antes disto não têm: elas aparecem sempre,
+   * sem filtro, até serem salvas de novo.
+   */
+  workspace?: string;
+  /**
+   * Grupos de aba no momento em que a sessão foi salva.
+   *
+   * Sem isto, restaurar uma sessão de doze abas devolvia as doze soltas: os
+   * grupos viviam só no workspace, fora da sessão, e a organização montada à
+   * mão evaporava na restauração.
+   *
+   * Opcional: sessões anteriores a este campo restauram sem grupos, como
+   * antes.
+   */
+  groups?: TabGroup[];
 }
 
 interface TabSessionSelectorProps {
@@ -40,6 +64,8 @@ interface TabSessionSelectorProps {
   currentTabCount?: number;
   // Alguma aba aberta tem alteração não salva na collection.
   hasUnsavedTabs?: boolean;
+  // Workspace atual: a lista mostra as sessões daqui por padrão.
+  workspace?: string;
 }
 
 function formatSavedAt(ts: number): string {
@@ -62,11 +88,13 @@ export function TabSessionSelector({
   onNewSession,
   currentTabCount = 0,
   hasUnsavedTabs = false,
+  workspace,
 }: TabSessionSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [search, setSearch] = useState('');
+  const [showAllWorkspaces, setShowAllWorkspaces] = useState(false);
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmNewSession, setConfirmNewSession] = useState(false);
@@ -186,16 +214,28 @@ export function TabSessionSelector({
     setTimeout(() => setJustUpdated(false), 1500);
   };
 
+// Sessões de OUTRO workspace ficam escondidas por padrão: restaurá-las abre
+// abas que não existem aqui. As antigas (sem workspace gravado) aparecem
+// sempre — esconder o que a pessoa já tem seria pior que mostrar demais.
+const foreignCount = useMemo(
+  () => (workspace ? sessions.filter(s => s.workspace && s.workspace !== workspace).length : 0),
+  [sessions, workspace]
+);
+
 const filteredSessions = useMemo(() => {
   const q = search.trim().toLowerCase();
-  const base = q ? sessions.filter(s => s.name.toLowerCase().includes(q)) : sessions;
+  const byWorkspace =
+    workspace && !showAllWorkspaces
+      ? sessions.filter(s => !s.workspace || s.workspace === workspace)
+      : sessions;
+  const base = q ? byWorkspace.filter(s => s.name.toLowerCase().includes(q)) : byWorkspace;
   return base.slice().sort((a, b) => {
     const aPinned = !!a.pinned;
     const bPinned = !!b.pinned;
     if (aPinned !== bPinned) return aPinned ? -1 : 1;
     return b.savedAt - a.savedAt;
   });
-}, [sessions, search]);
+}, [sessions, search, workspace, showAllWorkspaces]);
 
   return (
     <div ref={containerRef} className="relative inline-block font-sans select-none">
@@ -255,6 +295,20 @@ const filteredSessions = useMemo(() => {
                 className="flex-1 bg-transparent text-[11px] text-pm-text outline-none placeholder:text-pm-text-muted"
               />
             </div>
+          )}
+
+          {/* Sessões de outro workspace ficam fora por padrão. O contador
+              existe pra que esconder não vire sumiço: você vê que há mais. */}
+          {foreignCount > 0 && (
+            <button
+              onClick={() => setShowAllWorkspaces(v => !v)}
+              className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[10.5px] text-pm-text-muted hover:text-pm-text hover:bg-pm-hover transition-colors cursor-pointer border-none bg-transparent text-left"
+            >
+              <Workflow size={11} className="shrink-0" />
+              {showAllWorkspaces
+                ? 'Showing every workspace — show only this one'
+                : `${foreignCount} session${foreignCount === 1 ? '' : 's'} from other workspaces — show`}
+            </button>
           )}
 
           {/* Lista de Sessões */}

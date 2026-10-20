@@ -14,6 +14,7 @@ import {
   canMoveDown,
   canMoveOut,
   findRequestsByName,
+  partitionExisting,
 } from './tree.utils';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 
@@ -370,3 +371,48 @@ describe('findRequestsByName', () => {
     expect(findRequestsByName(tree, 'Order', 'r2')).toEqual([]);
   });
 });
+
+describe('partitionExisting', () => {
+  // Gravar uma aba é achar o nó pelo id e trocá-lo. Id que não está na árvore
+  // faz a gravação virar no-op silencioso — e antes disto quem chamava
+  // limpava o "não salvo" e apagava o rascunho assim mesmo, perdendo a edição.
+  const arvore: CollectionItem[] = [
+    { id: 'c1', name: 'Coleção', type: 'folder', item: [
+      { id: 'f1', name: 'Pasta', type: 'folder', item: [
+        { id: 'r1', name: 'Request', type: 'request' },
+      ] },
+      { id: 'r2', name: 'Solta', type: 'request' },
+    ] },
+  ]
+
+  it('acha id em qualquer profundidade', () => {
+    expect(partitionExisting(arvore, ['r1', 'r2', 'f1', 'c1'])).toEqual({
+      present: ['r1', 'r2', 'f1', 'c1'],
+      missing: [],
+    })
+  })
+
+  it('separa o que não existe', () => {
+    expect(partitionExisting(arvore, ['r1', 'fantasma'])).toEqual({
+      present: ['r1'],
+      missing: ['fantasma'],
+    })
+  })
+
+  // É o caso da sessão restaurada de outro workspace: nenhum id bate.
+  it('árvore de outro workspace: tudo ausente', () => {
+    expect(partitionExisting(arvore, ['x', 'y']).missing).toEqual(['x', 'y'])
+  })
+
+  it('árvore vazia', () => {
+    expect(partitionExisting([], ['r1'])).toEqual({ present: [], missing: ['r1'] })
+  })
+
+  it('sem ids a verificar', () => {
+    expect(partitionExisting(arvore, [])).toEqual({ present: [], missing: [] })
+  })
+
+  it('preserva a ordem recebida', () => {
+    expect(partitionExisting(arvore, ['r2', 'r1']).present).toEqual(['r2', 'r1'])
+  })
+})

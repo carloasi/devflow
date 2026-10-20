@@ -321,6 +321,33 @@ export function collectAllIds(items: CollectionItem[]): Set<string> {
   return ids
 }
 
+/**
+ * Separa os ids que existem na árvore dos que não existem.
+ *
+ * Serve ao salvamento de abas. Gravar é procurar o nó pelo id e trocá-lo; um
+ * id que não está lá faz a busca não encontrar nada e devolver a árvore
+ * intacta — sem erro. Quem chama precisa saber disso para não dar a edição
+ * por salva, porque nesse caso ela não foi para lugar nenhum.
+ *
+ * Acontece de verdade em dois casos: restaurar uma sessão de abas salva
+ * noutro workspace, e excluir da árvore uma request que está aberta.
+ */
+export function partitionExisting(
+  items: CollectionItem[],
+  ids: string[]
+): { present: string[]; missing: string[] } {
+  const existing = collectAllIds(items)
+  const present: string[] = []
+  const missing: string[] = []
+
+  for (const id of ids) {
+    if (existing.has(id)) present.push(id)
+    else missing.push(id)
+  }
+
+  return { present, missing }
+}
+
 // Quantidade de requests (não conta pastas nem examples) dentro do nó.
 export function countRequests(item: CollectionItem): number {
   let total = 0

@@ -22,7 +22,7 @@ import { getMonacoThemeName, registerDevflowMonacoThemes } from '@/lib/monacoThe
 import {  ResizableHandle,  ResizablePanel,  ResizablePanelGroup} from "@/components/ui/resizable";
 import { useGroupRef } from "react-resizable-panels";
 import Sidebar from "@/components/collection-tree/Sidebar";
-import { addNode, renameNode, findNodeById, findParentId, patchNode, backfillExampleRequests, collectStarMarks, applyStarMarks, findRequestsByName, type NamedMatch } from "@/components/collection-tree/utils/tree.utils";
+import { addNode, renameNode, findNodeById, findParentId, patchNode, backfillExampleRequests, collectStarMarks, applyStarMarks, findRequestsByName, partitionExisting, type NamedMatch } from "@/components/collection-tree/utils/tree.utils";
 import { useAppZoom } from '@/lib/useAppZoom';
 import type { SnippetRequest } from '@/lib/codeSnippets';
 import { ZoomControl } from '@/components/ZoomControl';
@@ -96,6 +96,7 @@ import { EditableTitle } from './EditableTitle.';
 import EnvironmentSelector from './EnvironmentSelector';
 import { loadActiveEnvironmentId, saveActiveEnvironmentId } from '@/lib/activeEnvironmentStore';
 import { buildEnvMap } from '@/lib/envMap';
+import { stripTabsForSession, sameSessionTabs } from '@/lib/tabSessions';
 import { safeSetItem, sweepDeadKeys } from '@/lib/safeStorage';
 import { loadWorkspaceLocalData, saveWorkspaceCollections, saveWorkspaceEnvironments } from '@/storage/localSyncStore';
 import {
@@ -1554,7 +1555,16 @@ const handleUpdateCurrentSession = useCallback(() => {
 
   if (!currentSessionId) return;
   setTabSessions(prev => prev.map(s =>
-    s.id === currentSessionId ? { ...s, tabs, activeTabId, savedAt: Date.now() } : s
+    s.id === currentSessionId
+      ? {
+          ...s,
+          tabs: stripTabsForSession(tabs),
+          activeTabId,
+          groups: liveTabGroups,
+          savedAt: Date.now(),
+          workspace: selectedWorkspace,
+        }
+      : s
   ));
 }, [currentSessionId, tabs, activeTabId]);
 
@@ -1571,6 +1581,11 @@ const handleLoadSession = useCallback((sessionId: string) => {
   // trocar de grupo só deve carregar o alvo, nunca gravar por cima da origem.
   setTabs(target.tabs);
   setActiveTabId(target.activeTabId);
+  // Os grupos voltam junto. Sem isto, restaurar uma sessão de doze abas
+  // devolvia as doze soltas — a organização montada à mão sumia. Sessão
+  // anterior a este campo não tem grupos, e aí a barra fica sem eles, como
+  // antes.
+  setTabGroups(target.groups ?? []);
   setCurrentSessionId(target.id);
 }, [tabSessions]);
 
@@ -1856,17 +1871,47 @@ const updateActiveTab = useCallback((updates: Partial<Tab>) => {
 const saveTabsList = useCallback(async (tabsToSave: Tab[]) => {
   if (tabsToSave.length === 0) return;
 
+  // Uma aba cujo id não está na árvore deste workspace não tem onde ser
+  // gravada: updateItemInTree procura o nó, não acha, e devolve a árvore
+  // intacta — sem erro. Antes seguíamos assim mesmo, limpando o "não salvo"
+  // e apagando o rascunho: a edição sumia das duas pontas, em silêncio.
+  //
+  // Não é hipótese. Acontece ao restaurar uma sessão de abas salva noutro
+  // workspace (sessões não guardam de qual vieram) e ao excluir da árvore uma
+  // request que está aberta.
+  const { missing } = partitionExisting(collections, tabsToSave.map(t => t.id));
+  const orphanIds = new Set(missing);
+  const savable = tabsToSave.filter(t => !orphanIds.has(t.id));
+
+  if (orphanIds.size > 0) {
+    const orphans = tabsToSave.filter(t => orphanIds.has(t.id));
+    const names = orphans.map(t => `"${t.name}"`).join(', ');
+    toast.error(
+      orphans.length === 1
+        ? `Can't save ${names}`
+        : `Can't save ${orphans.length} tabs`,
+      {
+        description:
+          'They no longer exist in this workspace. Your changes are still here — switch to the workspace they belong to, or save them into a new request.',
+        duration: 8000,
+      }
+    );
+  }
+
+  if (savable.length === 0) return;
+
   let updatedCollections = collections;
-  tabsToSave.forEach(t => {
+  savable.forEach(t => {
     updatedCollections = updateItemInTree(updatedCollections, t.id, t);
   });
 
   setCollections(updatedCollections);
   await saveWorkspaceCollections(selectedWorkspaceRef.current, updatedCollections);
 
-  const savedIds = new Set(tabsToSave.map(t => t.id));
+  // Só o que realmente foi gravado perde o "não salvo" e o rascunho.
+  const savedIds = new Set(savable.map(t => t.id));
   setTabs(prev => prev.map(t => savedIds.has(t.id) ? { ...t, isDirty: false } : t));
-  removeTabDrafts(tabsToSave.map(t => t.id));
+  removeTabDrafts(savable.map(t => t.id));
 
   // Save agora é SÓ local — o push virou ação explícita (botão de push do
   // workspace ou o Push do painel de sync). Antes cada Ctrl+S disparava um
@@ -2018,9 +2063,16 @@ const handleSaveActiveTab = useCallback(() => {
     const newSession: TabSession = {
       id: crypto.randomUUID(),
       name: name.trim(),
-      tabs: keepTabs ? tabs : [],
+      // Sem resposta: a sessão guarda o conjunto de trabalho, não o retrato
+      // de uma execução (ver lib/tabSessions.ts).
+      tabs: keepTabs ? stripTabsForSession(tabs) : [],
       activeTabId: keepTabs ? activeTabId : null,
+      groups: keepTabs ? liveTabGroups : [],
       savedAt: Date.now(),
+      // De onde a sessão veio. Abas apontam para requests por id, e id só vale
+      // dentro de um workspace — sem isto não há como avisar que restaurar
+      // noutro lugar abre abas órfãs.
+      workspace: selectedWorkspace,
     };
     setTabSessions(prev => [newSession, ...prev]);
     setCurrentSessionId(newSession.id);
@@ -3806,14 +3858,10 @@ const handleToggleResponseBodyCollapse = useCallback(() => {
   const session = tabSessions.find(s => s.id === currentSessionId);
   if (!session) return false;
   if (session.activeTabId !== activeTabId) return true;
-  if (session.tabs.length !== tabs.length) return true;
 
-  const strip = (t: Tab) => {
-    const { response, responseTime, testResults, ...rest } = t;
-    return rest;
-  };
-
-  return JSON.stringify(tabs.map(strip)) !== JSON.stringify(session.tabs.map(strip));
+  // A MESMA forma que a gravação usa. Quando as duas discordavam, o arquivo
+  // inchava com respostas que a comparação ignorava.
+  return !sameSessionTabs(tabs, session.tabs);
   }, [currentSessionId, tabSessions, tabs, activeTabId]);
 
   const handleTogglePinSession = useCallback((sessionId: string) => {
@@ -4575,6 +4623,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
 
             <TabSessionSelector
               sessions={tabSessions}
+              workspace={selectedWorkspace}
               currentSessionId={currentSessionId}
               isCurrentSessionDirty={isCurrentSessionDirty}
               onUpdateCurrentSession={handleUpdateCurrentSession}
