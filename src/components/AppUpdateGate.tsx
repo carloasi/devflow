@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { ShieldAlert, RefreshCw, ExternalLink } from 'lucide-react'
 import { AppStatus, compareVersions, fetchAppStatus, reportUsage } from '@/lib/appStatus'
+import { safeSetItem } from '@/lib/safeStorage';
 
 interface Props {
   children: React.ReactNode
@@ -112,7 +113,10 @@ export function AppUpdateGate({ children }: Props) {
             }
           : undefined,
         onDismiss: () => {
-          localStorage.setItem(DISMISSED_VERSION_KEY, status.latestVersion!)
+          // Sem o `!`: latestVersion pode não vir, e gravar undefined virava a
+          // string "undefined" — que nunca casa com versão nenhuma, então o
+          // aviso voltaria para sempre. Sem versão, não há o que dispensar.
+          if (status.latestVersion) safeSetItem(DISMISSED_VERSION_KEY, status.latestVersion)
         },
       })
     }

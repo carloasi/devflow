@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MCP_TOOLS, McpContext, executeMcpTool } from './mcpTools';
 import { getSecret, saveSecret } from '@/lib/secureStorage';
+import { safeSetItem } from '@/lib/safeStorage';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Camada JSON-RPC do servidor MCP. O Rust (mcp_server.rs) só transporta:
@@ -247,7 +248,9 @@ export function useMcpServer(getContext: () => McpContext): UseMcpServerResult {
     }
     setEnabled(false);
     setPort(null);
-    localStorage.setItem(ENABLED_KEY, 'false');
+    // O servidor já parou; não lembrar disso no disco é um detalhe, derrubar
+    // a janela ao desligá-lo não é.
+    safeSetItem(ENABLED_KEY, 'false');
   }, []);
 
   const regenerateToken = useCallback(async () => {

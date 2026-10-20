@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Settings, LogOut, Copy, Check, ChevronDown, ImagePlus, RotateCcw } from "lucide-react";
 import { AVATAR_SIZE, squareCrop, validateAvatarFile, ACCEPTED_AVATAR_TYPES } from "@/lib/avatarImage";
 import { AVATAR_PRESETS, avatarDataUrl, presetIdOf, type AvatarPreset } from "@/lib/avatarPresets";
+import { safeSetItem } from '@/lib/safeStorage';
 
 const STORAGE_KEY = "app_win_username";
 const PHOTO_STORAGE_KEY = "app_win_photo";
@@ -193,9 +194,15 @@ export default function UserBadge({ onOpenSettings }: UserBadgeProps) {
 
   const handlePickPreset = (preset: AvatarPreset) => {
     const dataUrl = avatarDataUrl(preset);
-    localStorage.setItem(CUSTOM_PHOTO_KEY, dataUrl);
+    // O irmão handleUpload já gravava dentro de try/catch; aqui faltava, e a
+    // mesma escrita derrubava o app num clique quando a cota estava cheia.
+    // O avatar troca na tela de qualquer forma — só não sobrevive ao restart.
+    if (!safeSetItem(CUSTOM_PHOTO_KEY, dataUrl)) {
+      setAvatarError("Not enough local storage to remember this avatar.");
+    } else {
+      setAvatarError(null);
+    }
     setCustomPhoto(dataUrl);
-    setAvatarError(null);
     // O menu NÃO fecha: trocar de avatar é escolha visual, e fechar a cada
     // clique obrigaria a reabrir pra comparar com outro.
   };

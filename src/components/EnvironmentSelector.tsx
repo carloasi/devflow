@@ -47,6 +47,7 @@ import {
 } from '@dnd-kit/sortable'
 import { restrictToVerticalAxis, restrictToParentElement } from '@dnd-kit/modifiers'
 import { CSS } from '@dnd-kit/utilities'
+import { safeSetItem } from '@/lib/safeStorage';
 
 
 const OBF_PREFIX = 'OBFv1$'
@@ -257,9 +258,13 @@ useEffect(() => {
 // sobrescrevendo o valor certo que já estava salvo ali. Usando a ref, o
 // efeito só roda quando selectedEnvId de fato muda, e nesse ponto a chave
 // (lida via ref) já está correta pro workspace atual.
+// safeSetItem: isto roda a cada troca de environment, de dentro de um
+// efeito. Com a cota cheia o setItem cru lançava, e lançar num efeito sobe
+// pro React, que desmonta a árvore — selecionar um environment derrubava a
+// janela. Lembrar a última escolha é conveniência; nunca vale a tela.
 useEffect(() => {
   if (selectedEnvId) {
-    localStorage.setItem(lastSelectedKeyRef.current, selectedEnvId)
+    safeSetItem(lastSelectedKeyRef.current, selectedEnvId)
   }
 }, [selectedEnvId])
 
