@@ -86,3 +86,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 See [LICENSE](LICENSE).
+
+## Trademarks
+
+Postman is a trademark of Postman, Inc. DevFlow is not affiliated with,
+endorsed by, or sponsored by Postman, Inc. The name is used here only to
+describe compatibility with the Postman Collection Format, and to explain
+where DevFlow's behaviour differs from it.
+
+Other product and company names mentioned in this documentation are the
+trademarks of their respective owners.
