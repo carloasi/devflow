@@ -1,109 +1,153 @@
-# Teste de Carga (Load Test)
+# Load testing
 
-O DevFlow tem um motor de teste de carga embutido, sem depender de ferramentas externas (k6, JMeter, etc). Ele roda direto no backend Rust do app, com múltiplos Virtual Users (VUs) simulados em paralelo, e suporta desde um teste simples numa única request até um fluxo multi-step com correlação de dados entre passos.
+DevFlow has a built-in load test engine — no k6, no JMeter. It runs in the
+app's Rust backend with multiple virtual users (VUs) in parallel, from a single
+request up to a multi-step flow with data correlated between steps.
 
-## Como abrir
+## Opening it
 
-Clique com o botão direito numa **request** ou numa **pasta** na árvore de collections e escolha **Load Test**. Se for uma pasta, o teste roda o **fluxo completo** — todas as requests da pasta, na ordem em que aparecem na árvore (a mesma ordem usada pelo Collection Runner).
+Right-click a **request** or a **folder** in the tree and choose **Load Test**.
+A folder runs the **whole flow** — every request in it, in tree order, the same
+order the Collection Runner uses.
 
-## Modos de execução
+## Execution modes
 
-O painel tem três modos, escolhidos no topo:
+Chosen at the top of the panel:
 
-- **Duration** — um número fixo de VUs simultâneos, rodando em loop, por um tempo determinado (em segundos).
-- **Iterations/VU** — um número fixo de VUs, cada um executando um número fixo de iterações do fluxo, depois parando.
-- **Ramp (stages)** — uma sequência de estágios, cada um definindo um número-alvo de VUs e por quantos segundos manter (ou migrar até) esse número. Útil para simular crescimento gradual de carga (ramp-up), um platô, e queda (ramp-down). Estágios são editáveis (adicionar/remover/reordenar não é suportado, mas dá pra ajustar VUs e duração de cada um).
+- **Duration** — a fixed number of concurrent VUs, looping, for a set number of
+  seconds.
+- **Iterations/VU** — a fixed number of VUs, each running a fixed number of
+  iterations of the flow, then stopping.
+- **Ramp (stages)** — a sequence of stages, each one a target VU count and how
+  long to hold or climb to it. For gradual ramp-up, a plateau and ramp-down.
+  Stage VUs and duration are editable; adding, removing and reordering stages
+  is not supported yet.
 
-Limites do motor: até **2000 VUs**, duração máxima de **3600s** por execução, até **100.000 iterações por VU**, até **20 estágios** num ramp, até **30 requests** no fluxo, até **10 thresholds**.
+Engine limits: **2,000 VUs**, **3,600 s** per run, **100,000 iterations per
+VU**, **20 ramp stages**, **30 requests** in a flow, **10 thresholds**.
 
-## Ambiente (variáveis)
+## Environment
 
-No seletor **Environment** do painel, escolha qual Environment do app serve de base para as variáveis `{{...}}` usadas nas URLs, headers, body e auth das requests do fluxo. Cada VU recebe sua própria cópia desse ambiente (`envMap`) no início do teste — variáveis nunca vazam entre VUs.
+The **Environment** selector picks which environment provides the `{{...}}`
+values used in URLs, headers, bodies and auth. **Each VU gets its own copy** at
+the start of the run — variables never leak between VUs.
 
-## Correlação entre requests (post-response scripts)
+## Correlating requests (post-response scripts)
 
-Quando o alvo é um fluxo com mais de uma request, cada request pode ter um **post-response script** (definido na aba Scripts da própria request, igual ao fluxo normal do app). Esse script roda depois da resposta chegar, dentro do mesmo VU, e pode ler dados da resposta e gravar no ambiente daquele VU para as próximas requests do fluxo usarem — por exemplo, extrair um token de login e usá-lo como Bearer token na request seguinte.
+When the target is a flow with more than one request, each request can have a
+**post-response script** — the same Scripts tab as normal use. It runs after
+the response arrives, inside that VU, and can read the response and write to
+that VU's environment for the following steps. Extracting a login token and
+using it as a bearer token in the next request is the typical case.
 
-A API disponível dentro do script (motor QuickJS, isolado por VU) é enxuta, focada só em correlação:
+The API inside the sandbox (QuickJS, isolated per VU) is deliberately small —
+correlation only:
 
 ```js
-pm.environment.get('chave')
-pm.environment.set('chave', valor)
-pm.environment.has('chave')
-pm.environment.unset('chave')
-// pm.variables, pm.globals e pm.collectionVariables funcionam como aliases do mesmo ambiente
+pm.environment.get('key')
+pm.environment.set('key', value)
+pm.environment.has('key')
+pm.environment.unset('key')
+// pm.variables, pm.globals and pm.collectionVariables are aliases of the same map
 
-pm.response.code        // status HTTP (number)
-pm.response.status      // idem
+pm.response.code        // HTTP status (number)
+pm.response.status      // alias
 pm.response.responseTime
-pm.response.text()      // corpo como string
-pm.response.json()      // corpo parseado como JSON
-pm.response.headers.get('nome-do-header')
-pm.response.headers.has('nome-do-header')
+pm.response.text()      // body as a string
+pm.response.json()      // body parsed as JSON
+pm.response.headers.get('header-name')
+pm.response.headers.has('header-name')
 ```
 
-Não há `pm.test`/`pm.expect` no teste de carga (isso existe no envio normal de request e no Collection Runner, não aqui) — o load test não faz asserções, só correlação. Um erro de script não aborta o teste: ele é contado em **Script errors** no resumo, sinalizando que a correlação pode ter quebrado sem interromper a carga.
+**There is no `pm.test` or `pm.expect` here** — those exist in normal sends and
+in the Collection Runner. A load test measures; it does not assert.
 
-## Autenticação
+A script error does **not** abort the run. It is counted under **Script
+errors** in the summary, so broken correlation is visible without stopping the
+load.
 
-Cada request do fluxo carrega seu próprio tipo de auth: `none`, `bearer`, `basic` ou `apikey`, resolvido com as variáveis do ambiente daquele VU antes de cada chamada.
+## Authentication
 
-## Thresholds (critérios de pass/fail)
+Each request in the flow carries its own auth type — `none`, `bearer`, `basic`
+or `apikey` — resolved against that VU's environment before every call.
 
-Clique em **Thresholds** para configurar condições que definem se o teste "passou" ou "falhou" no geral. Cada threshold é `métrica` + `operador` + `valor`:
+## Thresholds
 
-- Métricas: `p50`, `p90`, `p95`, `p99`, `avg`, `min`, `max` (todas em ms), `errorRate` (%), `rps` (req/s).
-- Operadores: `<`, `<=`, `>`, `>=`.
+Click **Thresholds** to set pass/fail criteria for the run. Each one is
+`metric` + `operator` + `value`:
 
-Exemplo: `p95 < 500` falha o teste se o percentil 95 de latência passar de 500ms. O resultado de cada threshold (passou/falhou + valor real medido) aparece no resumo, no histórico e no relatório PDF.
+- Metrics: `p50`, `p90`, `p95`, `p99`, `avg`, `min`, `max` (all in ms),
+  `errorRate` (%), `rps` (requests/second)
+- Operators: `<`, `<=`, `>`, `>=`
 
-## Métricas coletadas
+Example: `p95 < 500` fails the run if the 95th percentile latency goes above
+500 ms. Each threshold's result — pass/fail plus the measured value — appears
+in the summary, the history and the PDF report.
 
-Ao vivo (durante a execução) e no resumo final:
+## Metrics
 
-- Requests totais, OK e falhas.
-- RPS atual (ao vivo) e RPS médio (resumo).
-- Latência: min, avg, p50, p90, p95, p99, max (ms).
-- Breakdown por status code (incluindo `error` para falhas de rede/timeout).
-- Contagem de script errors.
-- VUs ativos no momento (ao vivo).
+Live during the run and in the final summary:
 
-Durante a execução, três gráficos em tempo real mostram RPS, latência (avg/p95/p99) e, no modo Ramp, VUs ativos ao longo do tempo.
+- Total, successful and failed requests
+- Current RPS (live) and average RPS (summary)
+- Latency: min, avg, p50, p90, p95, p99, max (ms)
+- Breakdown by status code, including `error` for network failures and timeouts
+- Script error count
+- Active VUs (live)
+
+Three real-time charts show RPS, latency (avg/p95/p99) and — in Ramp mode —
+active VUs over time.
 
 ## Timeout
 
-Cada request individual tem um timeout de **30 segundos** por padrão (configurável via `timeoutSecs` na config, embora a UI atual não exponha esse campo diretamente).
+Each individual request has a **30 second** timeout by default. It is
+configurable through `timeoutSecs` in the config, though the UI does not expose
+the field yet.
 
-## Histórico de execuções
+## Run history
 
-Toda execução concluída (ou parada manualmente) fica salva no histórico daquele request/pasta, com data/hora, modo, config usada e o resumo de métricas. Acesse pelo botão **History** no topo do painel.
+Every completed run — or one you stopped manually — is saved against that
+request or folder, with timestamp, mode, the config used and the metric
+summary. Reach it through **History** at the top of the panel.
 
-No histórico dá para:
+From there you can:
 
-- **Ver** uma execução antiga — mostra as métricas agregadas, mas não os gráficos ao longo do tempo (só o resumo final é persistido, não a série temporal completa).
-- **Exportar** como JSON ou como **relatório em PDF**.
-- **Excluir** um registro.
+- **View** an old run — the aggregate metrics, but not the time-series charts.
+  Only the final summary is persisted, not the full series.
+- **Export** as JSON or as a **PDF report**
+- **Delete** a record
 
-São mantidos até **20 registros** por item — os mais antigos são descartados automaticamente.
+Up to **20 records** per item are kept; older ones are dropped automatically.
 
-## Exportar relatório (JSON / PDF)
+## Exporting a report
 
-Com uma execução ao vivo terminada ou uma execução do histórico aberta, os botões **JSON** e **PDF** no topo do painel exportam o resultado:
+With a finished live run or a history entry open, the **JSON** and **PDF**
+buttons at the top export it:
 
-- **JSON** — o registro completo (config + resumo), útil para reprocessar ou versionar.
-- **PDF** — um relatório formatado com cabeçalho, resumo (requests, RPS, taxa de erro, script errors), tabela de latência, thresholds com pass/fail colorido, breakdown de status codes e a lista de requests do fluxo. Pronto para compartilhar com o time ou anexar numa evidência de teste.
+- **JSON** — the complete record (config + summary), for reprocessing or
+  versioning.
+- **PDF** — a formatted report: header, summary (requests, RPS, error rate,
+  script errors), latency table, thresholds with coloured pass/fail, status
+  code breakdown and the list of requests in the flow. Ready to share with the
+  team or attach as test evidence.
 
-## Parar um teste em andamento
+## Stopping a run
 
-O botão **Stop** interrompe o teste imediatamente — os VUs ainda em execução terminam a iteração atual e param. O resumo parcial (até o momento da parada) é salvo no histórico normalmente.
+**Stop** interrupts immediately — VUs mid-iteration finish the current one and
+stop. The partial summary up to that point is saved to history normally.
 
-## Onde fica o código
+## Running one from the agent
 
-| Peça | Arquivo |
+`run_load_test` exposes the same engine over MCP, blocking until the run
+finishes and returning the final metrics. See [Claude agent](CLAUDE_AGENT.md).
+
+## Where the code is
+
+| Piece | File |
 |---|---|
-| Motor de execução (Rust, VUs + QuickJS) | `src-tauri/src/load_test.rs` |
-| Tipos compartilhados (TS) | `src/components/LoadTest/types.ts` |
-| Painel principal | `src/components/LoadTest/LoadTestPanel.tsx` |
-| Conversão collection → fluxo | `src/components/LoadTest/buildFlowSteps.ts` |
-| Histórico (persistência) | `src/components/LoadTest/loadTestHistory.ts` |
-| Relatório PDF | `src/components/LoadTest/loadTestPdfReport.ts` |
+| Engine (Rust, VUs + QuickJS) | `src-tauri/src/load_test.rs` |
+| Shared types (TS) | `src/components/LoadTest/types.ts` |
+| Main panel | `src/components/LoadTest/LoadTestPanel.tsx` |
+| Collection → flow conversion | `src/components/LoadTest/buildFlowSteps.ts` |
+| History persistence | `src/components/LoadTest/loadTestHistory.ts` |
+| PDF report | `src/components/LoadTest/loadTestPdfReport.ts` |

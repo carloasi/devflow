@@ -1,168 +1,245 @@
-# Usando o Claude com o DevFlow
+# Using Claude with DevFlow
 
-Há duas formas de trabalhar com o Claude aqui, e elas servem a coisas diferentes:
+There are two ways to work with Claude here, and they serve different things:
 
-- **O painel do Claude**, dentro do app — para perguntar sobre as suas requests, montar fluxos e rodar chamadas sem sair da tela.
-- **O Claude Code no terminal**, conectado ao DevFlow por um servidor MCP — para quando o trabalho é no código, mas você quer que o agente dispare as requests que já estão configuradas aqui.
+- **The Claude panel**, inside the app — to ask about your requests, build
+  flows and run calls without leaving the screen.
+- **Claude Code in the terminal**, connected to DevFlow through an MCP server —
+  for when the work is in the code, but you want the agent to fire the requests
+  already configured here.
 
-As duas usam a **mesma CLI** (`claude`) por baixo. O que muda é quem a invoca e o que ela enxerga.
+Both use the **same CLI** (`claude`) underneath. What changes is who invokes it
+and what it can see.
 
 ---
 
-## 1. O painel do Claude
+## 1. The Claude panel
 
-### Onde fica
+### Where it is
 
-Ícone do Claude na barra lateral. O painel abre ao lado, com o histórico da conversa.
+The Claude icon in the sidebar. The panel opens beside the app, with the
+conversation history.
 
-### Entrando
+### Signing in
 
-Clique no ícone de chave 🔑 no topo do painel (ou no botão **Fix sign-in / API key**, que aparece junto de um erro de credencial). Há três caminhos:
+Click the key icon at the top of the panel, or the **Fix sign-in / API key**
+button that appears next to a credential error. Three routes:
 
-| Opção | O que usa | Quando faz sentido |
+| Option | Uses | When it makes sense |
 |---|---|---|
-| **Claude subscription** | A sua assinatura do Claude | O caso normal. Não consome créditos de API. |
-| **Anthropic Console** | Créditos de API, cobrados por uso | Se você trabalha com chave de organização |
-| **API key** | Uma chave colada no campo | Chave avulsa, sem passar pelo login |
+| **Claude subscription** | Your Claude subscription | The normal case. Does not consume API credits. |
+| **Anthropic Console** | API credits, billed per use | If you work with an organisation key |
+| **API key** | A key pasted into the field | A standalone key, without logging in |
 
-Os dois primeiros abrem **uma janela de terminal de verdade** rodando `claude auth login`. Isso é de propósito: o fluxo é interativo — abre o navegador e pode pedir que você cole um código de volta. Rodando escondido, ele ficaria travado esperando uma entrada que ninguém consegue digitar.
+The first two open **a real terminal window** running `claude auth login`. That
+is deliberate: the flow is interactive — it opens a browser and may ask you to
+paste a code back. Run hidden, it would hang waiting for input nobody can type.
 
-### O perfil separado (importante)
+### The separate profile (important)
 
-Por padrão, a caixa **"Keep a separate login for DevFlow"** vem marcada. Com ela, o app aponta a CLI para um diretório de configuração próprio:
+The **"Keep a separate login for DevFlow"** box is checked by default. With it,
+the app points the CLI at its own config directory:
 
 ```
 %APPDATA%\com.DevFlow.dev\claude\
 ```
 
-em vez do `~/.claude` global. O motivo: logar pelo painel não pode derrubar a conta que você já usa no terminal. Com perfis separados, dá para usar a conta pessoal aqui e manter a outra lá fora.
+instead of the global `~/.claude`. The reason: signing in through the panel
+must not knock out the account you already use in the terminal. With separate
+profiles you can use a personal account here and keep the other one out there.
 
-**O efeito colateral que confunde:** se você já está logado no `claude` do terminal, o painel ainda vai dizer **"not logged in"** — e corretamente, porque está olhando outro diretório. Para reaproveitar aquela conta, **desmarque** a caixa. Aí o perfil passa a enxergar também os seus settings globais, servidores MCP e `CLAUDE.md`.
+**The confusing side effect:** if you are already signed in to `claude` in the
+terminal, the panel will still say **"not logged in"** — correctly, because it
+is looking at a different directory. To reuse that account, **uncheck** the
+box. The profile then also sees your global settings, MCP servers and
+`CLAUDE.md`.
 
-Para conferir se o login funcionou, o arquivo `.claude.json` do perfil passa a ter `oauthAccount`, `emailAddress` e `organizationName`. A credencial em si fica no `.credentials.json` ao lado — esse não deve ser copiado para lugar nenhum.
+To check whether the login worked, the profile's `.claude.json` gains
+`oauthAccount`, `emailAddress` and `organizationName`. The credential itself
+lives in `.credentials.json` beside it — that one should not be copied
+anywhere.
 
-A credencial é **por máquina e por pessoa**. Não há nada que você provisione para um colega: ele precisa da assinatura dele, na máquina dele.
+The credential is **per machine and per person**. There is nothing you can
+provision for a colleague: they need their own subscription, on their own
+machine.
 
-### O que o painel enxerga
+### What the panel can see
 
-Quando o servidor MCP está ligado (ver seção 2), o painel **passa a configuração dele automaticamente** para a CLI. Você não precisa rodar `claude mcp add` para usar o painel — ele já abre com as ferramentas do DevFlow disponíveis, limitadas ao escopo `mcp__devflow`.
+When the MCP server is on (section 2), the panel **passes its configuration to
+the CLI automatically**. You do not need to run `claude mcp add` to use the
+panel — it opens with the DevFlow tools already available, scoped to
+`mcp__devflow`.
 
-Também dá para definir uma **pasta de trabalho**: é o diretório onde a CLI roda, e portanto o que ela consegue ler. Sem isso, o agente responde sobre as suas collections, mas não sobre o seu código.
+You can also set a **working directory**: the folder the CLI runs in, and
+therefore what it can read. Without it, the agent answers about your
+collections but not about your code.
 
-### Um limite que vale conhecer
+### A limit worth knowing
 
-O painel roda a CLI em modo `dontAsk`: **não existe prompt de permissão**. Nada pode ficar esperando alguém responder dentro de um painel de chat, então o que não está pré-aprovado é negado e a execução segue. Na prática, o agente do painel faz o que as ferramentas do DevFlow permitem, e não mais que isso.
+The panel runs the CLI in `dontAsk` mode: **there is no permission prompt**.
+Nothing can sit waiting for someone to answer inside a chat panel, so anything
+not pre-approved is denied and execution continues. In practice the panel's
+agent does what the DevFlow tools allow, and no more.
 
 ---
 
-## 2. O Claude Code no terminal
+## 2. Claude Code in the terminal
 
-Aqui o Claude roda fora do app, e o DevFlow entra como **servidor MCP**: a CLI ganha ferramentas para listar e executar as suas requests.
+Here Claude runs outside the app, and DevFlow joins as an **MCP server**: the
+CLI gains tools to list and execute your requests.
 
-### Ligando o servidor
+### Turning the server on
 
 **Settings → Claude Code (MCP) → Turn on.**
 
-O servidor escuta **só em 127.0.0.1**, e **toda chamada exige o token** mostrado no painel. Isso não é formalidade: enquanto está ligado, quem tiver o token pode disparar as suas requests com as credenciais dos seus environments. Desligue quando não estiver usando.
+The server listens **on 127.0.0.1 only**, and **every call requires the token**
+shown in the panel. That is not a formality: while it is on, anyone with the
+token can fire your requests with your environments' credentials. Turn it off
+when you are not using it.
 
-### Conectando
+### Connecting
 
-O painel mostra o comando pronto. Rode **uma vez** no terminal:
+The panel shows the command ready to copy. Run it **once**:
 
 ```bash
-claude mcp add --transport http devflow http://127.0.0.1:60401/mcp --header "Authorization: Bearer SEU_TOKEN"
+claude mcp add --transport http devflow http://127.0.0.1:60401/mcp --header "Authorization: Bearer YOUR_TOKEN"
 ```
 
-A porta é sorteada pelo sistema na primeira vez e depois **fica guardada**, justamente para que esse comando continue valendo entre reinícios.
+The port is assigned by the system the first time and then **remembered**,
+precisely so this command keeps working across restarts.
 
-> **Se a porta mudar:** o app avisa no painel e pede para rodar o comando de novo. Isso acontece no Windows porque o Hyper-V/WSL reserva faixas de portas altas e as sorteia de novo a cada boot — uma porta que o próprio sistema entregou ontem pode ser recusada hoje. Quando isso ocorre, o DevFlow cai para outra porta em vez de simplesmente não ligar.
+> **If the port changes:** the app warns in the panel and asks you to run the
+> command again. This happens on Windows because Hyper-V/WSL reserves ranges of
+> high ports and re-draws them at every boot — a port the system handed out
+> yesterday can be refused today. When that happens, DevFlow falls back to
+> another port instead of simply failing to start.
 
-**Regenerar o token** invalida o que você já configurou: quem estava conectado passa a receber 401 até rodar o comando novamente. É esse o propósito do botão.
+**Regenerating the token** invalidates what you already configured: anyone
+connected starts getting 401 until they run the command again. That is the
+button's purpose.
 
-### O token
+### The token
 
-Fica no armazenamento seguro do sistema (o mesmo do token do GitHub), não em `localStorage`. Ele autoriza disparar qualquer request salva com os seus environments de verdade, então vale pelo menos o mesmo cuidado de uma senha.
+It lives in the system's secure storage — the same place as the GitHub token —
+not in `localStorage`. It authorises firing any saved request with your real
+environments, so it deserves at least the care of a password.
 
 ---
 
-## 3. O que o agente consegue fazer
+## 3. What the agent can do
 
-As ferramentas são as mesmas nos dois modos.
+The tools are the same in both modes.
 
-**Ler a árvore**
-`list_requests` · `list_folders` · `get_request` · `search_requests` · `list_examples` · `get_example` · `list_environments`
+**Read the tree**
+`list_requests` · `list_folders` · `get_request` · `search_requests` ·
+`list_examples` · `get_example` · `list_environments`
 
-**Executar**
-`run_request` · `run_collection` · `run_load_test` · `list_load_tests` · `get_oauth2_token`
+**Execute**
+`run_request` · `run_collection` · `run_load_test` · `list_load_tests` ·
+`get_oauth2_token`
 
-**Ler o que já aconteceu**
+**Read what already happened**
 `get_active_request` · `get_response` · `get_console_logs` · `get_last_run`
 
-`get_last_run` devolve o resultado da última execução do Collection Runner — status, asserções e **corpo da resposta** de cada request. É o que evita o agente pedir que você rode de novo um fluxo que acabou de rodar: uma request executada pelo Runner não abre aba, então o `get_response` não a encontra.
+`get_last_run` returns the result of the last Collection Runner run — status,
+assertions and the **response body** of each request. It is what stops the
+agent asking you to re-run a flow that just ran: a request executed by the
+Runner does not open a tab, so `get_response` cannot find it.
 
-**Escrever**
-`create_folder` · `create_request` · `duplicate_request` · `rename_item` · `set_request_script`
+**Write**
+`create_folder` · `create_request` · `duplicate_request` · `rename_item` ·
+`set_request_script`
 
-**Referência**
-`get_script_api` — a API de scripts (`pm.*`) disponível. Vale chamar antes de pedir que ele escreva um script.
+**Reference**
+`get_script_api` — the `pm.*` API available in scripts. Worth calling before
+asking it to write one. See [Scripting](SCRIPTING.md).
 
-### Execução é a mesma do botão Send
+### Execution is the same as the Send button
 
-`run_request` e `run_collection` passam exatamente pelo mesmo caminho do botão Send: mesma resolução de `{{variáveis}}`, mesmo auth, mesma sanitização de body, mesmos scripts. O que o agente dispara não é uma simulação.
+`run_request` and `run_collection` go through exactly the same path as Send:
+same `{{variable}}` resolution, same auth, same body sanitisation, same
+scripts. What the agent fires is not a simulation.
 
-### Passos de token (MSAL / OAuth2)
+### Token steps (MSAL / OAuth2)
 
-Uma request com Authorization **OAuth 2.0** e **URL vazia** não está quebrada: é assim que o app guarda uma configuração OAuth2. O token vem do fluxo de autorização — o botão **Get new access token**, ou o `get_oauth2_token` — e cai na variável de ambiente para a qual o campo *Access Token* aponta. Não há o que enviar, por isso não há URL.
+A request with **OAuth 2.0** authorization and an **empty URL** is not broken:
+that is how the app stores an OAuth2 configuration. The token comes from the
+authorization flow — the **Get new access token** button, or `get_oauth2_token`
+— and lands in the environment variable the *Access Token* field points at.
+There is nothing to send, which is why there is no URL.
 
-O `get_request` marca essas requests com `tokenStep: true` e explica o que fazer, e o `run_request` recusa enviá-las apontando a ferramenta certa. Sem isso o agente lê "URL vazia", conclui que a request está defeituosa e sugere preencher ou apagar o passo — o que quebraria todo o fluxo que depende da variável.
+`get_request` marks these with `tokenStep: true` and explains what to do, and
+`run_request` refuses to send them, pointing at the right tool. Without that
+the agent reads "empty URL", concludes the request is defective, and suggests
+filling it in or deleting the step — which would break every flow that depends
+on the variable.
 
-No **Collection Runner** o passo é executado como obtenção de token, e não como envio: ele reaproveita o token que já está na variável enquanto restarem mais de 5 minutos de validade, e só abre a janela de login quando precisa renovar. O token vai para o ambiente daquela execução, então os passos seguintes já o encontram.
+In the **Collection Runner** the step is executed as a token fetch rather than
+a send: it reuses the token already in the variable while more than 5 minutes
+of validity remain, and opens the login window only when a refresh is needed.
+The token goes into that run's environment, so the following steps find it.
 
-### Segredos saem mascarados
+### Secrets come back masked
 
-`get_request` **redige** o que parece credencial: token, senha, `client_secret` do OAuth2, e headers cujo nome sugira segredo. Referência a variável (`{{token}}`) é preservada de propósito — ela não é segredo, e é justamente o que o agente precisa ver para entender de onde o valor sai.
+`get_request` **redacts** what looks like a credential: tokens, passwords, the
+OAuth2 `client_secret`, and headers whose name suggests a secret. A variable
+reference (`{{token}}`) is preserved on purpose — it is not a secret, and it is
+exactly what the agent needs to see to understand where the value comes from.
 
-Por isso existe o **`duplicate_request`**: copiar uma request com OAuth2 lendo e recriando produziria uma cópia sem as credenciais, silenciosamente quebrada. A duplicação acontece dentro do app, onde os valores reais estão, e eles nunca passam pelo modelo.
+That is why **`duplicate_request`** exists: copying an OAuth2 request by
+reading and recreating it would produce a copy without the credentials,
+silently broken. Duplication happens inside the app, where the real values are,
+and they never pass through the model.
 
-### O que ele não faz
+### What it does not do
 
-**Nada sobe para o GitHub.** Criar, renomear ou editar via agente grava **só local** — o push continua sendo ação explícita sua. Isso é deliberado: um agente iterando sobre scripts geraria uma enxurrada de commits.
+**Nothing goes to GitHub.** Creating, renaming or editing through the agent
+saves **locally only** — pushing stays an explicit action of yours. This is
+deliberate: an agent iterating over scripts would generate a flood of commits.
 
 ---
 
-## 4. Qual usar quando
+## 4. Which one, when
 
-| Situação | Use |
+| Situation | Use |
 |---|---|
-| "Por que essa request está dando 400?" | Painel |
-| "Monta um fluxo de cancelamento com reembolso" | Painel |
-| "Roda a collection e me diz o que quebrou" | Qualquer um |
-| Está mexendo no código e precisa bater numa API | Terminal |
-| Quer que o agente leia o repositório inteiro | Terminal |
+| "Why is this request returning 400?" | Panel |
+| "Build a cancellation flow with refund" | Panel |
+| "Run the collection and tell me what broke" | Either |
+| You are working in the code and need to hit an API | Terminal |
+| You want the agent to read the whole repository | Terminal |
 
-A regra prática: **se o trabalho é sobre as requests, use o painel; se é sobre o código, use o terminal** e deixe o DevFlow como fonte das chamadas.
+The rule of thumb: **if the work is about the requests, use the panel; if it is
+about the code, use the terminal** and let DevFlow be the source of the calls.
 
 ---
 
-## 5. Quando algo dá errado
+## 5. When something goes wrong
 
-**"Not logged in · Please run /login"** no painel
-A CLI está instalada e rodou — só falta credencial *naquele perfil*. Veja a seção do perfil separado: na maioria das vezes é a caixa "Keep a separate login for DevFlow" marcada enquanto o seu login está no perfil global.
+**"Not logged in · Please run /login" in the panel**
+The CLI is installed and ran — it just has no credential *in that profile*. See
+the separate-profile section: most of the time it is the "Keep a separate login
+for DevFlow" box being checked while your login lives in the global profile.
 
 **"Credit balance is too low"**
-Você entrou pelo **Anthropic Console**, que cobra por uso de API. Para assinatura, saia e entre por **Claude subscription**.
+You signed in through **Anthropic Console**, which bills API usage. For a
+subscription, sign out and sign in through **Claude subscription**.
 
-**"Invalid API key" mesmo com a conta configurada**
-Alguma `ANTHROPIC_API_KEY` no ambiente da máquina está vencendo a conta logada — a CLI dá preferência a ela. O app remove essa variável no modo conta, mas vale conferir se ela existe no seu ambiente.
+**"Invalid API key" even with the account configured**
+Some `ANTHROPIC_API_KEY` in the machine's environment is beating the signed-in
+account — the CLI prefers it. The app removes that variable in account mode,
+but it is worth checking whether it exists in your environment.
 
-**`Failed to bind 127.0.0.1:NNNNN` (erro 10013)**
-Porta **reservada** pelo sistema, não ocupada. Para ver as faixas:
+**`Failed to bind 127.0.0.1:NNNNN` (error 10013)**
+The port is **reserved** by the system, not occupied. To see the ranges:
 
 ```bash
 netsh interface ipv4 show excludedportrange protocol=tcp
 ```
 
-O app cai sozinho para outra porta; depois disso, rode o `claude mcp add` novamente com a porta nova.
+The app falls back to another port on its own; after that, run `claude mcp add`
+again with the new port.
 
-**O agente diz que uma ferramenta não existe**
-A lista acima é o que existe. Se faltar alguma operação, ela precisa ser adicionada em `src/mcp/mcpTools.ts` — não há como o agente contornar.
+**The agent says a tool does not exist**
+The list above is what exists. If an operation is missing it has to be added in
+`src/mcp/mcpTools.ts` — there is no way for the agent to work around it.
