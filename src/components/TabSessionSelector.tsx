@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { ChevronDown, Save, FolderOpen, Pencil, Trash2, Check, X, RefreshCw, Copy, Search, AlertTriangle, Pin, PinOff, Workflow, FilePlus } from 'lucide-react';
+import { ChevronDown, Save, FolderOpen, Pencil, Trash2, Check, X, RefreshCw, Copy, Search, AlertTriangle, Pin, PinOff, Workflow, FilePlus, LogOut } from 'lucide-react';
 import { Tab } from '@/app/types/Tab';
 import type { TabGroup } from '@/lib/tabGroups';
 
@@ -66,6 +66,9 @@ interface TabSessionSelectorProps {
   hasUnsavedTabs?: boolean;
   // Workspace atual: a lista mostra as sessões daqui por padrão.
   workspace?: string;
+  // Sair da sessão sem fechar nada: as abas continuam abertas, e o que for
+  // feito daqui pra frente deixa de pertencer a ela.
+  onLeaveSession?: () => void;
 }
 
 function formatSavedAt(ts: number): string {
@@ -89,12 +92,14 @@ export function TabSessionSelector({
   currentTabCount = 0,
   hasUnsavedTabs = false,
   workspace,
+  onLeaveSession,
 }: TabSessionSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [search, setSearch] = useState('');
   const [showAllWorkspaces, setShowAllWorkspaces] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmNewSession, setConfirmNewSession] = useState(false);
@@ -141,6 +146,7 @@ export function TabSessionSelector({
       setConfirmNewSession(false);
       setIsNamingSession(false);
       setNewSessionName('');
+      setConfirmLeave(false);
     }
 
   }, [isOpen]);
@@ -553,14 +559,49 @@ const filteredSessions = useMemo(() => {
                   </div>
                 </div>
               ) : (
-                <button
-                  onClick={() => setIsNamingSession(true)}
-                  title="Create a new group — either from the tabs open right now, or empty"
-                  className="flex items-center justify-center gap-1.5 w-full h-7 rounded-md text-[11px] font-medium text-pm-text-secondary hover:text-pm-text bg-pm-hover hover:bg-pm-row-active border border-pm-border transition-colors cursor-pointer"
-                >
-                  <FilePlus size={12} />
-                  New session
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setIsNamingSession(true)}
+                    title="Create a new group — either from the tabs open right now, or empty"
+                    className="flex items-center justify-center gap-1.5 flex-1 h-7 rounded-md text-[11px] font-medium text-pm-text-secondary hover:text-pm-text bg-pm-hover hover:bg-pm-row-active border border-pm-border transition-colors cursor-pointer"
+                  >
+                    <FilePlus size={12} />
+                    New session
+                  </button>
+
+                  {/* Sair sem fechar nada. Antes a única forma de não estar
+                      numa sessão era APAGAR a sessão — o estado "sem sessão"
+                      existia (o botão diz "No group") e não havia caminho até
+                      ele. */}
+                  {currentSessionId && onLeaveSession && (
+                    <button
+                      onClick={() => {
+                        // Com alteração pendente, sair abandona o que não foi
+                        // gravado NA SESSÃO — por isso pergunta antes.
+                        if (isCurrentSessionDirty && !confirmLeave) {
+                          setConfirmLeave(true);
+                          return;
+                        }
+                        onLeaveSession();
+                        setConfirmLeave(false);
+                        setIsOpen(false);
+                      }}
+                      title={
+                        isCurrentSessionDirty
+                          ? 'Leave this session — the tabs stay open, and the session keeps its last saved state'
+                          : 'Leave this session — the tabs stay open'
+                      }
+                      className={`flex items-center justify-center gap-1.5 h-7 px-2.5 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                        confirmLeave
+                          ? 'border-amber-500/50 bg-amber-500/15 text-amber-300'
+                          : 'border-pm-border bg-pm-hover text-pm-text-secondary hover:text-pm-text hover:bg-pm-row-active'
+                      }`}
+                    >
+                      <LogOut size={12} />
+                      {confirmLeave ? 'Leave anyway?' : 'Leave'}
+                    </button>
+                  )}
+                </div>
               )
             )}
 

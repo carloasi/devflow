@@ -1589,6 +1589,18 @@ const handleLoadSession = useCallback((sessionId: string) => {
   setCurrentSessionId(target.id);
 }, [tabSessions]);
 
+// Sair da sessão sem mexer nas abas.
+//
+// "Não quero usar esta sessão agora" não é "quero fechar meu trabalho": as
+// abas continuam abertas, só deixam de pertencer a ela — nada do que for
+// feito daqui pra frente aparece como alteração pendente dela, e o botão
+// volta a dizer "No group".
+//
+// A sessão em si fica intacta, com o último estado salvo.
+const handleLeaveSession = useCallback(() => {
+  setCurrentSessionId(null);
+}, []);
+
 const handleDeleteSession = useCallback((sessionId: string) => {
   setTabSessions(prev => prev.filter(s => s.id !== sessionId));
   setCurrentSessionId(prev => (prev === sessionId ? null : prev));
@@ -4624,6 +4636,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
             <TabSessionSelector
               sessions={tabSessions}
               workspace={selectedWorkspace}
+              onLeaveSession={handleLeaveSession}
               currentSessionId={currentSessionId}
               isCurrentSessionDirty={isCurrentSessionDirty}
               onUpdateCurrentSession={handleUpdateCurrentSession}
