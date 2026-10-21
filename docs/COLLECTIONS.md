@@ -94,6 +94,46 @@ the value.
 Importing an obfuscated environment exported by an older DevFlow build still
 works — values prefixed `OBFv1$` are decoded, anything else passes through.
 
+## Hard-coded credentials
+
+**Settings → Security → Hard-coded credentials → Scan workspace** walks the
+tree looking for tokens, keys and passwords written straight into a request
+instead of `{{a variable}}`.
+
+It splits them in two, because the right action differs:
+
+- **Expired** — a JWT whose `exp` is in the past. It cannot work any more, so
+  it only produces a confusing 401 for whoever opens the request next. One
+  button clears all of them.
+- **Still live** — a credential that may still authenticate. Each gets an
+  *extract* button: the value moves into the active environment under a
+  suggested name, and the request keeps `{{thatName}}`.
+
+The real value never appears in the list — only the first and last characters
+and the length. Extraction reads it from the tree at the moment you click, so
+it stays inside the app.
+
+An existing variable with the same name is never overwritten: the value there
+may be the right one, and replacing it silently would break whatever uses it.
+
+### What does not count
+
+A value containing any `{{...}}` is skipped, including `Bearer {{token}}` —
+that is the correct way to write the header, and flagging it made 2,352 false
+positives on a real workspace. Values shorter than eight characters are
+skipped too.
+
+For OAuth 2.0 the fields are an explicit list — `clientSecret`,
+`accessToken`, `refreshToken`, `password`. `tokenName` is a label and
+`authUrl` and `accessTokenUrl` are addresses; matching them by name produced
+249 false findings out of 332. `clientId` identifies the application rather
+than authorising it, so it is left out as well.
+
+Saved examples are skipped: their credential is a copy of the request's, and
+listing both would double the list without adding anywhere to fix it.
+
+The fix is local, like every save — pushing stays an explicit action.
+
 ## Exporting
 
 Right-click a collection → **Export**. The output is **Postman Collection

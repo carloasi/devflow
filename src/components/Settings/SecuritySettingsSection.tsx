@@ -3,8 +3,20 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { SettingsToggle } from './SettingsToggle';
+import { SecretScanPanel } from './SecretScanPanel';
+import type { CollectionItem } from '@/app/types/CollectionItem';
 
-export function SecuritySettingsSection() {
+interface Props {
+  // A varredura precisa da árvore, que vive no AppLayout — mesma razão do
+  // mcp e do host de extensões chegarem por prop.
+  collections?: CollectionItem[];
+  onApplySecrets?: (
+    roots: CollectionItem[],
+    variables: { key: string; value: string }[]
+  ) => Promise<void> | void;
+}
+
+export function SecuritySettingsSection({ collections, onApplySecrets }: Props = {}) {
   const [verifySSL, setVerifySSL] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -60,6 +72,10 @@ export function SecuritySettingsSection() {
           </p>
         </div>
       )}
+      {collections && onApplySecrets && (
+        <SecretScanPanel collections={collections} onApply={onApplySecrets} />
+      )}
+
     </div>
   );
 }

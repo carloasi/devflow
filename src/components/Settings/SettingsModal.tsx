@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Bot, Bug, Database, Globe, Palette, Puzzle, Shield, X } from 'lucide-react';
 import { SecuritySettingsSection } from './SecuritySettingsSection';
 import { DataSettingsSection } from './DataSettingsSection';
+import type { CollectionItem } from '@/app/types/CollectionItem';
 import { ErrorReportSettingsSection } from './ErrorReportSettingsSection';
 import { AppearanceSettingsSection } from './AppearanceSettingsSection';
 import { NetworkSettingsSection } from './NetworkSettingsSection';
@@ -21,6 +22,12 @@ interface SettingsModalProps {
   // Mesma razão do mcp: o host de extensões vive no AppLayout porque
   // precisa do contexto de execução.
   extensionHost?: UseExtensionHostResult;
+  // Árvore do workspace, para a varredura de credenciais escritas à mão.
+  collections?: CollectionItem[];
+  onApplySecrets?: (
+    roots: CollectionItem[],
+    variables: { key: string; value: string }[]
+  ) => Promise<void> | void;
 }
 
 type SectionId = 'appearance' | 'security' | 'network' | 'mcp' | 'extensions' | 'data' | 'report';
@@ -39,14 +46,14 @@ function loadLastSection(): SectionId {
 // um modal de 440px com as 7 seções empilhadas numa rolagem só — tudo ficava
 // espremido (botões quebrando linha, descrições apertadas ao lado dos
 // botões) e achar uma opção exigia rolar bastante.
-export function SettingsModal({ isOpen, onClose, mcp, extensionHost }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose, mcp, extensionHost, collections, onApplySecrets }: SettingsModalProps) {
   const [active, setActive] = useState<SectionId>(loadLastSection);
 
   if (!isOpen) return null;
 
   const sections: Array<{ id: SectionId; label: string; icon: React.ReactNode; render: () => React.ReactNode }> = [
     { id: 'appearance', label: 'Appearance', icon: <Palette size={14} />, render: () => <AppearanceSettingsSection /> },
-    { id: 'security', label: 'Security', icon: <Shield size={14} />, render: () => <SecuritySettingsSection /> },
+    { id: 'security', label: 'Security', icon: <Shield size={14} />, render: () => <SecuritySettingsSection collections={collections} onApplySecrets={onApplySecrets} /> },
     { id: 'network', label: 'Network', icon: <Globe size={14} />, render: () => <NetworkSettingsSection /> },
     ...(mcp
       ? [{ id: 'mcp' as const, label: 'Claude Code (MCP)', icon: <Bot size={14} />, render: () => <McpSettingsSection mcp={mcp} /> }]

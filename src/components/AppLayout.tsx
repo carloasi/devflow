@@ -1601,6 +1601,32 @@ const handleLeaveSession = useCallback(() => {
   setCurrentSessionId(null);
 }, []);
 
+// Grava a árvore com os segredos tirados e cria as variáveis extraídas no
+// environment ativo.
+//
+// Só local, como todo save: o push continua sendo ação explícita. Tirar uma
+// credencial da request não deve disparar um commit por conta própria.
+const handleApplySecrets = useCallback(async (
+  roots: CollectionItem[],
+  variables: { key: string; value: string }[]
+) => {
+  setCollections(roots);
+  await saveWorkspaceCollections(selectedWorkspaceRef.current, roots);
+
+  if (variables.length === 0) return;
+
+  setEnvironments(prev => prev.map(env => {
+    if (env.id !== selectedEnvId) return env;
+    const existing = new Set(env.values.map(v => v.key));
+    // Variável de mesmo nome já existente não é sobrescrita: o valor que
+    // está lá pode ser o certo, e trocá-lo em silêncio quebraria quem o usa.
+    const novas = variables
+      .filter(v => !existing.has(v.key))
+      .map(v => ({ id: crypto.randomUUID(), key: v.key, value: v.value, enabled: true, type: 'default' }));
+    return novas.length ? { ...env, values: [...env.values, ...novas], isDirty: true } : env;
+  }));
+}, [selectedEnvId, setEnvironments]);
+
 const handleDeleteSession = useCallback((sessionId: string) => {
   setTabSessions(prev => prev.filter(s => s.id !== sessionId));
   setCurrentSessionId(prev => (prev === sessionId ? null : prev));
@@ -5122,6 +5148,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
   onClose={() => setSettingsOpen(false)}
   mcp={mcp}
   extensionHost={extensionHost}
+  collections={collections}
+  onApplySecrets={handleApplySecrets}
 />
 
 {/* Confirmação do "Save to all". Lista ONDE cada cópia está: duas requests
