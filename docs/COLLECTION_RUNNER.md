@@ -22,6 +22,44 @@ always "let me look at something else", not "throw this away".
 | **Delay** | Milliseconds to wait between requests. |
 | **Stop** | Interrupts the run; what already ran is kept. |
 
+## Running one flow per row of a table
+
+Pick a **Data** file — CSV or JSON — and the flow runs once per row, with
+each column available as a `{{variable}}`. Iterations then follows the row
+count; one case per row is the whole point, and a separate number would only
+produce combinations nobody asked for.
+
+```csv
+cenario;documento;tipoDocumento;esperado
+passport válido;AB123456;PASSPORT;200
+CPF válido;12345678901;CPF;200
+"CPF inválido, com máscara";123.456.789-01;CPF;400
+```
+
+The request bodies then use `{{documento}}` and `{{tipoDocumento}}`, and the
+assertions `{{esperado}}` — one flow covering every case, instead of one
+duplicated session per case.
+
+**Each row starts from a clean environment**: the base environment plus that
+row, with the row winning. What a script wrote during row 1 does not leak
+into row 2, so a case passing because of the previous one cannot happen. The
+chain still flows *within* a row, which is what token steps need.
+
+**The report names the row, not its number.** The first column is taken as
+the scenario name, so results read `Pagamento · CPF inválido, com máscara`
+instead of `#3`.
+
+### Format notes
+
+The CSV parser is written for real spreadsheets: it detects `,`, `;` or tab
+from the header, handles quoted fields with commas, escaped quotes and line
+breaks inside a cell, strips the Excel BOM, and accepts CRLF. A naive split
+does not fail on those — it shifts the columns silently, and the run executes
+with the wrong data.
+
+JSON takes an array of objects. Numbers become strings and nested objects
+become JSON, since environment values are text.
+
 ## What each step shows
 
 Click a row to expand it:

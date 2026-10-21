@@ -119,6 +119,8 @@ export interface RunEntry {
   id: string;
   itemId: string;
   iteration: number;
+  /** Rótulo da linha da tabela de dados, quando o run usou uma. */
+  rowLabel?: string;
   name: string;
   method?: string;
   state: 'pending' | 'running' | 'success' | 'error';

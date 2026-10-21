@@ -3,7 +3,7 @@
 import { buildJUnitXml } from '@/lib/junitReport'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight } from 'lucide-react'
+import { Play, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2} from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CollectionItem } from '@/app/types/CollectionItem'
 import { useEnvironment } from '@/components/EnvironmentContext'
@@ -15,6 +15,7 @@ import { VariableText } from './VariableText'
 import { requestHasBody } from '@/lib/defaultHeaders'
 import { hasFailureReason, failureReason, isExpectedErrorStatus } from './runVerdict'
 import { buildEnvMap } from '@/lib/envMap';
+import { envForRow, parseDataFile, rowLabel, type DataSet } from '@/lib/runnerData'
 
 interface Props {
   item: CollectionItem | null
@@ -107,6 +108,14 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
 
   const [checked, setChecked] = useState<Record<string, boolean>>({})
   const [iterations, setIterations] = useState(1)
+
+  // Tabela de dados: cada linha é uma iteração com suas variáveis.
+  // Nasceu de um padrão real — cinco sessões "BPE bloqueio pagamento …"
+  // apontando para as MESMAS cinco requests, duplicadas só pra variar um
+  // campo (ver lib/runnerData.ts).
+  const [dataSet, setDataSet] = useState<DataSet | null>(null)
+  const [dataFileName, setDataFileName] = useState('')
+  const [dataError, setDataError] = useState<string | null>(null)
   const [delayMs, setDelayMs] = useState(0)
   const [runEnvId, setRunEnvId] = useState<string | null>(null)
   const [entries, setEntries] = useState<RunEntry[]>([])
@@ -249,6 +258,43 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setChecked(Object.fromEntries(requests.map(r => [r.id, value])))
   }
 
+  const handlePickDataFile = async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: 'Data file', extensions: ['csv', 'json', 'tsv', 'txt'] }],
+    })
+    if (typeof picked !== 'string') return
+
+    const { readTextFile } = await import('@tauri-apps/plugin-fs')
+    let text: string
+    try {
+      text = await readTextFile(picked)
+    } catch (e) {
+      setDataError(`Could not read the file: ${(e as Error).message}`)
+      return
+    }
+
+    const name = picked.split(/[\\/]/).pop() ?? picked
+    const parsed = parseDataFile(text, name)
+    if (!parsed.ok) {
+      setDataSet(null)
+      setDataFileName(name)
+      setDataError(parsed.error)
+      return
+    }
+
+    setDataSet(parsed.data)
+    setDataFileName(name)
+    setDataError(null)
+  }
+
+  const clearDataFile = () => {
+    setDataSet(null)
+    setDataFileName('')
+    setDataError(null)
+  }
+
   const handleRun = async () => {
     const selected = requests.filter(r => checked[r.id])
     if (selected.length === 0) return
@@ -259,15 +305,24 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     // duplicatas desabilitadas (ver DuplicateVariablePicker) e, quando há mais
     // de uma habilitada, fica com a MESMA entrada em que a escrita mexe. O
     // Runner tem que resolver variável igual ao resto do app.
-    let envMap: Record<string, string> = buildEnvMap(baseEnv?.values)
+    const baseEnvMap: Record<string, string> = buildEnvMap(baseEnv?.values)
+    let envMap: Record<string, string> = baseEnvMap
+
+    // Com tabela, a quantidade de iterações é o número de linhas: cada uma é
+    // um caso, e inventar um número à parte só criaria combinação sem
+    // sentido ("3 iterações sobre 5 linhas").
+    const rows = dataSet?.rows ?? null
+    const totalIterations = rows ? rows.length : iterations
 
     const runEntries: RunEntry[] = []
-    for (let i = 1; i <= iterations; i++) {
+    for (let i = 1; i <= totalIterations; i++) {
+      const label = rows ? rowLabel(rows[i - 1], dataSet!.columns, i - 1) : undefined
       for (const req of selected) {
         runEntries.push({
           id: `${req.id}-${i}`,
           itemId: req.id,
           iteration: i,
+          rowLabel: label,
           name: req.name,
           method: req.method,
           state: 'pending',
@@ -292,6 +347,15 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
       setEntries(prev => prev.map(e => (e.id === entry.id ? { ...e, state: 'running' } : e)))
 
       const reqItem = selected.find(r => r.id === entry.itemId)!
+
+      // Primeira request da linha: o ambiente recomeça da base, com a linha
+      // por cima. Sem isso o que a linha 1 gravou via script vazaria pra
+      // linha 2, e o resultado passaria a depender da ordem — um caso
+      // passando por causa do anterior é pior que um caso falhando.
+      if (rows && (idx === 0 || runEntries[idx - 1].iteration !== entry.iteration)) {
+        envMap = envForRow(baseEnvMap, rows[entry.iteration - 1])
+      }
+
       const envBefore = envMap
       const requestId = crypto.randomUUID()
       currentRequestIdRef.current = requestId
@@ -375,7 +439,8 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
   const copyFailureReport = async () => {
     const report = failedEntries
       .map(e => {
-        const label = `${e.method ?? ''} ${e.name}${shownIterations > 1 ? ` (#${e.iteration})` : ''}`.trim()
+        const suffix = e.rowLabel ? ` [${e.rowLabel}]` : shownIterations > 1 ? ` (#${e.iteration})` : ''
+        const label = `${e.method ?? ''} ${e.name}${suffix}`.trim()
         return `${label}\n${failureReason(e)}`
       })
       .join('\n\n---\n\n')
@@ -442,12 +507,57 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                   type="number"
                   min={1}
                   max={50}
-                  value={iterations}
-                  disabled={running}
+                  value={dataSet ? dataSet.rows.length : iterations}
+                  // Com tabela, quem manda é o número de linhas: cada uma é um
+                  // caso, e um número à parte criaria combinação sem sentido.
+                  disabled={running || !!dataSet}
+                  title={dataSet ? 'One iteration per row of the data file' : undefined}
                   onChange={e => setIterations(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
                   className="w-14 h-7 px-2 rounded-md bg-pm-surface border border-pm-border text-xs text-pm-text outline-none focus:border-[#f26b3a]/60 disabled:opacity-50"
                 />
               </div>
+
+              {/* Tabela de dados: um caso por linha, em vez de duplicar o
+                  fluxo inteiro pra variar um campo. */}
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] text-pm-text-muted">Data</label>
+                {dataSet ? (
+                  <div className="flex items-center gap-1.5 h-7 px-2 rounded-md bg-pm-surface border border-pm-border">
+                    <Table2 size={12} className="text-[#4ff09d] shrink-0" />
+                    <span className="text-[11px] text-pm-text max-w-[150px] truncate" title={dataFileName}>
+                      {dataFileName}
+                    </span>
+                    <span className="text-[10px] text-pm-text-muted shrink-0">
+                      {dataSet.rows.length} row{dataSet.rows.length === 1 ? '' : 's'} ·{' '}
+                      {dataSet.columns.length} col{dataSet.columns.length === 1 ? '' : 's'}
+                    </span>
+                    <button
+                      onClick={clearDataFile}
+                      disabled={running}
+                      title="Remove the data file"
+                      className="shrink-0 text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer border-none bg-transparent disabled:opacity-40"
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handlePickDataFile}
+                    disabled={running}
+                    title="Run the flow once per row of a CSV or JSON file — each column becomes a variable"
+                    className="flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-pm-surface border border-pm-border text-[11px] text-pm-text-secondary hover:text-pm-text hover:border-[#f26b3a]/60 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Table2 size={12} />
+                    Choose file
+                  </button>
+                )}
+              </div>
+
+              {dataError && (
+                <span className="text-[10.5px] text-rose-400 max-w-[260px]" title={dataError}>
+                  {dataError}
+                </span>
+              )}
 
               <div className="flex items-center gap-1.5">
                 <label className="text-[11px] text-pm-text-muted">Delay (ms)</label>
@@ -637,7 +747,13 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
 
                           <span className="text-xs text-pm-text-secondary truncate flex-1">
                             {entry.name}
-                            {shownIterations > 1 && <span className="text-pm-text-muted"> · #{entry.iteration}</span>}
+                            {/* O nome do cenário diz mais que "#3" — é o
+                                que a primeira coluna da tabela traz. */}
+                            {entry.rowLabel ? (
+                              <span className="text-[#4ff09d]/80"> · {entry.rowLabel}</span>
+                            ) : (
+                              shownIterations > 1 && <span className="text-pm-text-muted"> · #{entry.iteration}</span>
+                            )}
                           </span>
 
                           {entry.outcome?.status === 'success' && (
