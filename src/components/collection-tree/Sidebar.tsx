@@ -225,6 +225,7 @@ export default function Sidebar({
               value: v.value,
               type: v.type,
               enabled: v.enabled,
+              description: v.description,
             })),
           }
           importEnvironment(importedEnv)

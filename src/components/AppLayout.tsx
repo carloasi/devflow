@@ -3234,6 +3234,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           value: v.value,
           enabled: v.enabled,
           type: v.type,
+          // Descrição acompanha: sem isto, um pull apagava a documentação
+          // das variáveis toda vez.
+          description: v.description,
         })),
         color: undefined,
         _postman_variable_scope: 'environment',
@@ -3295,6 +3298,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           value: v.value,
           enabled: v.enabled,
           type: v.type,
+          description: v.description,
         })),
         color: undefined,
         _postman_variable_scope: 'environment',

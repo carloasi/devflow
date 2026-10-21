@@ -91,6 +91,8 @@ interface ImportedValue {
   value?: string
   type?: 'default' | 'secret'
   enabled?: boolean
+  // O export sempre gravou este campo; o import é que o descartava.
+  description?: string
 }
 
 interface ImportedEnvironment {
@@ -356,7 +358,8 @@ useEffect(() => {
               key: v.key || '',
               value: deobfuscateValue(v.value ?? ''),
               type: v.type || 'default',
-              enabled: v.enabled !== undefined ? v.enabled : true
+              enabled: v.enabled !== undefined ? v.enabled : true,
+              description: v.description
             })),
           color: json.color,
           _postman_variable_scope: json._postman_variable_scope

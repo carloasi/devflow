@@ -27,6 +27,10 @@ export interface EnvVariable {
   value:   string;
   enabled: boolean;
   type:    'default' | 'secret';
+  // O export sempre gravou a descrição; era o import que a descartava, aqui
+  // na leitura — então ela sumia já na entrada, e os quatro lugares que
+  // remontam a lista depois disso nunca tiveram o que passar adiante.
+  description?: string;
 }
 
 export interface EnvironmentItem {
@@ -414,6 +418,11 @@ function convertPostmanEnvironment(raw: any): EnvironmentItem {
       value:   String(v.value ?? ''),
       enabled: v.enabled !== false && v.disabled !== true,
       type:    v.type === 'secret' ? 'secret' : 'default',
+      // Ausente fica ausente, em vez de virar string vazia: assim reimportar
+      // um arquivo sem descrições não apaga as que já existem por aqui.
+      ...(typeof v.description === 'string' && v.description !== ''
+        ? { description: v.description }
+        : {}),
     })
   );
   return {
