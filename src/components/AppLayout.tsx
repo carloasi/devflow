@@ -96,6 +96,7 @@ import { EditableTitle } from './EditableTitle.';
 import EnvironmentSelector from './EnvironmentSelector';
 import { loadActiveEnvironmentId, saveActiveEnvironmentId } from '@/lib/activeEnvironmentStore';
 import { buildEnvMap } from '@/lib/envMap';
+import { GitHubConflictError } from './GitHubStorageClient';
 import { changedFieldLabels, describeChanges } from '@/lib/unsavedChanges';
 import { stripTabsForSession, sameSessionTabs } from '@/lib/tabSessions';
 import { safeSetItem, sweepDeadKeys } from '@/lib/safeStorage';
@@ -891,6 +892,14 @@ export default function AppLayout() {
     [tabs, tabGroups]
   );
 
+  /**
+   * Collection que deve ser enviada assim que a mescla for aplicada.
+   *
+   * Preenchida quando o push esbarra em conflito: a tela de comparação abre
+   * para resolver, e o envio continua de onde parou em vez de obrigar a
+   * clicar em "Push to GitHub" outra vez.
+   */
+  const [pushAfterDiff, setPushAfterDiff] = useState<CollectionItem | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffNodes, setDiffNodes] = useState<DiffNode[]>([]);
   const [diffNames, setDiffNames] = useState<Map<string, string>>(new Map());
@@ -3518,6 +3527,27 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // `requiresFullPush` é preservado: ele marca uma collection APAGADA
     // localmente, que não tem id pra reaparecer na comparação — recalcular
     // sem ele esqueceria a exclusão, e o arquivo ficaria órfão no remoto.
+    // Conflito no push: o envio recomeça com o resultado da mescla.
+    // Reenviar o item ANTIGO mandaria de volta exatamente a versão que
+    // acabou de ser reconciliada.
+    const pending = pushAfterDiff;
+    setPushAfterDiff(null);
+    if (pending) {
+      const reconciled = findNodeById(merged, pending.id);
+      if (reconciled) {
+        setDiffOpen(false);
+        try {
+          // Direto pelo ref, e não pelo handlePushCollection: aquele é
+          // declarado depois daqui, e citá-lo na lista de dependências
+          // quebraria no render. Um segundo conflito aqui também não deve
+          // reabrir esta tela — seria um laço — e o painel de sync já diz.
+          await githubSyncRef.current?.pushCollection(reconciled);
+        } catch {
+          /* reportado pelo painel de sync */
+        }
+      }
+    }
+
     const hadRemovals = readPendingPush(workspace).requiresFullPush;
     clearWorkspacePendingPush(workspace);
     const stillDiffer = compareWorkspaces(merged, diffRemoteTree);
@@ -3535,7 +3565,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // `diffTarget`, `environments` e `diffRemoteEnvs` entram de verdade: sem
     // eles o callback aplicaria o ramo de environment com dados congelados da
     // primeira renderização — e escreveria valores velhos por cima dos atuais.
-  }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments]);
+  }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments, pushAfterDiff]);
 
   // Baixar o que mudou no GitHub SÓ desta collection e abrir a comparação.
   //
@@ -3597,10 +3627,23 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   const handlePushCollection = useCallback(async (item: CollectionItem) => {
     try {
       await githubSyncRef.current?.pushCollection(item);
-    } catch {
-      /* já reportado pelo painel de sync */
+    } catch (e) {
+      // Alguém enviou esta collection depois do seu último sync. Antes a
+      // mensagem mandava "dê um pull antes" e parava aí — e o pull é outro
+      // menu, noutro item, que depois exige voltar e clicar em enviar de
+      // novo. No meio desse caminho é fácil enviar assim mesmo e passar por
+      // cima do trabalho do colega.
+      //
+      // Agora o conflito abre a própria tela de comparação, e o envio
+      // continua sozinho quando a mescla é aplicada.
+      if (e instanceof GitHubConflictError) {
+        setPushAfterDiff(item);
+        await handlePullCollection(item);
+        return;
+      }
+      /* o resto já foi reportado pelo painel de sync */
     }
-  }, []);
+  }, [handlePullCollection]);
 
   // Limpa a pendência SÓ desta collection. Usar o handlePushCompleted aqui
   // zeraria o workspace inteiro e apagaria o aviso das outras collections que
@@ -5252,7 +5295,13 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
   pendingCollectionIds={pendingCollectionIds}
   base={diffBase}
   collectionNames={diffNames}
-  onClose={() => setDiffOpen(false)}
+  onClose={() => {
+    // Fechar sem aplicar desiste também do envio que esperava a mescla.
+    // Sem isto, o alvo ficaria guardado e uma comparação futura, de outra
+    // collection, dispararia um push que ninguém pediu.
+    setPushAfterDiff(null)
+    setDiffOpen(false)
+  }}
   onApply={handleApplyDiff}
 />
 

@@ -233,7 +233,7 @@ const GH_TOKEN_KEY = 'gh_sync_token'
 // GitHub. Fica no armazenamento seguro do SO, junto do token.
 const GH_PASSPHRASE_KEY = 'gh_sync_passphrase'
 
-class GitHubConflictError extends Error {
+export class GitHubConflictError extends Error {
   constructor(public path: string) {
     super(`Conflict: "${path}" was changed by someone else since your last pull.`);
     this.name = "GitHubConflictError";
@@ -1798,7 +1798,10 @@ useEffect(() => {
         // antes de salvar" do push completo, que ofereceria um pull de tudo.
         // Num envio pontual isso é desproporcional — quem mandou uma
         // collection não pediu para substituir o workspace inteiro.
-        showStatus("error", `"${rawName}" was updated by someone else. Pull the latest version before sending it again.`);
+        // Mensagem curta: quem chamou (AppLayout) abre a tela de
+        // comparação em seguida, e dizer "faça um pull" ali seria mandar
+        // fazer à mão o que já vai acontecer.
+        showStatus("error", `"${rawName}" was updated by someone else — review the changes before sending.`);
       } else {
         showStatus("error", `✗ Sync failed: ${(e as Error)?.message ?? String(e)}`);
       }
