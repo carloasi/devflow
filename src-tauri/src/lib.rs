@@ -1421,10 +1421,23 @@ async fn perform_http_request(
         // no console via eprintln, pra debug) ficaria cortado antes de
         // explicar o que aconteceu.
         if e.is_timeout() {
-            let err = format!(
-                "Request timed out after {}ms (configured in Settings > Network) — {} {}",
-                timeout_ms, method, url
-            );
+            // Com timeout_ms = 0 nenhum limite foi configurado (ver acima), e
+            // mesmo assim o reqwest reporta is_timeout() para estouros da
+            // camada de rede — conexão, DNS, handshake. A mensagem antiga
+            // dizia "timed out after 0ms (configured in Settings)", culpando
+            // um limite inexistente e mandando o usuário mexer numa
+            // configuração que não tem nada a ver.
+            let err = if timeout_ms == 0 {
+                format!(
+                    "Connection timed out — no request timeout is configured, so this came from the network (host unreachable, DNS or VPN) — {} {}",
+                    method, url
+                )
+            } else {
+                format!(
+                    "Request timed out after {}ms (configured in Settings > Network) — {} {}",
+                    timeout_ms, method, url
+                )
+            };
             eprintln!("⏱️ [HTTP] {}", err);
             return err;
         }

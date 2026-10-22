@@ -2463,6 +2463,14 @@ const handleSendRequest = useCallback(async (mode: SendMode = 'send') => {
 
   patchTabRequestState(tabId, { isRequesting: true, startTime: Date.now(), error: null, debugResult: null });
 
+  // A resposta anterior sai de cena agora, não quando a nova chegar.
+  //
+  // Sem isto, uma falha de envio deixava o erro novo ao lado do status
+  // antigo: a tela mostrava "Could not send request" e, logo acima, um
+  // "201 Created · 430 ms" de minutos atrás. Num passo de token é leitura
+  // perigosa — o 201 sugere que o token veio, quando a chamada nem saiu.
+  updateTabById(tabId, { response: null, responseTime: 0, testResults: [] });
+
 
 
   const controller = new AbortController();
@@ -2564,7 +2572,9 @@ const handleSendRequest = useCallback(async (mode: SendMode = 'send') => {
       });
     } catch (err: any) {
       if (controller.signal.aborted) {
-        // A aba mantém a resposta anterior; o cancelamento fica no console.
+        // Cancelar deixa o painel vazio: a resposta anterior já saiu no
+        // início do envio, e ressuscitá-la aqui mostraria como atual algo
+        // de outra chamada. O cancelamento fica registrado no console.
         pushLog('info', `${finalMethod} ${finalUrl} — cancelled`, { requestName: tab.name, source: 'system' });
         toast.info('Request cancelled');
         return;
