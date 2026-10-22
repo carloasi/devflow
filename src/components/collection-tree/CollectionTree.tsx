@@ -289,6 +289,22 @@ export function CollectionTree({
     })
   }, [items, onUpdateItems])
 
+  /**
+   * O que a ação de apagar atinge: a seleção, ou o item clicado quando não
+   * há seleção.
+   *
+   * Mesma regra da tecla Delete — eram dois caminhos para o mesmo gesto, e
+   * duas regras divergiriam.
+   */
+  const deleteTargets = useCallback((fallback: CollectionItem | null): CollectionItem[] => {
+    if (selectedIds.size > 0) {
+      return Array.from(selectedIds)
+        .map(id => findNode(items, id))
+        .filter((n): n is CollectionItem => !!n)
+    }
+    return fallback ? [fallback] : []
+  }, [selectedIds, items])
+
   const handleCopySelected = useCallback(() => {
     copyItems()
   }, [copyItems])
@@ -606,9 +622,7 @@ export function CollectionTree({
         break
       case 'Delete': {
         if (folderPickMode) break
-        const targets = selectedIds.size > 0
-          ? Array.from(selectedIds).map(id => findNode(items, id)).filter((n): n is CollectionItem => !!n)
-          : node ? [node] : []
+        const targets = deleteTargets(node ?? null)
         if (targets.length > 0) setPendingDelete(targets)
         break
       }
@@ -629,7 +643,9 @@ export function CollectionTree({
     }
   }, [
     getVisibleRows, focusedId, uniqueFilteredItems, effectiveExpandedIds, setExpanded, items,
-    folderPickMode, onPickFolder, onRequestSelect, selectedIds, copyItems, pasteInto,
+    folderPickMode, onPickFolder, onRequestSelect, copyItems, pasteInto,
+    // selectedIds saiu: quem o lê agora é o deleteTargets, que já o captura.
+    deleteTargets,
   ])
 
   /*
@@ -1044,6 +1060,10 @@ export function CollectionTree({
               ? () => handleNumberChildren(contextMenu.item!.id)
               : undefined
           }
+          onDelete={() => {
+            const targets = deleteTargets(contextMenu.item)
+            if (targets.length > 0) setPendingDelete(targets)
+          }}
           onClose={() => setContextMenu(null)}
         />
       )}

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef } from 'react'
-import { ArrowDown, ArrowUp, Clipboard, Copy, CornerLeftUp, ListOrdered } from 'lucide-react'
+import { ArrowDown, ArrowUp, Clipboard, Copy, CornerLeftUp, ListOrdered, Trash2 } from 'lucide-react'
 import { CollectionItem } from '@/app/types/CollectionItem'
 
 interface Props {
@@ -27,6 +27,9 @@ interface Props {
   // pasta com mais de um filho — numerar um item só não ordena nada.
   onNumberChildren?: () => void
   numberableCount?: number
+  // Apaga a seleção inteira — ou o item clicado, quando não há seleção.
+  // Mesmo caminho da tecla Delete, com a mesma confirmação.
+  onDelete?: () => void
   onClose: () => void
 }
 
@@ -44,6 +47,7 @@ export function TreeContextMenu({
   onPaste,
   onNumberChildren,
   numberableCount,
+  onDelete,
   move,
   onClose,
 }: Props) {
@@ -102,7 +106,7 @@ export function TreeContextMenu({
   const MENU_WIDTH = 200
   // Cresce com as três entradas de mover: subestimar faz o menu nascer
   // grudado na borda de baixo quando o clique é na parte inferior da árvore.
-  const MENU_HEIGHT = targetItem ? 240 : 60
+  const MENU_HEIGHT = targetItem ? 290 : 60
   const left = Math.min(x, window.innerWidth - MENU_WIDTH - 8)
   const top = Math.min(y, window.innerHeight - MENU_HEIGHT - 8)
 
@@ -199,6 +203,21 @@ export function TreeContextMenu({
           >
             <ListOrdered size={14} className="text-pm-text-muted" />
             Number items
+          </button>
+        </>
+      )}
+
+      {/* Por último e em vermelho: é o único item daqui que destrói. Apagar
+          vários só existia na tecla Delete, que não se descobre sozinha. */}
+      {targetItem && onDelete && (
+        <>
+          <div className="my-1 h-px bg-pm-border/70" />
+          <button
+            onClick={() => { onDelete(); onClose() }}
+            className={`${itemClass} text-red-400 hover:text-red-300 hover:bg-red-500/10`}
+          >
+            <Trash2 size={14} />
+            Delete{selectionCount > 1 ? ` (${selectionCount})` : ''}
           </button>
         </>
       )}
