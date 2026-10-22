@@ -1,7 +1,7 @@
 'use client'
 
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronRight, FileText, Folder, FolderOpen, Plus, Star } from 'lucide-react'
+import { ChevronRight, FileText, Folder, FolderOpen, FolderPlus, Plus, Star } from 'lucide-react'
 import { CollectionItem } from '@/app/types/CollectionItem'
 import { TreeActionMenu } from './TreeActionMenu'
 import { useSortable } from '@dnd-kit/sortable'
@@ -516,7 +516,16 @@ export const TreeNode = memo(function TreeNode({
                 }
               }}
               onDoubleClick={folderPickMode ? undefined : startEditing}
-              title={folderPickMode ? (isFolder ? 'Click to select this folder' : undefined) : 'Double-click to rename'}
+              // O nome vem primeiro: a linha corta com reticências e esta é a
+              // única forma de ler o resto. A dica de renomear se aprende uma
+              // vez; o nome é o que falta toda vez.
+              title={
+                folderPickMode
+                  ? isFolder
+                    ? 'Click to select this folder'
+                    : undefined
+                  : `${item.name}\n\nDouble-click to rename`
+              }
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -598,6 +607,25 @@ export const TreeNode = memo(function TreeNode({
               }`}
             >
               <Plus size={13} />
+            </button>
+          )}
+
+          {/* Mesmo atalho para pasta. Depois do "+" de propósito: a ordem é a
+              do VS Code (arquivo, depois pasta), e mover o "+" de lugar
+              quebraria a memória muscular de quem já usa. */}
+          {isFolder && (
+            <button
+              onClick={e => {
+                e.stopPropagation()
+                actions.createFolder(item.id)
+                setOpen(true)
+              }}
+              title="Add Folder"
+              className={`h-6 w-6 flex items-center justify-center rounded-md shrink-0 text-pm-text-muted hover:text-pm-text opacity-0 transition-opacity duration-100 ${
+                folderPickMode ? 'pointer-events-none' : 'group-hover:opacity-100'
+              }`}
+            >
+              <FolderPlus size={13} />
             </button>
           )}
 

@@ -134,7 +134,7 @@ describe('request sem asserção', () => {
   // O caso mínimo não pode duplicar o que já foi reportado.
   it('request COM asserção não ganha um caso extra', () => {
     const xml = run([
-      { name: 'T', durationMs: 10, httpStatus: 200, tests: [{ name: 'status é 200', passed: true }] },
+      { name: 'T', durationMs: 10, httpStatus: 200, tests: [{ name: 'status é 200', passed: true, message: '' }] },
     ]);
     const suite = parse(xml).querySelector('testsuite')!;
     expect(suite.getAttribute('tests')).toBe('1');
