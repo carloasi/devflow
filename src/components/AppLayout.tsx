@@ -5273,10 +5273,22 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
 
             {pendingClose.dirtyTabs.length > 1 && (
               <div className="mx-4 mb-1 max-h-[130px] overflow-y-auto rounded-lg border border-pm-border bg-pm-hover">
+                {/* Clicar leva à aba, SEM fechar o aviso: o fundo dele é
+                    pointer-events-none, então o app atrás continua vivo e dá
+                    para conferir uma aba, depois outra, e só então decidir.
+                    Fechar o aviso aqui obrigaria a refazer o fechamento de
+                    todas elas. */}
                 {pendingClose.dirtyTabs.map((t) => (
-                  <div
+                  <button
                     key={t.id}
-                    className="flex items-center gap-2 px-2.5 py-1.5 text-[11.5px] text-pm-text-secondary border-b border-pm-border/60 last:border-b-0"
+                    type="button"
+                    onClick={() => setActiveTabId(t.id)}
+                    title={`Go to "${t.name}" to review the changes`}
+                    className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-[11.5px] text-left border-b border-pm-border/60 last:border-b-0 cursor-pointer transition-colors ${
+                      activeTabId === t.id
+                        ? 'bg-pm-row-active text-pm-text'
+                        : 'bg-transparent text-pm-text-secondary hover:bg-pm-surface hover:text-pm-text'
+                    }`}
                   >
                     <span className="w-1.5 h-1.5 rounded-full bg-[#4ff09d] flex-shrink-0" />
                     <span className="truncate">{t.name}</span>
@@ -5285,7 +5297,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
                         {describeChanges(pendingChanges.get(t.id)!, 2)}
                       </span>
                     )}
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
