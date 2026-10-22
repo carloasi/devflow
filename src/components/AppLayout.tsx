@@ -2537,15 +2537,30 @@ const handleSendRequest = useCallback(async (mode: SendMode = 'send') => {
           env: envMap,
           resolve: replaceWithEnv,
         }));
+        // Script que lançou ABORTA o envio, como no Postman.
+        //
+        // Antes o erro só era registrado e a request saía assim mesmo — o
+        // `throw` virava um aviso no console enquanto a chamada seguia com
+        // exatamente os dados que o script tentou impedir. Uma guarda que
+        // não guarda é pior que nenhuma: dá a impressão de proteção.
         if (preResult?.scriptError) {
+          const message = `Pre-request script error: ${preResult.scriptError}`;
           pushLog('error', `Pre-request script error: ${firstLine(preResult.scriptError)}`, {
             requestName: tab.name,
             source: 'script',
             detail: preResult.scriptError,
           });
+          patchTabRequestState(tabId, { error: message });
+          return;
         }
       } catch (e) {
-        pushLog('error', `Pre-request script error: ${e}`, { requestName: tab.name, source: 'script' });
+        // O próprio sandbox falhou (não compilou, travou). Também não envia:
+        // o script não chegou a rodar, então nada garante que a request
+        // esteja no estado que ele deixaria.
+        const message = `Pre-request script error: ${e}`;
+        pushLog('error', message, { requestName: tab.name, source: 'script' });
+        patchTabRequestState(tabId, { error: message });
+        return;
       }
     }
 

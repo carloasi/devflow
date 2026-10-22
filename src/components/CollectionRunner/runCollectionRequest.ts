@@ -389,15 +389,39 @@ export async function runCollectionRequest(
         env: currentEnv,
         resolve: replaceWithEnv,
       }));
-      if (preResult?.scriptError) scriptError = `Pre-request script error: ${preResult.scriptError}`;
       if (preResult?.logs?.length) {
         scriptLogs.push(...preResult.logs.map(l => ({ ...l, phase: 'pre-request' as const })));
       }
+      // Script que lançou aborta o passo, como no Postman e como no botão
+      // Send. Seguir enviaria justamente o que a guarda tentou impedir, e o
+      // passo apareceria verde no relatório.
+      if (preResult?.scriptError) {
+        return {
+          itemId: item.id,
+          status: 'error',
+          responseTime: 0,
+          tests: [],
+          errorMessage: `Pre-request script error: ${preResult.scriptError}`,
+          envAfter: currentEnv,
+          logs: scriptLogs,
+          variablesSet,
+        };
+      }
     } catch (e) {
-      // Antes isso só ia pro devtools console (console.log) — o usuário não
-      // via nada no Runner indicando que o pre-request script nem rodou.
+      // O próprio sandbox falhou (não compilou, travou): o script nem chegou
+      // a rodar, então nada garante que a request esteja no estado que ele
+      // deixaria. Aborta, como quando o script lança.
       console.log('Runner: erro no pre-request script:', e);
-      scriptError = `Pre-request script error: ${e}`;
+      return {
+        itemId: item.id,
+        status: 'error',
+        responseTime: 0,
+        tests: [],
+        errorMessage: `Pre-request script error: ${e}`,
+        envAfter: currentEnv,
+        logs: scriptLogs,
+        variablesSet,
+      };
     }
   }
 

@@ -66,6 +66,26 @@ pm.request.headers.upsert({ key: 'X-Trace', value: id })
 pm.request.headers.remove('X-Trace')
 ```
 
+## Throwing from a pre-request script aborts the send
+
+An uncaught error in a **pre-request** script stops the request — nothing is
+sent, and the message appears where the response would be:
+
+```js
+if (!pm.variables.get('userAgent').match(/(salesb2b\/)\w+/)) {
+  throw new Error("The 'User-Agent' variable must be filled in.");
+}
+```
+
+This is how a guard is supposed to work, and how Postman behaves. It applies
+to the Send button and to the Collection Runner alike, where the step is
+reported as failed instead of green.
+
+A **post-response** script is different: the call already happened, so a throw
+there is recorded against the request and the response is kept. The load test
+also keeps running and counts the failure under *Script errors* — it measures
+rather than guards.
+
 ## Tests and assertions
 
 ```js
