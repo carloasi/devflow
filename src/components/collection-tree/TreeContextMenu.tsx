@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef } from 'react'
-import { ArrowDown, ArrowUp, Clipboard, Copy, CornerLeftUp } from 'lucide-react'
+import { ArrowDown, ArrowUp, Clipboard, Copy, CornerLeftUp, ListOrdered } from 'lucide-react'
 import { CollectionItem } from '@/app/types/CollectionItem'
 
 interface Props {
@@ -23,6 +23,10 @@ interface Props {
     onOut: () => void
   }
   onPaste: () => void
+  // Renumera os filhos diretos da pasta: "01 - ", "02 - ". Só aparece em
+  // pasta com mais de um filho — numerar um item só não ordena nada.
+  onNumberChildren?: () => void
+  numberableCount?: number
   onClose: () => void
 }
 
@@ -38,6 +42,8 @@ export function TreeContextMenu({
   canPaste,
   onCopy,
   onPaste,
+  onNumberChildren,
+  numberableCount,
   move,
   onClose,
 }: Props) {
@@ -177,6 +183,22 @@ export function TreeContextMenu({
           >
             <CornerLeftUp size={14} className="text-pm-text-muted" />
             Move out of folder
+          </button>
+        </>
+      )}
+
+      {/* Numerar à mão uma pasta de vinte fluxos é tedioso e desalinha ao
+          inserir um no meio. */}
+      {onNumberChildren && (numberableCount ?? 0) > 1 && (
+        <>
+          <div className="my-1 h-px bg-pm-border/70" />
+          <button
+            onClick={() => { onNumberChildren(); onClose() }}
+            title={`Rename the ${numberableCount} items in this folder to "01 - ", "02 - "…`}
+            className={itemClass}
+          >
+            <ListOrdered size={14} className="text-pm-text-muted" />
+            Number items
           </button>
         </>
       )}

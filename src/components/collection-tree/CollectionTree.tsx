@@ -42,6 +42,8 @@ import {
   canMoveUp,
   canMoveDown,
   canMoveOut,
+  numberFolderChildren,
+  restoreNames,
 } from './utils/tree.utils'
 import { buildItemCurl, buildItemUrl } from './utils/requestCopy'
 import { ChevronRight, FileText, Folder, GripVertical, Star } from 'lucide-react'
@@ -263,6 +265,29 @@ export function CollectionTree({
     onDown: () => onUpdateItems(moveDown(items, id)),
     onOut: () => onUpdateItems(moveOut(items, id)),
   }), [items, onUpdateItems])
+
+  /**
+   * Renumera os filhos diretos da pasta: "01 - ", "02 - ".
+   *
+   * Oferece desfazer no toast em vez de pedir confirmação antes: são muitos
+   * renomes de uma vez, o app não tem undo, e perguntar antes atrasaria a
+   * ação comum para proteger do caso raro. Com o desfazer ali, o caso raro
+   * custa um clique.
+   */
+  const handleNumberChildren = useCallback((folderId: string) => {
+    const { items: next, previous } = numberFolderChildren(items, folderId)
+    if (previous.length === 0) {
+      toast.info('Already numbered.')
+      return
+    }
+
+    const before = items
+    onUpdateItems(next)
+    toast.success(`Numbered ${previous.length} item${previous.length === 1 ? '' : 's'}.`, {
+      action: { label: 'Undo', onClick: () => onUpdateItems(restoreNames(before, previous)) },
+      duration: 8000,
+    })
+  }, [items, onUpdateItems])
 
   const handleCopySelected = useCallback(() => {
     copyItems()
@@ -1013,6 +1038,12 @@ export function CollectionTree({
           onCopy={handleCopySelected}
           onPaste={handlePaste}
           move={contextMenu.item ? buildMoveActions(contextMenu.item.id) : undefined}
+          numberableCount={contextMenu.item?.item?.length ?? 0}
+          onNumberChildren={
+            contextMenu.item?.type === 'folder'
+              ? () => handleNumberChildren(contextMenu.item!.id)
+              : undefined
+          }
           onClose={() => setContextMenu(null)}
         />
       )}

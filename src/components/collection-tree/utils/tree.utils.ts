@@ -1055,3 +1055,76 @@ export function moveNode(
 
 //   return result
 // }
+/**
+ * Tira um prefixo de numeração do começo do nome.
+ *
+ * Sem isto, renumerar duas vezes empilharia: `01 - 01 - Booking Flow`. Casa
+ * o formato que a própria numeração escreve (dígitos, espaço, hífen, espaço)
+ * e também o sem espaços, que aparece em nome digitado à mão.
+ */
+export function stripNumberPrefix(name: string): string {
+  return name.replace(/^\s*\d+\s*-\s*/, '')
+}
+
+/** Largura do número: 2 por padrão, mais quando a pasta exige. */
+export function numberWidth(total: number): number {
+  return Math.max(2, String(total).length)
+}
+
+/**
+ * Renumera os filhos DIRETOS de uma pasta: `01 - `, `02 - `, na ordem da
+ * árvore.
+ *
+ * Só os diretos. Descer recursivamente faria cada subpasta recomeçar do 01, e
+ * o item escolhido no menu é esta pasta — renomear coisas que não estão à
+ * vista é o tipo de efeito que ninguém pediu.
+ *
+ * Devolve a árvore nova e os nomes anteriores, para quem chama poder desfazer:
+ * são muitos renomes de uma vez e não há undo no app.
+ */
+export function numberFolderChildren(
+  items: CollectionItem[],
+  folderId: string
+): { items: CollectionItem[]; previous: Array<{ id: string; name: string }> } {
+  const previous: Array<{ id: string; name: string }> = []
+
+  const walk = (list: CollectionItem[]): CollectionItem[] =>
+    list.map(item => {
+      if (item.id !== folderId) {
+        return item.item ? { ...item, item: walk(item.item) } : item
+      }
+
+      const children = item.item ?? []
+      const width = numberWidth(children.length)
+
+      return {
+        ...item,
+        item: children.map((child, i) => {
+          const name = `${String(i + 1).padStart(width, '0')} - ${stripNumberPrefix(child.name)}`
+          if (name === child.name) return child
+          previous.push({ id: child.id, name: child.name })
+          return { ...child, name }
+        }),
+      }
+    })
+
+  return { items: walk(items), previous }
+}
+
+/** Devolve os nomes guardados por numberFolderChildren. */
+export function restoreNames(
+  items: CollectionItem[],
+  previous: Array<{ id: string; name: string }>
+): CollectionItem[] {
+  if (previous.length === 0) return items
+  const byId = new Map(previous.map(p => [p.id, p.name]))
+
+  const walk = (list: CollectionItem[]): CollectionItem[] =>
+    list.map(item => {
+      const name = byId.get(item.id)
+      const next = name !== undefined ? { ...item, name } : item
+      return next.item ? { ...next, item: walk(next.item) } : next
+    })
+
+  return walk(items)
+}

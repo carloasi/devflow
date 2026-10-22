@@ -15,6 +15,10 @@ import {
   canMoveOut,
   findRequestsByName,
   partitionExisting,
+  stripNumberPrefix,
+  numberWidth,
+  numberFolderChildren,
+  restoreNames,
 } from './tree.utils';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 
@@ -414,5 +418,150 @@ describe('partitionExisting', () => {
 
   it('preserva a ordem recebida', () => {
     expect(partitionExisting(arvore, ['r2', 'r1']).present).toEqual(['r2', 'r1'])
+  })
+})
+
+describe('stripNumberPrefix', () => {
+  // Sem isto, renumerar duas vezes empilha: "01 - 01 - Booking Flow".
+  it('tira o prefixo que a própria numeração escreve', () => {
+    expect(stripNumberPrefix('01 - Booking Flow')).toBe('Booking Flow')
+  })
+
+  it('tira também o digitado à mão, sem espaços', () => {
+    expect(stripNumberPrefix('3-Consultar histórico')).toBe('Consultar histórico')
+  })
+
+  it('não mexe em nome sem prefixo', () => {
+    expect(stripNumberPrefix('Booking Flow | 1 ADT')).toBe('Booking Flow | 1 ADT')
+  })
+
+  // Hífen no meio do nome não é prefixo.
+  it('só no começo', () => {
+    expect(stripNumberPrefix('Flow 2 - com infant')).toBe('Flow 2 - com infant')
+  })
+})
+
+describe('numberWidth', () => {
+  it('dois dígitos por padrão', () => {
+    expect(numberWidth(3)).toBe(2)
+    expect(numberWidth(99)).toBe(2)
+  })
+
+  it('alarga quando a pasta exige', () => {
+    expect(numberWidth(100)).toBe(3)
+  })
+})
+
+describe('numberFolderChildren', () => {
+  const pasta = (children: CollectionItem[]): CollectionItem[] => [
+    { id: 'c1', name: 'Coleção', type: 'folder', item: [
+      { id: 'f1', name: 'Flows', type: 'folder', item: children },
+      { id: 'outro', name: 'Fora', type: 'request' },
+    ] } as CollectionItem,
+  ]
+
+  const nomes = (items: CollectionItem[]) =>
+    (items[0].item![0].item ?? []).map(c => c.name)
+
+  it('numera na ordem da árvore', () => {
+    const { items } = numberFolderChildren(
+      pasta([
+        { id: 'a', name: 'Criação de reserva 1 ADT', type: 'folder' } as CollectionItem,
+        { id: 'b', name: 'Consultar histórico', type: 'folder' } as CollectionItem,
+      ]),
+      'f1'
+    )
+    expect(nomes(items)).toEqual(['01 - Criação de reserva 1 ADT', '02 - Consultar histórico'])
+  })
+
+  it('renumerar de novo não empilha prefixo', () => {
+    const uma = numberFolderChildren(
+      pasta([
+        { id: 'a', name: '05 - Primeiro', type: 'folder' } as CollectionItem,
+        { id: 'b', name: '09 - Segundo', type: 'folder' } as CollectionItem,
+      ]),
+      'f1'
+    )
+    expect(nomes(uma.items)).toEqual(['01 - Primeiro', '02 - Segundo'])
+  })
+
+  it('numera request e pasta igualmente', () => {
+    const { items } = numberFolderChildren(
+      pasta([
+        { id: 'a', name: 'Token', type: 'request' } as CollectionItem,
+        { id: 'b', name: 'Fluxo', type: 'folder' } as CollectionItem,
+      ]),
+      'f1'
+    )
+    expect(nomes(items)).toEqual(['01 - Token', '02 - Fluxo'])
+  })
+
+  // Descer faria cada subpasta recomeçar do 01, renomeando o que não está
+  // à vista.
+  it('não desce para os netos', () => {
+    const { items } = numberFolderChildren(
+      pasta([
+        { id: 'a', name: 'Pai', type: 'folder', item: [
+          { id: 'neto', name: 'Neto', type: 'request' } as CollectionItem,
+        ] } as CollectionItem,
+      ]),
+      'f1'
+    )
+    expect(items[0].item![0].item![0].item![0].name).toBe('Neto')
+  })
+
+  it('não toca em quem está fora da pasta', () => {
+    const { items } = numberFolderChildren(
+      pasta([{ id: 'a', name: 'X', type: 'folder' } as CollectionItem]),
+      'f1'
+    )
+    expect(items[0].item![1].name).toBe('Fora')
+  })
+
+  it('passa de 99 e alarga', () => {
+    const muitos = Array.from({ length: 100 }, (_, i) => ({ id: 'i' + i, name: 'Item', type: 'request' }) as CollectionItem)
+    const { items } = numberFolderChildren(pasta(muitos), 'f1')
+    expect(nomes(items)[0]).toBe('001 - Item')
+    expect(nomes(items)[99]).toBe('100 - Item')
+  })
+
+  it('pasta vazia não quebra', () => {
+    expect(() => numberFolderChildren(pasta([]), 'f1')).not.toThrow()
+  })
+
+  it('pasta inexistente devolve a árvore equivalente', () => {
+    const { items, previous } = numberFolderChildren(pasta([]), 'fantasma')
+    expect(previous).toEqual([])
+    expect(items[0].item![1].name).toBe('Fora')
+  })
+
+  // Nome que já estava certo não entra no desfazer — senão "undo" mexeria
+  // em quem não mudou.
+  it('guarda só os nomes que mudaram', () => {
+    const { previous } = numberFolderChildren(
+      pasta([
+        { id: 'a', name: '01 - Primeiro', type: 'folder' } as CollectionItem,
+        { id: 'b', name: 'Segundo', type: 'folder' } as CollectionItem,
+      ]),
+      'f1'
+    )
+    expect(previous).toEqual([{ id: 'b', name: 'Segundo' }])
+  })
+})
+
+describe('restoreNames', () => {
+  it('devolve os nomes anteriores', () => {
+    const antes: CollectionItem[] = [
+      { id: 'c1', name: 'C', type: 'folder', item: [
+        { id: 'a', name: '01 - X', type: 'request' } as CollectionItem,
+      ] } as CollectionItem,
+    ]
+    const voltou = restoreNames(antes, [{ id: 'a', name: 'X' }])
+    expect(voltou[0].item![0].name).toBe('X')
+  })
+
+  it('lista vazia devolve a mesma árvore', () => {
+    const arvore: CollectionItem[] = [{ id: 'a', name: 'A', type: 'request' } as CollectionItem]
+    expect(restoreNames(arvore, [])).toBe(arvore)
   })
 })
