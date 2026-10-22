@@ -22,6 +22,10 @@ export interface JUnitRequest {
   tests: TestResult[];
   /** Falha da própria request (rede, status, erro de script), se houve. */
   failure?: string;
+  /** Status HTTP, para constar no relatório mesmo sem asserção. */
+  httpStatus?: number;
+  /** URL efetivamente chamada, com as variáveis já resolvidas. */
+  resolvedUrl?: string;
 }
 
 export interface JUnitRun {
@@ -69,19 +73,30 @@ export function buildJUnitXml(run: JUnitRun): string {
     totalMs += req.durationMs;
     const seconds = (req.durationMs / 1000).toFixed(3);
     const classname = clean(caseName(req));
+    let emitted = 0;
+
+    // O que o CI verá sobre esta request, com asserção ou sem.
+    const detail: string[] = [];
+    if (req.httpStatus !== undefined) detail.push(`HTTP ${req.httpStatus}`);
+    detail.push(`${req.durationMs} ms`);
+    if (req.resolvedUrl) detail.push(clean(req.resolvedUrl));
+    const systemOut = `      <system-out>${detail.join(' · ')}</system-out>`;
 
     // A request falhar é, ela própria, um caso de teste: senão uma collection
     // que nem chegou a responder apareceria como "0 testes, tudo certo".
     if (req.failure) {
       tests++;
       failures++;
+      emitted++;
       body.push(`    <testcase classname="${classname}" name="request" time="${seconds}">`);
       body.push(`      <failure message="${clean(req.failure.split('\n')[0])}">${clean(req.failure)}</failure>`);
+      body.push(systemOut);
       body.push('    </testcase>');
     }
 
     for (const t of req.tests) {
       tests++;
+      emitted++;
       const name = clean(t.name);
       if (t.passed) {
         body.push(`    <testcase classname="${classname}" name="${name}" time="${seconds}" />`);
@@ -91,6 +106,19 @@ export function buildJUnitXml(run: JUnitRun): string {
         body.push(`      <failure message="${clean(t.message || 'assertion failed')}" />`);
         body.push('    </testcase>');
       }
+    }
+
+    // Request que rodou, não falhou e não tem asserção nenhuma.
+    //
+    // Antes isso não gerava nada, e um fluxo inteiro sem pm.test saía como
+    // `tests="0" failures="0"` — que num CI é VERDE, e indistinguível de um
+    // fluxo que não chegou a rodar. A request executada é o caso mínimo: ela
+    // foi chamada e respondeu.
+    if (emitted === 0) {
+      tests++;
+      body.push(`    <testcase classname="${classname}" name="request" time="${seconds}">`);
+      body.push(systemOut);
+      body.push('    </testcase>');
     }
   }
 

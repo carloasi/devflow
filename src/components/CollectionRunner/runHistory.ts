@@ -20,6 +20,10 @@ export interface StoredRun {
   collectionName: string;
   /** ISO. É o que o painel mostra como "último run · <quando>". */
   finishedAt: string;
+  /** ISO. Ausente em runs gravados antes do export existir. */
+  startedAt?: string;
+  /** Nome do environment usado, pro export dizer contra o quê o fluxo rodou. */
+  environmentName?: string;
   entries: RunEntry[];
   /** Entradas foram descartadas pra caber na cota; o painel avisa. */
   truncated?: boolean;

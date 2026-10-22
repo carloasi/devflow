@@ -1,6 +1,7 @@
 'use client'
 
 import { buildJUnitXml } from '@/lib/junitReport'
+import { buildRunReport } from '@/lib/runReport'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Play, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2} from 'lucide-react'
@@ -132,6 +133,10 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
   // por recém-executado.
   const [restoredAt, setRestoredAt] = useState<string | null>(null)
   const [restoredTruncated, setRestoredTruncated] = useState(false)
+  // Quando e contra qual environment o run que está na tela rodou — vai pro
+  // export. Guardado à parte porque o seletor de environment pode ter mudado
+  // depois do run.
+  const [runMeta, setRunMeta] = useState<{ startedAt?: string; finishedAt?: string; environmentName?: string }>({})
   const drag = useDraggableDialog()
 
   // ── Edição das variáveis que o run gravou ──────────────────────────────
@@ -211,6 +216,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setEntries([])
     setRestoredAt(null)
     setRestoredTruncated(false)
+    setRunMeta({})
   }
 
   useEffect(() => {
@@ -226,6 +232,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setEntries([])
     setRestoredAt(null)
     setRestoredTruncated(false)
+    setRunMeta({})
 
     // Restaura o último run em vez de deixar a tela vazia: um fluxo de 12
     // requests encadeadas leva meio minuto, e antes fechar o painel sem
@@ -242,6 +249,11 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
           setEntries(stored.entries)
           setRestoredAt(stored.finishedAt)
           setRestoredTruncated(!!stored.truncated)
+          setRunMeta({
+            startedAt: stored.startedAt,
+            finishedAt: stored.finishedAt,
+            environmentName: stored.environmentName,
+          })
         })
         .catch(e => console.log('Could not restore the last run:', e))
     }
@@ -330,10 +342,13 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
       }
     }
 
+    const runStartedAt = new Date().toISOString()
+    const environmentName = baseEnv?.name
     setEntries(runEntries)
     setRunning(true)
     setRestoredAt(null)
     setRestoredTruncated(false)
+    setRunMeta({ startedAt: runStartedAt, environmentName })
     stopRef.current = false
 
     // O estado final precisa ser montado aqui, em paralelo: as atualizações de
@@ -359,7 +374,9 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
       const envBefore = envMap
       const requestId = crypto.randomUUID()
       currentRequestIdRef.current = requestId
+      const startedAt = new Date().toISOString()
       const outcome = await runCollectionRequest(reqItem, envMap, { requestId })
+      const finishedAt = new Date().toISOString()
       currentRequestIdRef.current = null
 
       // Interrompida pelo Stop: registra como cancelada e não aplica nada
@@ -368,6 +385,8 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
         const cancelled: RunEntry = {
           ...entry,
           state: 'error',
+          startedAt,
+          finishedAt,
           outcome: { ...outcome, errorMessage: 'Cancelled (Stop)' },
         }
         finalized.set(entry.id, cancelled)
@@ -377,7 +396,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
 
       envMap = outcome.envAfter
 
-      const done: RunEntry = { ...entry, state: outcome.status, outcome }
+      const done: RunEntry = { ...entry, state: outcome.status, outcome, startedAt, finishedAt }
       finalized.set(entry.id, done)
       setEntries(prev => prev.map(e => (e.id === entry.id ? done : e)))
 
@@ -389,6 +408,8 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     }
 
     setRunning(false)
+    const runFinishedAt = new Date().toISOString()
+    setRunMeta({ startedAt: runStartedAt, finishedAt: runFinishedAt, environmentName })
 
     // Guarda as linhas que não chegaram a rodar (um Stop no meio) com o estado
     // 'pending' que tinham: sem isso o placar ao reabrir viraria "10/10" e o
@@ -397,7 +418,9 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
       saveLastRun({
         collectionId: item.id,
         collectionName: item.name,
-        finishedAt: new Date().toISOString(),
+        finishedAt: runFinishedAt,
+        startedAt: runStartedAt,
+        environmentName,
         entries: runEntries.map(e => finalized.get(e.id) ?? e),
       })
     }
@@ -449,6 +472,31 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
       setCopiedReport(true)
       setTimeout(() => setCopiedReport(false), 1500)
     } catch (e) { console.log('Copy failure report error:', e) }
+  }
+
+  const exportRun = async () => {
+    const report = buildRunReport({
+      collectionName: item?.name ?? 'Collection run',
+      environmentName: runMeta.environmentName,
+      startedAt: runMeta.startedAt,
+      finishedAt: runMeta.finishedAt,
+      entries,
+      isFailure: hasFailureReason,
+      failureReason: e => failureReason(e),
+    })
+    // Data e hora no nome: exports do mesmo fluxo se acumulam na pasta, e
+    // sem isso um sobrescreveria o outro.
+    const stamp = (report.startedAt ?? report.exportedAt).slice(0, 19).replace(/[:T]/g, '-')
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog')
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs')
+      const filePath = await save({
+        title: 'Export run',
+        defaultPath: `${(item?.name ?? 'run').replace(/[\\/:*?"<>|]/g, '-')}.run-${stamp}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      })
+      if (filePath) await writeTextFile(filePath, JSON.stringify(report, null, 2))
+    } catch (e) { console.log('Run export error:', e) }
   }
 
   if (!item) return null
@@ -1101,6 +1149,16 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                 <div className="flex items-center gap-3">
                   {!running && summary.done > 0 && (
                     <button
+                      onClick={exportRun}
+                      title="Export the whole flow as JSON — each step with request, response, tests, variables and when it ran"
+                      className="flex items-center gap-1 text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
+                    >
+                      <Download size={11} />
+                      Export
+                    </button>
+                  )}
+                  {!running && summary.done > 0 && (
+                    <button
                       onClick={async () => {
                         const xml = buildJUnitXml({
                           suiteName: item?.name ?? 'Collection run',
@@ -1113,6 +1171,8 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                               durationMs: e.outcome!.responseTime,
                               tests: e.outcome!.tests,
                               failure: hasFailureReason(e) ? failureReason(e) : undefined,
+                              httpStatus: e.outcome!.httpStatus,
+                              resolvedUrl: e.outcome!.resolvedUrl,
                             })),
                         })
                         try {
@@ -1144,7 +1204,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                   )}
                   {!running && (
                     <button
-                      onClick={() => { setEntries([]); setRestoredAt(null); setRestoredTruncated(false) }}
+                      onClick={() => { setEntries([]); setRestoredAt(null); setRestoredTruncated(false); setRunMeta({}) }}
                       className="text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
                     >
                       Run again

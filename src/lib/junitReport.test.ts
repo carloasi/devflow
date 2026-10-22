@@ -89,3 +89,71 @@ describe('buildJUnitXml', () => {
     expect(suite.getAttribute('failures')).toBe('0');
   });
 });
+
+// Este bloco existe porque o relatório saía VAZIO para o caso mais comum:
+// um fluxo de requests sem nenhum pm.test. `tests="0" failures="0"` é verde
+// no CI, e indistinguível de um fluxo que não chegou a rodar.
+describe('request sem asserção', () => {
+  const semTeste = [
+    { name: 'Token v1', method: 'POST', durationMs: 490, tests: [], httpStatus: 201 },
+    { name: 'Authenticate v1', method: 'POST', durationMs: 745, tests: [], httpStatus: 201 },
+  ];
+
+  it('cada request executada conta como um caso', () => {
+    const suite = parse(run(semTeste)).querySelector('testsuite')!;
+    expect(suite.getAttribute('tests')).toBe('2');
+    expect(suite.getAttribute('failures')).toBe('0');
+  });
+
+  it('os casos trazem o nome e o método da request', () => {
+    const casos = [...parse(run(semTeste)).querySelectorAll('testcase')];
+    expect(casos.map(c => c.getAttribute('classname'))).toEqual([
+      'POST Token v1',
+      'POST Authenticate v1',
+    ]);
+  });
+
+  it('o status HTTP e o tempo ficam visíveis no relatório', () => {
+    const out = parse(run(semTeste)).querySelector('testcase > system-out')!;
+    expect(out.textContent).toContain('HTTP 201');
+    expect(out.textContent).toContain('490 ms');
+  });
+
+  it('a URL resolvida entra quando existe', () => {
+    const xml = run([
+      { name: 'T', durationMs: 10, tests: [], httpStatus: 200, resolvedUrl: 'https://api.x/v1/token' },
+    ]);
+    expect(parse(xml).querySelector('system-out')!.textContent).toContain('https://api.x/v1/token');
+  });
+
+  it('sem status ainda assim gera o caso', () => {
+    const suite = parse(run([{ name: 'T', durationMs: 5, tests: [] }])).querySelector('testsuite')!;
+    expect(suite.getAttribute('tests')).toBe('1');
+  });
+
+  // O caso mínimo não pode duplicar o que já foi reportado.
+  it('request COM asserção não ganha um caso extra', () => {
+    const xml = run([
+      { name: 'T', durationMs: 10, httpStatus: 200, tests: [{ name: 'status é 200', passed: true }] },
+    ]);
+    const suite = parse(xml).querySelector('testsuite')!;
+    expect(suite.getAttribute('tests')).toBe('1');
+    expect(parse(xml).querySelector('testcase')!.getAttribute('name')).toBe('status é 200');
+  });
+
+  it('request que falhou também não ganha caso extra', () => {
+    const xml = run([{ name: 'T', durationMs: 10, tests: [], failure: 'connection refused' }]);
+    const suite = parse(xml).querySelector('testsuite')!;
+    expect(suite.getAttribute('tests')).toBe('1');
+    expect(suite.getAttribute('failures')).toBe('1');
+  });
+
+  // URL resolvida pode trazer & de querystring; o XML não pode quebrar.
+  it('a URL é escapada', () => {
+    const xml = run([
+      { name: 'T', durationMs: 5, tests: [], resolvedUrl: 'https://x/a?b=1&c=<2>' },
+    ]);
+    expect(() => parse(xml)).not.toThrow();
+    expect(parse(xml).querySelector('system-out')!.textContent).toContain('b=1&c=<2>');
+  });
+});

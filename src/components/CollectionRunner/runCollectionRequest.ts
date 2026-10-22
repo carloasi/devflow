@@ -125,6 +125,10 @@ export interface RunEntry {
   method?: string;
   state: 'pending' | 'running' | 'success' | 'error';
   outcome?: RunItemOutcome;
+  /** ISO — quando o passo saiu. Ausente em run antigo ou passo que não rodou. */
+  startedAt?: string;
+  /** ISO — quando a resposta (ou o erro) voltou. */
+  finishedAt?: string;
 }
 
 const RESPONSE_SNIPPET_MAX = 2000;
