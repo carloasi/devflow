@@ -3621,6 +3621,61 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     }
   }, [collections, importData]);
 
+  /**
+   * Responde "tem algo novo?" sem abrir a revisão.
+   *
+   * O pull também avisa quando não há nada — mas quando HÁ, ele já entra na
+   * tela de comparação. Querer só saber, para decidir a hora de mexer, era
+   * um caminho que não existia: a verificação do workspace inteiro vive no
+   * painel de sync e abre a mesma tela.
+   *
+   * A resposta vem num toast com atalho para revisar, então saber e agir
+   * continuam a um clique de distância.
+   */
+  const handleCheckCollectionUpdates = useCallback(async (item: CollectionItem) => {
+    if (pullingCollectionRef.current) return;
+    pullingCollectionRef.current = true;
+
+    try {
+      const remote = await githubSyncRef.current?.fetchWorkspace(
+        selectedWorkspaceRef.current,
+        undefined,
+        `Checking "${item.name}" on GitHub...`
+      );
+      if (!remote) return;
+
+      const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
+      const nodes = filterSubtree(diffTrees(collections, remoteTree), item.id);
+
+      if (nodes.length === 0) {
+        toast.success(`"${item.name}" is up to date.`);
+        return;
+      }
+
+      const added = nodes.filter(n => n.change === 'added').length;
+      const removed = nodes.filter(n => n.change === 'removed').length;
+      const changed = nodes.length - added - removed;
+      const parts = [
+        changed > 0 ? `${changed} changed` : null,
+        added > 0 ? `${added} only on GitHub` : null,
+        removed > 0 ? `${removed} only here` : null,
+      ].filter(Boolean);
+
+      toast.info(
+        `${nodes.length} difference${nodes.length === 1 ? '' : 's'} in "${item.name}"`,
+        {
+          description: parts.join(' · '),
+          duration: 10000,
+          action: { label: 'Review', onClick: () => { void handlePullCollection(item) } },
+        }
+      );
+    } catch (e) {
+      toast.error('Could not read GitHub', { description: (e as Error)?.message ?? String(e) });
+    } finally {
+      pullingCollectionRef.current = false;
+    }
+  }, [collections, importData, handlePullCollection]);
+
   // Enviar UMA collection pela árvore. O erro é engolido de propósito: o
   // painel de sync já mostra o motivo (conflito, falta de passphrase, rede),
   // e deixar a exceção subir daqui derrubaria o clique num menu de contexto.
@@ -4807,6 +4862,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               onLoadTestItem={setLoadTestItem}
               onPushCollection={handlePushCollection}
               onPullCollection={handlePullCollection}
+              onCheckUpdates={handleCheckCollectionUpdates}
               onAddExampleItem={handleRequestSelect}
               folderPickMode={!!flowPickerSession}
               pickerLabel={flowPickerSession ? `Select a folder to create the "${flowPickerSession.name}" flow` : undefined}

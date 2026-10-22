@@ -74,6 +74,7 @@ interface Props {
   onLoadTestItem?: (item: CollectionItem) => void
   onPushCollection?: (item: CollectionItem) => void
   onPullCollection?: (item: CollectionItem) => void
+  onCheckUpdates?: (item: CollectionItem) => void
   onAddExampleItem?: (item: CollectionItem) => void
   // Modo "escolher pasta" (ver TreeNode.tsx) — usado pelo fluxo de
   // Tab Group -> Flow.
@@ -173,6 +174,7 @@ export function CollectionTree({
   onLoadTestItem,
   onPushCollection,
   onPullCollection,
+  onCheckUpdates,
   onAddExampleItem,
   folderPickMode,
   onPickFolder,
@@ -378,6 +380,7 @@ export function CollectionTree({
     loadTest: onLoadTestItem ? (item: CollectionItem) => onLoadTestItem(item) : undefined,
     pushCollection: onPushCollection ? (item: CollectionItem) => onPushCollection(item) : undefined,
     pullCollection: onPullCollection ? (item: CollectionItem) => onPullCollection(item) : undefined,
+    checkUpdates: onCheckUpdates ? (item: CollectionItem) => onCheckUpdates(item) : undefined,
     addExample: onAddExampleItem
       ? (item: CollectionItem) => onAddExampleItem(actions.createExample(item))
       : undefined,

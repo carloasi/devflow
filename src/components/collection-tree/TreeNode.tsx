@@ -54,6 +54,7 @@ interface Props {
     loadTest?: (item: CollectionItem) => void
     pushCollection?: (item: CollectionItem) => void
     pullCollection?: (item: CollectionItem) => void
+    checkUpdates?: (item: CollectionItem) => void
     addExample?: (item: CollectionItem) => void
     copyUrl?: (item: CollectionItem) => void
     copyCurl?: (item: CollectionItem) => void
@@ -649,6 +650,7 @@ export const TreeNode = memo(function TreeNode({
               // por collection, mas a escolha do que trazer não precisa ter
               // essa granularidade — o diff é recortado pela subárvore.
               onPullCollection={isFolder && actions.pullCollection ? () => actions.pullCollection!(item) : undefined}
+              onCheckUpdates={isFolder && actions.checkUpdates ? () => actions.checkUpdates!(item) : undefined}
               onAddExample={actions.addExample ? () => actions.addExample!(item) : undefined}
               onToggleStar={canToggleStar && actions.toggleStar ? () => actions.toggleStar!(item.id) : undefined}
               onCopyUrl={actions.copyUrl ? () => actions.copyUrl!(item) : undefined}

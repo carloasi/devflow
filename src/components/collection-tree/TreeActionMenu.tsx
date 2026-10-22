@@ -16,8 +16,7 @@ import {
   Terminal,
   Trash2,
   X,
-  Radio,
-} from 'lucide-react'
+  Radio, RefreshCw } from 'lucide-react'
 
 import {
   AlertDialog,
@@ -58,6 +57,8 @@ interface Props {
   // Baixa o que mudou no GitHub só desta collection, abrindo a tela de
   // comparação para escolher o que aceitar.
   onPullCollection?: () => void
+  // Só responde "tem algo novo?" — sem abrir a tela de revisão.
+  onCheckUpdates?: () => void
   onAddExample?: () => void
   onToggleStar?: () => void
   onCopyUrl?: () => void
@@ -80,6 +81,7 @@ export function TreeActionMenu({
   onLoadTest,
   onPushCollection,
   onPullCollection,
+  onCheckUpdates,
   onAddExample,
   onToggleStar,
   onCopyUrl,
@@ -217,6 +219,13 @@ export function TreeActionMenu({
               <DropdownMenuItem onClick={onPullCollection} className={itemClass}>
                 <Download size={14} className="text-pm-text-muted group-hover:text-pm-text" />
                 Pull from GitHub
+              </DropdownMenuItem>
+            )}
+
+            {onCheckUpdates && (
+              <DropdownMenuItem onClick={onCheckUpdates} className={itemClass}>
+                <RefreshCw size={14} className="text-pm-text-muted group-hover:text-pm-text" />
+                Check for updates
               </DropdownMenuItem>
             )}
 

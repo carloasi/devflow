@@ -46,6 +46,7 @@ interface SidebarProps {
   onLoadTestItem?: (item: CollectionItem) => void
   onPushCollection?: (item: CollectionItem) => void
   onPullCollection?: (item: CollectionItem) => void
+  onCheckUpdates?: (item: CollectionItem) => void
   onAddExampleItem?: (item: CollectionItem) => void
   // Modo "escolher pasta" — usado pelo botão "Convert to Flow" do
   // TabSessionSelector (ver AppLayout.tsx). Enquanto ativo, a árvore
@@ -69,6 +70,7 @@ export default function Sidebar({
   onLoadTestItem,
   onPushCollection,
   onPullCollection,
+  onCheckUpdates,
   onAddExampleItem,
   folderPickMode,
   pickerLabel,
@@ -413,6 +415,7 @@ export default function Sidebar({
           onLoadTestItem={onLoadTestItem}
           onPushCollection={onPushCollection}
           onPullCollection={onPullCollection}
+          onCheckUpdates={onCheckUpdates}
           onAddExampleItem={onAddExampleItem}
           folderPickMode={folderPickMode}
           onPickFolder={onPickFolder}
