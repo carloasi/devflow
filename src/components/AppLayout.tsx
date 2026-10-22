@@ -96,6 +96,7 @@ import { EditableTitle } from './EditableTitle.';
 import EnvironmentSelector from './EnvironmentSelector';
 import { loadActiveEnvironmentId, saveActiveEnvironmentId } from '@/lib/activeEnvironmentStore';
 import { buildEnvMap } from '@/lib/envMap';
+import { changedFieldLabels, describeChanges } from '@/lib/unsavedChanges';
 import { stripTabsForSession, sameSessionTabs } from '@/lib/tabSessions';
 import { safeSetItem, sweepDeadKeys } from '@/lib/safeStorage';
 import { loadWorkspaceLocalData, saveWorkspaceCollections, saveWorkspaceEnvironments } from '@/storage/localSyncStore';
@@ -2177,6 +2178,24 @@ const requestCloseTabs = useCallback((tabIds: string[], onConfirm: () => void) =
   }
   setPendingClose({ dirtyTabs: dirty, tabIds, onConfirm });
 }, [tabs, cleanupTabRequestStates]);
+
+  /**
+   * Quais campos cada aba pendente gravaria.
+   *
+   * Monta o item que o save produziria (mesma função do autosave) e compara
+   * com o que está na árvore — a mesma pergunta que a tela de comparação com
+   * o GitHub responde, pela mesma função.
+   */
+  const pendingChanges = useMemo(() => {
+    const out = new Map<string, string[]>();
+    if (!pendingClose) return out;
+
+    for (const tab of pendingClose.dirtyTabs) {
+      const saved = findNodeById(collections, tab.id);
+      out.set(tab.id, saved ? changedFieldLabels(saved, applyTabUpdatesToItem(saved, tab)) : []);
+    }
+    return out;
+  }, [pendingClose, collections]);
 
   const handleCloseTab = useCallback((tabIdToClose: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -5235,6 +5254,20 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
                     ? `Do you want to save the changes you made to "${pendingClose.dirtyTabs[0].name}"?`
                     : `Do you want to save the changes made to ${pendingClose.dirtyTabs.length} tabs?`}
                 </span>
+
+                {/* O que exatamente vai ser gravado. Sem isto o aviso pede uma
+                    decisão sobre algo que não mostra, e o caminho seguro vira
+                    sempre "Save" — inclusive quando a alteração foi sem
+                    querer. */}
+                {pendingClose.dirtyTabs.length === 1 && (() => {
+                  const labels = pendingChanges.get(pendingClose.dirtyTabs[0].id) ?? [];
+                  if (labels.length === 0) return null;
+                  return (
+                    <span className="mt-1 text-[11.5px] text-pm-text-secondary">
+                      Changed: <span className="text-pm-text">{describeChanges(labels)}</span>
+                    </span>
+                  );
+                })()}
               </div>
             </div>
 
@@ -5247,6 +5280,11 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
                   >
                     <span className="w-1.5 h-1.5 rounded-full bg-[#4ff09d] flex-shrink-0" />
                     <span className="truncate">{t.name}</span>
+                    {(pendingChanges.get(t.id)?.length ?? 0) > 0 && (
+                      <span className="ml-auto shrink-0 text-[10.5px] text-pm-text-muted">
+                        {describeChanges(pendingChanges.get(t.id)!, 2)}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
