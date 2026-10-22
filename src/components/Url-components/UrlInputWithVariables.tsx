@@ -9,7 +9,7 @@ import React, {
   useCallback,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { History, Copy, Check, RotateCcw, X, Trash2 } from 'lucide-react';
+import { History, Copy, Check, RotateCcw, X, Trash2, List } from 'lucide-react';
 import { useEnvironment } from '@/components/EnvironmentContext';
 import { QueryParam } from '@/app/types/QueryParam';
 import { getPathParameterValue, getLegacyStoredTabs } from '@/lib/utils';
@@ -98,6 +98,10 @@ export const UrlInputWithVariables: React.FC<UrlInputProps> = ({
     originalPart: string;
   } | null>(null);
   const [editCoords, setEditCoords]     = useState({ x: 0, y: 0 });
+  // Token que a próxima escolha na lista deve SUBSTITUIR — preenchido ao
+  // trocar do popover para a lista. Vazio = a escolha insere no cursor, que
+  // é o comportamento de quando se digita "{{".
+  const replaceTargetRef = useRef<string | null>(null);
   const [tempVarValue, setTempVarValue] = useState('');
 
   const [originalTokenValue, setOriginalTokenValue] = useState<string | undefined>(undefined);
@@ -573,6 +577,19 @@ useLayoutEffect(() => {
 
   const selectSuggestion = (key: string) => {
     if (!inputRef.current) return;
+
+    // Veio do popover: troca aquele token pelo escolhido, em vez de inserir
+    // mais um. `originalPart` é o texto literal ("{{departureIda}}"), então
+    // a troca não depende de posição — que mudaria se a URL fosse editada.
+    const target = replaceTargetRef.current;
+    if (target) {
+      replaceTargetRef.current = null;
+      onChange(value.replace(target, `{{${key}}}`));
+      setShowSuggestions(false);
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
+
     const sel       = inputRef.current.selectionStart || 0;
     const before    = value.slice(0, sel);
     const after     = value.slice(sel);
@@ -586,6 +603,19 @@ useLayoutEffect(() => {
       const pos = newBefore.length;
       inputRef.current.setSelectionRange(pos, pos);
     });
+  };
+
+  /**
+   * Do popover de volta para a lista — mesma ideia do editor de corpo.
+   *
+   * Path param (`:nome`) não é variável de environment: ali a lista abre
+   * sem alvo, e escolher insere no cursor como de costume.
+   */
+  const switchToVariableList = () => {
+    if (!editingToken) return;
+    replaceTargetRef.current = editingToken.type === 'env' ? editingToken.originalPart : null;
+    setEditingToken(null);
+    openSuggestionsAt('');
   };
 
   // Ctrl+Space (Cmd+Space no macOS) — abre manualmente o dropdown quando o
@@ -1014,6 +1044,16 @@ useLayoutEffect(() => {
                   ) : (
                     <Copy size={11} />
                   )}
+                </button>
+
+                {/* Mesmo botão do popover do body — ver HttpBodyEditor. */}
+                <button
+                  type="button"
+                  onClick={switchToVariableList}
+                  title="Switch to the variable list — picking one replaces this token"
+                  className="shrink-0 p-1 rounded text-pm-text-muted hover:text-blue-400 hover:bg-pm-surface transition-colors cursor-pointer"
+                >
+                  <List size={11} />
                 </button>
               </div>
             </div>

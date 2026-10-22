@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { History, Copy, Check, RotateCcw, GripVertical, Trash2 } from 'lucide-react';
+import { History, Copy, Check, RotateCcw, GripVertical, Trash2, List } from 'lucide-react';
 import Editor, {
   loader,
   Monaco,
@@ -708,6 +708,29 @@ export default function HttpBodyEditor({
     openSuggestionsForTokenRef.current = openSuggestionsForToken;
   }, [openSuggestionsForToken]);
 
+  /**
+   * Do popover de volta para a lista de variáveis.
+   *
+   * O popover mostra UMA variável; a pergunta seguinte costuma ser "qual era
+   * mesmo a outra?". Sem isto o caminho é fechar o popover, apagar o token e
+   * digitar "{{" de novo só para ver a lista.
+   *
+   * Reaproveita o mesmo caminho do duplo clique num token, então escolher
+   * algo na lista TROCA o token em vez de inserir outro no cursor.
+   */
+  const switchToVariableList = useCallback(() => {
+    if (!editingKey) return;
+    // Procura a posição atual pelo nome, em vez de guardar a do momento em
+    // que o popover abriu: o texto pode ter mudado desde então, e uma
+    // posição velha substituiria o trecho errado.
+    const range = varRangesRef.current.find(r => r.key === editingKey);
+    if (!range) return;
+
+    const { x, y } = editCoords;
+    closeEditor();
+    openSuggestionsForTokenRef.current(range, x, y - 16);
+  }, [editingKey, editCoords, closeEditor]);
+
   const selectSuggestion = useCallback((key: string) => {
     const ed = editorRef.current;
     const monacoInstance = monacoRef.current;
@@ -1321,6 +1344,18 @@ export default function HttpBodyEditor({
                   ) : (
                     <Copy size={11} />
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  // O header inteiro é alça de arrastar — sem isto o clique
+                  // viraria um drag.
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={switchToVariableList}
+                  title="Switch to the variable list — picking one replaces this token"
+                  className="shrink-0 p-1 rounded text-pm-text-muted hover:text-blue-400 hover:bg-pm-surface transition-colors cursor-pointer"
+                >
+                  <List size={11} />
                 </button>
 
                 {/* Alça visual de arrastar — o cursor "grab" do CSS sozinho
