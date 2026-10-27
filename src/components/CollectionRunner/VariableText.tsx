@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Check } from 'lucide-react'
+import { VariableEditRow } from './VariableEditRow'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Texto com as {{variáveis}} como chips clicáveis, para a URL e o payload da
@@ -33,23 +33,7 @@ export function VariableText({ text, valueOf, onCommit, multiline = false }: Pro
   // Variável aberta para edição, e o rascunho. Uma por vez: duas caixas
   // abertas na mesma linha competiriam pelo espaço, que já é estreito.
   const [editing, setEditing] = useState<string | null>(null)
-  const [draft, setDraft] = useState('')
   const [justSaved, setJustSaved] = useState<string | null>(null)
-
-  const open = (key: string) => {
-    setEditing(key)
-    setDraft(valueOf(key) ?? '')
-  }
-
-  const commit = () => {
-    if (!editing) return
-    const key = editing
-    setEditing(null)
-    if (draft === (valueOf(key) ?? '')) return
-    onCommit(key, draft)
-    setJustSaved(key)
-    setTimeout(() => setJustSaved(prev => (prev === key ? null : prev)), 1200)
-  }
 
   const parts = text.split(TOKEN)
 
@@ -69,7 +53,7 @@ export function VariableText({ text, valueOf, onCommit, multiline = false }: Pro
           return (
             <span
               key={i}
-              onClick={e => { e.stopPropagation(); open(name) }}
+              onClick={e => { e.stopPropagation(); setEditing(name) }}
               title={hasValue ? `${name} = ${value}` : `${name} is not defined in this environment`}
               className={`cursor-pointer whitespace-pre rounded-[3px] px-[1px] font-semibold outline-[1px] transition-colors ${
                 justSaved === name
@@ -86,28 +70,18 @@ export function VariableText({ text, valueOf, onCommit, multiline = false }: Pro
       </div>
 
       {editing && (
-        <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-          <span className="shrink-0 font-mono text-[10px] text-[#63b3ed]">{editing}</span>
-          <input
-            autoFocus
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onBlur={commit}
-            onKeyDown={e => {
-              if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-              if (e.key === 'Escape') {
-                // No evento nativo: o Radix escuta keydown no document, e só
-                // o stopPropagation do React deixaria o modal fechar.
-                e.nativeEvent.stopImmediatePropagation()
-                setEditing(null)
-              }
-            }}
-            spellCheck={false}
-            placeholder="(empty)"
-            className="flex-1 min-w-0 rounded border border-pm-border bg-pm-bg px-1.5 py-0.5 font-mono text-[10.5px] text-pm-text outline-none focus:border-[#f26b3a]/60"
-          />
-          <Check size={11} className="shrink-0 text-pm-text-muted/60" />
-        </div>
+        <VariableEditRow
+          varKey={editing}
+          initial={valueOf(editing) ?? ''}
+          onCancel={() => setEditing(null)}
+          onCommit={next => {
+            const key = editing
+            setEditing(null)
+            onCommit(key, next)
+            setJustSaved(key)
+            setTimeout(() => setJustSaved(prev => (prev === key ? null : prev)), 1200)
+          }}
+        />
       )}
     </div>
   )

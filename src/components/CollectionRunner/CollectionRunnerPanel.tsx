@@ -4,15 +4,17 @@ import { buildJUnitXml } from '@/lib/junitReport'
 import { buildRunReport } from '@/lib/runReport'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2} from 'lucide-react'
+import { Play, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer} from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CollectionItem } from '@/app/types/CollectionItem'
 import { useEnvironment } from '@/components/EnvironmentContext'
 import { invoke } from '@tauri-apps/api/core'
 import { flattenRequests, runCollectionRequest, RunEntry, REQUEST_CANCELLED } from './runCollectionRequest'
 import { saveLastRun, loadLastRun, clearLastRun } from './runHistory'
+import { safeSetItem, safeRemoveItem } from '@/lib/safeStorage'
 import { useDraggableDialog } from '@/components/helper/useDraggableDialog'
 import { VariableText } from './VariableText'
+import { JsonBlock } from './JsonBlock'
 import { requestHasBody } from '@/lib/defaultHeaders'
 import { hasFailureReason, failureReason, isExpectedErrorStatus } from './runVerdict'
 import { buildEnvMap } from '@/lib/envMap';
@@ -102,6 +104,39 @@ function prettyBody(body: string): string {
   }
 }
 
+// Preferências do Runner que valem entre sessões. localStorage, e não o
+// store em arquivo: são bytes, e lê-las é síncrono na abertura do painel —
+// esperar I/O pra decidir qual environment mostrar piscaria a tela.
+const ENV_KEY = 'devflow_runner_env'
+const DELAYS_KEY = 'devflow_runner_delays:'
+
+function loadRunnerEnvId(): string | null {
+  try {
+    return localStorage.getItem(ENV_KEY)
+  } catch {
+    return null
+  }
+}
+
+function loadStepDelays(collectionId: string): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(DELAYS_KEY + collectionId)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    // Entrada a entrada: o conteúdo pode ser de uma versão anterior, e um
+    // valor estranho aqui vira uma espera infinita no meio do run.
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] >= 0
+      )
+    )
+  } catch {
+    return {}
+  }
+}
+
 export function CollectionRunnerPanel({ item, open, onClose }: Props) {
   const { environments, selectedEnvId, patchEnvironmentVariables } = useEnvironment()
 
@@ -119,6 +154,23 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
   const [dataError, setDataError] = useState<string | null>(null)
   const [delayMs, setDelayMs] = useState(0)
   const [runEnvId, setRunEnvId] = useState<string | null>(null)
+
+  // Espera por passo, sobrepondo a global. Guardada por collection: "esperar
+  // 3s depois do Checkout" é propriedade DAQUELE fluxo, e ter que redigitar
+  // a cada abertura é o que faria ninguém usar.
+  const [stepDelays, setStepDelays] = useState<Record<string, number>>({})
+
+  // Só grava depois que o painel carregou o que estava guardado. Sem isso, o
+  // primeiro render (com os defaults vazios) sobrescreveria o que havia.
+  const hydratedRef = useRef(false)
+
+  const setStepDelay = (requestId: string, value: number) =>
+    setStepDelays(prev => ({ ...prev, [requestId]: value }))
+
+  const clearStepDelay = (requestId: string) =>
+    setStepDelays(prev =>
+      Object.fromEntries(Object.entries(prev).filter(([id]) => id !== requestId))
+    )
   const [entries, setEntries] = useState<RunEntry[]>([])
   const [running, setRunning] = useState(false)
   const stopRef = useRef(false)
@@ -224,7 +276,23 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setChecked(Object.fromEntries(requests.map(r => [r.id, true])))
     setRunning(false)
     stopRef.current = false
-    setRunEnvId(selectedEnvId ?? null)
+
+    // Último environment escolhido AQUI, não o selecionado no app: quem roda
+    // a collection costuma rodar sempre contra o mesmo ambiente, e não é
+    // necessariamente aquele em que se está editando request.
+    //
+    // Cai no do app quando o guardado não existe mais (environment apagado,
+    // ou puxado de outra máquina) — senão o Runner abriria apontando pra um
+    // id morto, que resolve variável nenhuma.
+    const remembered = loadRunnerEnvId()
+    setRunEnvId(
+      remembered && environments.some(e => e.id === remembered)
+        ? remembered
+        : selectedEnvId ?? null
+    )
+
+    setStepDelays(item ? loadStepDelays(item.id) : {})
+    hydratedRef.current = true
 
     // Limpa antes de buscar: a leitura virou assíncrona (arquivo, não
     // localStorage), e sem isto o run da collection ANTERIOR ficaria na tela
@@ -260,6 +328,28 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, item?.id])
+
+  // Fechar o painel invalida a hidratação: na próxima abertura tudo é lido
+  // de novo, e até lá nada pode gravar por cima.
+  useEffect(() => {
+    if (!open) hydratedRef.current = false
+  }, [open])
+
+  useEffect(() => {
+    if (!open || !hydratedRef.current) return
+    if (runEnvId) safeSetItem(ENV_KEY, runEnvId)
+    else safeRemoveItem(ENV_KEY)
+  }, [open, runEnvId])
+
+  useEffect(() => {
+    if (!open || !hydratedRef.current || !item) return
+    const key = DELAYS_KEY + item.id
+    // Sem nenhuma espera própria a chave sai do storage em vez de guardar
+    // "{}" por collection aberta — a cota é compartilhada com o histórico de
+    // respostas e os rascunhos de aba.
+    if (Object.keys(stepDelays).length === 0) safeRemoveItem(key)
+    else safeSetItem(key, JSON.stringify(stepDelays))
+  }, [open, item, stepDelays])
 
   const selectedCount = useMemo(
     () => requests.filter(r => checked[r.id]).length,
@@ -402,8 +492,11 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
 
       if (envId) patchEnvironmentVariables(envId, envBefore, envMap)
 
-      if (delayMs > 0 && idx < runEntries.length - 1 && !stopRef.current) {
-        await new Promise(res => setTimeout(res, delayMs))
+      // A espera do passo manda na global quando existe — inclusive quando
+      // é 0, que é como se diz "nesta aqui não espera".
+      const wait = stepDelays[entry.itemId] ?? delayMs
+      if (wait > 0 && idx < runEntries.length - 1 && !stopRef.current) {
+        await new Promise(res => setTimeout(res, wait))
       }
     }
 
@@ -693,26 +786,71 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                     {selectedCount}/{requests.length} selected
                   </label>
 
-                  {requests.map(req => (
-                    <label
-                      key={req.id}
-                      className="flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-pm-hover cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={!!checked[req.id]}
-                        onChange={e => setChecked(prev => ({ ...prev, [req.id]: e.target.checked }))}
-                        className="accent-[#f26b3a]"
-                      />
-                      <span
-                        className="text-[10px] font-bold w-10 text-right shrink-0"
-                        style={{ color: METHOD_COLORS[req.method ?? ''] ?? '#888' }}
+                  {requests.map(req => {
+                    const stepDelay = stepDelays[req.id]
+                    return (
+                      // div, e não label na linha inteira: o campo de delay
+                      // mora aqui dentro, e dentro de um label clicar nele
+                      // alternaria o checkbox.
+                      <div
+                        key={req.id}
+                        className="group flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-pm-hover"
                       >
-                        {req.method}
-                      </span>
-                      <span className="text-xs text-pm-text-secondary truncate">{req.name}</span>
-                    </label>
-                  ))}
+                        <label className="flex min-w-0 flex-1 items-center gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={!!checked[req.id]}
+                            onChange={e => setChecked(prev => ({ ...prev, [req.id]: e.target.checked }))}
+                            className="accent-[#f26b3a]"
+                          />
+                          <span
+                            className="text-[10px] font-bold w-10 text-right shrink-0"
+                            style={{ color: METHOD_COLORS[req.method ?? ''] ?? '#888' }}
+                          >
+                            {req.method}
+                          </span>
+                          <span className="text-xs text-pm-text-secondary truncate">{req.name}</span>
+                        </label>
+
+                        {/* Espera DEPOIS desta request, no lugar da global.
+                            É por passo porque o motivo é por passo: um
+                            Checkout que precisa de 3s pro pedido assentar
+                            não justifica 3s entre todas as 19. */}
+                        {stepDelay === undefined ? (
+                          <button
+                            onClick={() => setStepDelay(req.id, delayMs > 0 ? delayMs : 1000)}
+                            title="Wait a specific time after this request"
+                            className="flex size-6 shrink-0 items-center justify-center rounded opacity-0 transition-opacity hover:bg-pm-bg group-hover:opacity-100 cursor-pointer"
+                          >
+                            <Timer size={13} className="text-pm-text-muted" />
+                          </button>
+                        ) : (
+                          <span
+                            className="flex shrink-0 items-center gap-1 rounded border border-pm-border bg-pm-bg pl-1.5 text-[10px] text-pm-text-muted"
+                            title="Wait after this request, instead of the run delay"
+                          >
+                            <Timer size={11} className="shrink-0 text-[#f26b3a]" />
+                            <input
+                              type="number"
+                              min={0}
+                              step={100}
+                              value={stepDelay}
+                              onChange={e => setStepDelay(req.id, Math.max(0, Number(e.target.value) || 0))}
+                              className="w-12 bg-transparent py-0.5 text-right text-[11px] tabular-nums text-pm-text outline-none"
+                            />
+                            <span className="pr-1">ms</span>
+                            <button
+                              onClick={() => clearStepDelay(req.id)}
+                              title="Use the run delay for this request"
+                              className="flex size-5 items-center justify-center rounded-r text-pm-text-muted hover:bg-pm-hover hover:text-pm-text cursor-pointer"
+                            >
+                              <X size={11} />
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               ) : (
                 <div className="flex flex-col gap-1 p-2">
@@ -962,11 +1100,21 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                   <ArrowUpRight size={10} /> Payload
                                 </span>
                                 {rawBody?.trim() ? (
-                                  <VariableText text={rawBody} valueOf={currentEnvValue} onCommit={commitVariable} multiline />
+                                  // Texto CRU, não o formatado: é o que está
+                                  // guardado na request, e reformatar aqui
+                                  // mostraria um payload diferente do que o
+                                  // editor de Body mostra.
+                                  <JsonBlock
+                                    value={rawBody}
+                                    maxHeight={224}
+                                    variableValue={currentEnvValue}
+                                    onCommitVariable={commitVariable}
+                                  />
                                 ) : (
-                                  <pre className="whitespace-pre-wrap break-words font-mono text-[10.5px] text-pm-text-secondary max-h-56 overflow-y-auto">
-                                    {prettyBody(entry.outcome!.sentBody!)}
-                                  </pre>
+                                  // Request apagada depois do run: sobra o que
+                                  // foi enviado, já resolvido — sem variável
+                                  // para clicar.
+                                  <JsonBlock value={prettyBody(entry.outcome!.sentBody!)} maxHeight={224} />
                                 )}
                               </div>
                             )}
@@ -1006,9 +1154,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                     {copiedBodyId === entry.id ? 'Copied' : 'Copy'}
                                   </button>
                                 </div>
-                                <pre className="whitespace-pre-wrap break-words font-mono text-[10.5px] text-pm-text-secondary max-h-72 overflow-y-auto">
-                                  {prettyBody(responseBody)}
-                                </pre>
+                                <JsonBlock value={prettyBody(responseBody)} maxHeight={288} />
                                 {/* Só quando é recorte de verdade, e dizendo
                                     quanto ficou de fora: o aviso fixo de "2000
                                     caracteres" aparecia até em resposta inteira. */}
