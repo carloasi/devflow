@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { History, Copy, Check, RotateCcw, GripVertical, Trash2, List } from 'lucide-react';
 import Editor, {
-  loader,
   Monaco,
   OnChange,
   OnMount,
@@ -14,16 +13,18 @@ import { toast } from 'sonner';
 import { useEnvironment } from './EnvironmentContext';
 import { useTheme } from './ThemeContext';
 import { getMonacoThemeName, registerDevflowMonacoThemes } from '@/lib/monacoThemes';
+// Efeito de módulo: fixa a versão do Monaco antes de qualquer editor subir.
+import '@/lib/monacoLoader';
+import {
+  VAR_REGEX,
+  TrackedVarRange,
+  ensureVarHighlightStyle,
+  findVarAtOffset,
+} from '@/lib/monacoVarHighlight';
 import { DuplicateVariablePicker, DuplicateVariableEntry } from './DuplicateVariablePicker';
 import { EnvironmentValue } from '@/app/types/Environment';
 import { isMacPlatform } from '@/lib/platform';
 
-// Carrega os assets do Monaco via CDN
-loader.config({
-  paths: {
-    vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs',
-  },
-});
 
 interface SavedPosition {
   lineNumber: number;
@@ -32,12 +33,11 @@ interface SavedPosition {
 
 const bodyPositions = new Map<string, SavedPosition>();
 
-// Mesmo padrão de destaque de {{variavel}} usado na URL bar
-// (UrlInputWithVariables.tsx): azul quando a variável existe e tem valor no
-// environment ativo, vermelho quando não existe ou está vazia. Clicar na
-// variável abre o mesmo popover de edição rápida da URL bar.
-const VAR_REGEX = /\{\{[^{}]+\}\}/g;
-const VAR_STYLE_ID = 'http-body-var-highlight-style';
+// O destaque de {{variavel}} vive em @/lib/monacoVarHighlight — mesmo padrão
+// da URL bar (UrlInputWithVariables.tsx) e dos blocos do Collection Runner:
+// azul quando a variável existe e tem valor no environment ativo, vermelho
+// quando não existe ou está vazia. Clicar na variável abre o mesmo popover
+// de edição rápida da URL bar.
 
 // Detecta um par "chave": valor (formato JSON) na seleção — usado pelo
 // Ctrl+Space (ver createVariableFromSelection) pra criar a variável com o
@@ -46,58 +46,10 @@ const VAR_STYLE_ID = 'http-body-var-highlight-style';
 // a formatação original ao substituir só o valor por "{{chave}}".
 const KEY_VALUE_REGEX = /^(\s*)"([^"]+)"(\s*:\s*)(.+?)(,?)(\s*)$/;
 
-function ensureVarHighlightStyle() {
-  if (typeof document === 'undefined') return;
-  if (document.getElementById(VAR_STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = VAR_STYLE_ID;
-  style.textContent = `
-    /* O Monaco quebra "{{minhaVar}}" em vários tokens ({, {, nome, }, }) e
-       desenha um <span> por token, aplicando a classe da decoração em TODOS.
-       Por isso nada aqui pode fechar uma borda: um contorno completo
-       (box-shadow 0 0 0 1px) vira um anel em volta de cada pedaço, e o
-       border-radius arredonda cada fatia — o realce aparecia repartido.
-       Só fundo e linhas horizontais, que emendam entre spans vizinhos e
-       leem como um destaque contínuo. */
-    .body-var-found {
-      background-color: rgba(60,137,224,0.24);
-      color: #74b3ff !important;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow:
-        inset 0 1px 0 rgba(60,137,224,0.5),
-        inset 0 -1px 0 rgba(60,137,224,0.5);
-    }
-    .body-var-missing {
-      background-color: rgba(224,108,117,0.22);
-      color: #f28b8b !important;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow:
-        inset 0 1px 0 rgba(224,108,117,0.5),
-        inset 0 -1px 0 rgba(224,108,117,0.5);
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-interface TrackedVarRange {
-  key: string;
-  start: number; // offset no texto do model
-  end: number;
-}
-
 // "{{ nome }}" → "{{nome}}". Só pega nomes sem espaço no meio, pra não mexer
 // em nada que não seja uma referência de variável simples.
 const SPACED_VAR_REGEX = /\{\{([ \t]+[^{}\s]+[ \t]*|[ \t]*[^{}\s]+[ \t]+)\}\}/g;
 
-// Clique "dentro" de uma {{variavel}}: o cursor tem que cair entre o "{{" e
-// o "}}" (contando as bordas internas). Clicar no "{" ou "}" de fora — ou
-// logo depois do token — só posiciona o cursor, pra dar pra editar ali sem
-// o popover abrir na frente.
-function findVarAtOffset(ranges: TrackedVarRange[], offset: number): TrackedVarRange | undefined {
-  return ranges.find(r => offset >= r.start + 2 && offset <= r.end - 2);
-}
 
 interface Props {
   value: string;
