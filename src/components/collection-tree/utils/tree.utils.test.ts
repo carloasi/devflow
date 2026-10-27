@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  setDescription,
   moveNode,
   projectSiblingDrop,
   toggleStarNode,
@@ -563,5 +564,55 @@ describe('restoreNames', () => {
   it('lista vazia devolve a mesma árvore', () => {
     const arvore: CollectionItem[] = [{ id: 'a', name: 'A', type: 'request' } as CollectionItem]
     expect(restoreNames(arvore, [])).toBe(arvore)
+  })
+})
+
+describe('setDescription', () => {
+  const arvore = (): CollectionItem[] => [
+    {
+      id: 'c',
+      name: 'Collection',
+      type: 'folder',
+      item: [
+        { id: 'f', name: 'Pasta', type: 'folder', item: [{ id: 'r', name: 'Req', type: 'request' }] },
+        { id: 'r2', name: 'Outra', type: 'request' },
+      ],
+    } as CollectionItem,
+  ]
+
+  const acha = (items: CollectionItem[], id: string): CollectionItem | undefined => {
+    for (const i of items) {
+      if (i.id === id) return i
+      const hit = i.item && acha(i.item, id)
+      if (hit) return hit
+    }
+    return undefined
+  }
+
+  it('grava em qualquer nível, inclusive na pasta', () => {
+    const out = setDescription(arvore(), 'f', '  Fluxo de reserva em Hold  ')
+    expect(acha(out, 'f')!.description).toBe('Fluxo de reserva em Hold')
+  })
+
+  it('texto em branco apaga o campo em vez de guardar string vazia', () => {
+    const com = setDescription(arvore(), 'r', 'algo')
+    const sem = setDescription(com, 'r', '   ')
+    expect('description' in acha(sem, 'r')!).toBe(false)
+  })
+
+  it('não toca nos irmãos — mesma referência', () => {
+    const antes = arvore()
+    const depois = setDescription(antes, 'r', 'algo')
+    expect(acha(depois, 'r2')).toBe(acha(antes, 'r2'))
+  })
+
+  it('gravar o mesmo texto devolve a mesma árvore', () => {
+    const com = setDescription(arvore(), 'r', 'algo')
+    expect(setDescription(com, 'r', 'algo')).toBe(com)
+  })
+
+  it('id que não existe não muda nada', () => {
+    const antes = arvore()
+    expect(setDescription(antes, 'fantasma', 'x')).toBe(antes)
   })
 })

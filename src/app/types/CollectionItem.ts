@@ -64,6 +64,27 @@ export interface CollectionItem {
   // porque os irmãos podem ter sido criados, apagados ou reordenados nesse
   // meio tempo. Local como o `starred`: não sobe pro GitHub.
   starredAfterId?: string | null;
+  // Ids dos marcadores aplicados a este nó (ver lib/markers.ts). Ao
+  // contrário do `starred`, que é marca de uso pessoal, o marcador é do
+  // TIME: sobe no push e chega pra todo mundo no pull. Só os ids ficam aqui
+  // — nome e cor vivem no catálogo do workspace, pra que renomear um
+  // marcador não exija reescrever a árvore inteira.
+  markers?: string[];
+  // Nota de UM marcador NESTE nó, indexada pelo id do marcador.
+  //
+  // É diferente da `description` abaixo, que fala do item em si: aqui o
+  // texto explica por que ESTA marca está AQUI — "flaky desde que mudou o
+  // gateway", "smoke só com cartão de teste". A mesma marca em dois itens
+  // tem motivos diferentes, e um campo só no catálogo não daria conta.
+  markerNotes?: Record<string, string>;
+  // Texto livre sobre o item — o que a request faz, de que ela depende, por
+  // que existe. Aparece no tooltip da linha e vai junto no export (é o
+  // `description` do formato Postman).
+  //
+  // Nasce no nó, e não dentro de `request`, porque pasta também tem: metade
+  // do valor está em explicar a PASTA ("este fluxo precisa de reserva em
+  // Hold"), e pasta não tem `request`.
+  description?: string;
 }
 
 export interface UrlItem {

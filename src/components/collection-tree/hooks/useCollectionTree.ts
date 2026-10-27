@@ -243,11 +243,17 @@ function isExportable(item: CollectionItem): boolean {
   return item.protocol !== 'grpc'
 }
 
+// `description` só entra quando tem texto: a chave vazia em todo item
+// engorda o arquivo e vira ruído no diff de quem importa no Postman.
+const withDescription = (item: CollectionItem) =>
+  item.description?.trim() ? { description: item.description.trim() } : {}
+
 /** Converte CollectionItem (interno) → item do formato Postman v2.1 */
 function toPostmanItem(item: CollectionItem): object {
   if (item.type === 'folder') {
     return {
       name: item.name,
+      ...withDescription(item),
       item: (item.item ?? []).filter(isExportable).map(toPostmanItem),
     }
   }
@@ -259,11 +265,12 @@ function toPostmanItem(item: CollectionItem): object {
   const examples = (item.item ?? []).filter((c) => c.type === 'example')
 
   if (!req) {
-    return { name: item.name, request: buildPostmanRequest(item), response: examples.map(toPostmanExample) }
+    return { name: item.name, ...withDescription(item), request: buildPostmanRequest(item), response: examples.map(toPostmanExample) }
   }
 
   return {
     name:    item.name,
+    ...withDescription(item),
     event:   toPostmanEvents(req.scripts),
     request: buildPostmanRequest(item),
     response: examples.map(toPostmanExample),
@@ -276,6 +283,7 @@ function toPostmanCollection(root: CollectionItem) {
     info: {
       _postman_id: root.id,
       name:        root.name,
+      ...withDescription(root),
       schema:      'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
     },
     item: (root.item ?? []).filter(isExportable).map(toPostmanItem),

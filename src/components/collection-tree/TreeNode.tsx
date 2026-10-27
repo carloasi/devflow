@@ -3,6 +3,7 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronRight, FileText, Folder, FolderOpen, FolderPlus, Plus, Star } from 'lucide-react'
 import { CollectionItem } from '@/app/types/CollectionItem'
+import { MarkerGlyph } from './MarkerGlyph'
 import { TreeActionMenu } from './TreeActionMenu'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -31,6 +32,11 @@ interface Props {
   onRenameHandled?: () => void
   // Termos da busca, pra destacar o trecho que bateu no nome.
   searchTokens?: string[]
+  // Nome e cor de cada marcador, por id (ver lib/markers.ts). Vem pronto
+  // de cima pra que a linha nao precise conhecer o catalogo inteiro.
+  markerMap?: Map<string, { name: string; color: string }>
+  // Clique num quadradinho de marcador da linha (abre o popover da marca).
+  onMarkerClick?: (item: CollectionItem, markerId: string, x: number, y: number) => void
   // "Modo escolher pasta" — usado pelo fluxo de Tab Group -> Flow (ver
   // AppLayout.tsx). Enquanto ativo, clicar numa pasta chama
   // onPickFolder em vez do comportamento normal (abrir request/expandir);
@@ -165,6 +171,8 @@ export const TreeNode = memo(function TreeNode({
   renamingId,
   onRenameHandled,
   searchTokens,
+  markerMap,
+  onMarkerClick,
   folderPickMode,
   onPickFolder,
   isPendingPush,
@@ -221,6 +229,26 @@ export const TreeNode = memo(function TreeNode({
     () => (isCollection ? countRequests(item) : 0),
     [isCollection, item]
   )
+  // Marcadores da linha. Três bolinhas no máximo e o resto vira "+N": a
+  // linha tem 22px e o nome é o que importa — uma fila de sete pontos come
+  // o nome que eles deveriam estar qualificando.
+  const MAX_DOTS = 3
+  const resolvedMarkers = useMemo(() => {
+    if (!markerMap || !item.markers?.length) return []
+    return item.markers
+      .map(id => ({ id, marker: markerMap.get(id), note: item.markerNotes?.[id] ?? '' }))
+      .filter((m): m is { id: string; marker: { name: string; color: string }; note: string } => !!m.marker)
+  }, [markerMap, item.markers, item.markerNotes])
+  const markerDots = resolvedMarkers.slice(0, MAX_DOTS)
+  const extraMarkers = resolvedMarkers.length - markerDots.length
+  const markerTitle = useMemo(
+    () =>
+      resolvedMarkers
+        .map(m => (m.note ? `${m.marker.name} — ${m.note}` : m.marker.name))
+        .join('\n') || undefined,
+    [resolvedMarkers]
+  )
+
   const method = item.protocol === 'grpc' ? GRPC_META : METHOD_META[item.method as string]
 
   // F2 pelo teclado (CollectionTree) -> entra em modo rename.
@@ -520,12 +548,21 @@ export const TreeNode = memo(function TreeNode({
               // O nome vem primeiro: a linha corta com reticências e esta é a
               // única forma de ler o resto. A dica de renomear se aprende uma
               // vez; o nome é o que falta toda vez.
+              // A descrição entra entre o nome e a dica: é o que explica o
+              // item, e quem passa o mouse quer ler isso antes de qualquer
+              // instrução de interface.
               title={
                 folderPickMode
                   ? isFolder
                     ? 'Click to select this folder'
                     : undefined
-                  : `${item.name}\n\nDouble-click to rename`
+                  : [
+                      item.name,
+                      item.description?.trim(),
+                      'Double-click to rename',
+                    ]
+                      .filter(Boolean)
+                      .join('\n\n')
               }
               style={{
                 flex: 1,
@@ -573,6 +610,41 @@ export const TreeNode = memo(function TreeNode({
           )}
 
           <div className="ml-auto flex shrink-0 items-center">
+          {/* Marcadores: bolinhas antes dos botões de hover. Ficam SEMPRE
+              visíveis (diferente da estrela contornada) — é informação do
+              item, não um atalho, e some no hover derrotaria o propósito de
+              varrer a árvore procurando o que está marcado. */}
+          {markerDots.length > 0 && !editing && (
+            <span className="flex shrink-0 items-center gap-[3px] pr-1" title={markerTitle}>
+              {markerDots.map(dot => (
+                // Clicável: é o único lugar onde "este marcador NESTE item"
+                // existe — a nota daquela marca ali e o tirar dali.
+                <button
+                  key={dot.id}
+                  onClick={e => {
+                    e.stopPropagation()
+                    const box = e.currentTarget.getBoundingClientRect()
+                    onMarkerClick?.(item, dot.id, box.left, box.bottom + 4)
+                  }}
+                  title={
+                    dot.note
+                      ? `${dot.marker.name} — ${dot.note}`
+                      : `${dot.marker.name} — click for notes`
+                  }
+                  className="relative flex items-center justify-center transition-transform hover:scale-125"
+                >
+                  {/* Etiqueta cheia = tem nota (ver MarkerGlyph): sem um
+                      sinal, não há como saber que existe texto ali sem
+                      clicar em cada uma. */}
+                  <MarkerGlyph color={dot.marker.color} size={11} solid={!!dot.note} />
+                </button>
+              ))}
+              {extraMarkers > 0 && (
+                <span className="text-[9px] leading-none text-pm-text-muted">+{extraMarkers}</span>
+              )}
+            </span>
+          )}
+
           {/* Estrela: sempre visível (preenchida) quando já é favorito; nos
               demais, aparece contornada no hover pra favoritar direto, sem
               abrir o menu "…". */}
@@ -702,6 +774,8 @@ export const TreeNode = memo(function TreeNode({
               renamingId={renamingId}
               onRenameHandled={onRenameHandled}
               searchTokens={searchTokens}
+              markerMap={markerMap}
+              onMarkerClick={onMarkerClick}
               folderPickMode={folderPickMode}
               onPickFolder={onPickFolder}
             />

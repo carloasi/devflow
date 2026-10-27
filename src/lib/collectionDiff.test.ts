@@ -276,3 +276,30 @@ describe('filterSubtree', () => {
     expect(names(filterSubtree(diffTrees(deepLocal, deepRemote), 'f1'))).toEqual(['X']);
   });
 });
+
+describe('fieldDiffs > campos do time', () => {
+  it('acusa descrição diferente', () => {
+    const a = { ...req('r', 'Token'), description: 'local' };
+    const b = { ...req('r', 'Token'), description: 'remoto' };
+    expect(fieldDiffs(a, b)).toEqual([{ field: 'description', local: 'local', remote: 'remoto' }]);
+  });
+
+  it('acusa marcador diferente', () => {
+    const a = { ...req('r', 'Token'), markers: ['m1'] };
+    const b = { ...req('r', 'Token'), markers: ['m1', 'm2'] };
+    expect(fieldDiffs(a, b).map(f => f.field)).toEqual(['markers']);
+  });
+
+  it('não acusa quando os dois lados têm os mesmos', () => {
+    const a = { ...req('r', 'Token'), markers: ['m1'], description: 'igual' };
+    const b = { ...req('r', 'Token'), markers: ['m1'], description: 'igual' };
+    expect(fieldDiffs(a, b)).toEqual([]);
+  });
+
+  // starred continua local: favoritar nao pode virar alteracao pendente.
+  it('favorito continua fora do diff', () => {
+    const a = { ...req('r', 'Token'), starred: true };
+    const b = req('r', 'Token');
+    expect(fieldDiffs(a, b)).toEqual([]);
+  });
+});

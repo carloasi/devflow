@@ -13,6 +13,7 @@ import { stripStarredFlags } from "@/components/collection-tree/utils/tree.utils
 import { encryptData, decryptData, clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
 import { diffCollection, diffEnvironment, fileTitle, prettyContent, FileChange } from "@/lib/commitDiff";
 import { CommitChangesView } from "@/components/CommitChangesView";
+import type { Marker } from "@/lib/markers";
 
 // Mesma chave/comando que o UserBadge.tsx usa pro nome exibido no canto
 // superior direito ("CarlosSilva" / "Windows account") — reaproveitado aqui
@@ -198,7 +199,10 @@ interface GitHubSyncProps {
   workspace: string; // path local do workspace (ex: "MeuWorkspace"), dono é o AppLayout
   currentCollections: any;
   currentEnvironments: any;
-  onPullCollections: (data: any) => void;
+  // Devolve Promise porque persiste em disco: quem chama TEM que esperar.
+  // O catalogo de marcadores e lido logo depois, do que acabou de ser
+  // gravado — sem o await ele leria a arvore anterior ao pull.
+  onPullCollections: (data: any) => void | Promise<void>;
   onPullEnvironments: (data: any[]) => void;
   onImportWorkspace: (name: string) => void | Promise<void>;
   onSyncStatusChange?: (isSynced: boolean) => void; // ✅ novo
@@ -220,6 +224,11 @@ interface GitHubSyncProps {
   // Chamado após enviar UMA collection com sucesso, pra limpar a pendência
   // só dela — o onPushCompleted zera o workspace inteiro e aqui mentiria.
   onCollectionPushed?: (collectionId: string) => void;
+  // Catalogo de marcadores do workspace ativo — sobe junto no push.
+  currentMarkers?: Marker[];
+  // Catalogo que veio do repositorio. Quem funde com o local e o AppLayout
+  // (ver mergeCatalogs): aqui so se sabe baixar.
+  onPullMarkers?: (workspaceName: string, markers: Marker[]) => void | Promise<void>;
   // Compara o remoto recém-buscado com o local e devolve o resumo. Mora no
   // AppLayout porque é lá que o formato remoto vira árvore (importData) e
   // que a árvore local existe — aqui só se sabe baixar.
@@ -613,6 +622,16 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
 
 const WORKSPACES_ROOT = "Postman";
 
+// Catalogo de marcadores do workspace (ver lib/markers.ts). Arquivo proprio,
+// e nao dentro de cada collection: o marcador e do WORKSPACE, e repetir o
+// catalogo em N collections faria N copias divergirem ao primeiro rename.
+//
+// Nome sem o sufixo .postman_: isto nao e formato Postman, e o
+// resolveWorkspaceFilePaths varre justamente por esse sufixo pra achar
+// collection e environment. Confundir os dois faria o pull tentar importar
+// o catalogo como se fosse uma collection.
+const MARKERS_FILE = "devflow-markers.json";
+
 // Baixa e descriptografa os arquivos de UM workspace (dado seus paths já
 // resolvidos), sem depender de estado de componente — usado tanto pelo Pull
 // de um workspace só quanto pelo Pull de todos os workspaces do repositório.
@@ -684,6 +703,56 @@ export interface RemoteWorkspaceData {
 //
 // Devolve também os paths, porque quem aplica precisa deles pra manter o
 // painel de sync coerente — e quem só compara simplesmente ignora.
+/**
+ * Lê o catálogo de marcadores do workspace no repositório.
+ *
+ * Ausência do arquivo é o caso normal, não erro: todo workspace criado antes
+ * desta feature — e todo workspace sem nenhum marcador — simplesmente não o
+ * tem. Qualquer falha devolve `null`, que o chamador lê como "não há nada
+ * remoto", e nunca como "o catálogo remoto é vazio" (que apagaria o local).
+ */
+async function fetchRemoteMarkers(
+  storage: GitHubStorageClient,
+  remotePath: string,
+  ref?: string
+): Promise<Marker[] | null> {
+  try {
+    const file = await storage.getFile(`${remotePath}/${MARKERS_FILE}`, ref);
+    if (!file?.content) return null;
+    let content = file.content;
+    if (typeof content === "string") content = JSON.parse(content);
+    const list = Array.isArray(content) ? content : (content as { markers?: unknown })?.markers;
+    if (!Array.isArray(list)) return null;
+    // Valida entrada a entrada: o arquivo é editável à mão no repositório, e
+    // um marcador sem id derrubaria o Map do catálogo inteiro.
+    return list.filter(
+      (m): m is Marker =>
+        !!m &&
+        typeof (m as Marker).id === "string" &&
+        typeof (m as Marker).name === "string" &&
+        typeof (m as Marker).color === "string"
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function pushMarkersFile(
+  storage: GitHubStorageClient,
+  remotePath: string,
+  markers: Marker[],
+  workspaceName: string
+): Promise<void> {
+  // Catálogo vazio não cria arquivo: nasceria um devflow-markers.json com
+  // lista vazia em todo workspace que nunca usou marcador.
+  if (!markers?.length) return;
+  await storage.putFile(
+    `${remotePath}/${MARKERS_FILE}`,
+    { markers },
+    `sync: update markers (${workspaceName})`
+  );
+}
+
 async function fetchRemoteWorkspace(
   storage: GitHubStorageClient,
   workspaceName: string,
@@ -716,6 +785,8 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   onCollectionPushed,
   onCompareRemote,
   onPushCompleted,
+  currentMarkers,
+  onPullMarkers,
 }, ref) {
   const [config, setConfig] = useState<GitHubConfig>({
     token: "",
@@ -1014,8 +1085,16 @@ useEffect(() => {
             .flat();
 
           if (loadedCollections.length > 0) {
-            onPullCollections(loadedCollections);
+            await onPullCollections(loadedCollections);
           }
+        }
+
+        // O catálogo vem junto com as collections, não depois: os ids de
+        // marcador que acabaram de chegar nos nós precisam existir no
+        // catálogo, senão viram marca invisível até o próximo pull.
+        if (onPullMarkers) {
+          const remoteMarkers = await fetchRemoteMarkers(storage, remotePath);
+          if (remoteMarkers) await onPullMarkers(workspace, remoteMarkers);
         }
 
         if (ePaths.length > 0) {
@@ -1187,6 +1266,14 @@ useEffect(() => {
       // substitui o local. É a separação que a tela de comparação vai usar
       // pra se intrometer entre as duas.
       await onPullWorkspaceData?.(workspaceName, collections, environments);
+
+      if (onPullMarkers) {
+        const remoteMarkers = await fetchRemoteMarkers(
+          client(),
+          `${WORKSPACES_ROOT}/${workspaceName}`
+        );
+        if (remoteMarkers) await onPullMarkers(workspaceName, remoteMarkers);
+      }
 
       // Se for o workspace ativo agora, mantém o painel de sync coerente.
       if (workspaceName === workspace) {
@@ -1387,6 +1474,16 @@ useEffect(() => {
         }
       }
 
+      // O catálogo sobe ANTES dos environments: se o push falhar no meio, é
+      // melhor o repositório ficar com o catálogo sem as marcas do que com
+      // marcas apontando pra ids que ninguém mais tem.
+      try {
+        await pushMarkersFile(storage, wsRemotePath, currentMarkers ?? [], workspaceName);
+      } catch (e: unknown) {
+        if (!(e instanceof GitHubConflictError)) throw e;
+        conflictPaths.push(`${wsRemotePath}/${MARKERS_FILE}`);
+      }
+
       for (const env of envsToPush) {
         if (!env) continue;
         const envFileName = env.name
@@ -1580,6 +1677,14 @@ useEffect(() => {
             throw e;
           }
         }
+      }
+
+      // Mesma ordem do push de workspace inteiro: catálogo antes do resto.
+      try {
+        await pushMarkersFile(storage, remotePath, currentMarkers ?? [], workspace);
+      } catch (e: unknown) {
+        if (!(e instanceof GitHubConflictError)) throw e;
+        conflictPaths.push(`${remotePath}/${MARKERS_FILE}`);
       }
 
       const envsToPush = Array.isArray(environmentsData)
@@ -1899,6 +2004,11 @@ useEffect(() => {
             await downloadWorkspaceFilesData(storage, cPaths, ePaths);
 
           await onPullWorkspaceData(folder.name, collections, environments);
+
+          if (onPullMarkers) {
+            const remoteMarkers = await fetchRemoteMarkers(storage, folder.path);
+            if (remoteMarkers) await onPullMarkers(folder.name, remoteMarkers);
+          }
 
           pulledCollections += collections.length;
           pulledEnvironments += environments.length;

@@ -371,6 +371,36 @@ function convertPostmanExample(
 function convertPostmanItem(raw: any, warnings: string[], inheritedAuth?: unknown): CollectionItem {
   // Pasta = tem "item" (mesmo vazio) e não tem "request". Antes só contava
   // como pasta se tivesse filhos, e uma pasta vazia virava request sem URL.
+  // O Postman guarda a descrição da pasta/collection no próprio item e a da
+  // request dentro de `request`. Lê as duas formas, porque o mesmo arquivo
+  // traz as duas — e aqui ambas viram CollectionItem.description.
+  const text = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const clean = value.trim();
+    return clean || undefined;
+  };
+  const rawRequest = (raw.request ?? {}) as Record<string, unknown>;
+  const description = text(raw.description) ?? text(rawRequest.description);
+
+  // Marcadores (ver lib/markers.ts) sao do time e viajam DENTRO do no. Este
+  // conversor e o caminho do pull do GitHub, nao so do import de arquivo
+  // Postman: sem copiar aqui, baixar atualizacoes apagaria silenciosamente
+  // a marcacao de todo mundo. So ids, so strings.
+  const markers = Array.isArray(raw.markers)
+    ? (raw.markers as unknown[]).filter((id): id is string => typeof id === 'string' && !!id)
+    : [];
+
+  // Notas por marca: so as que tem marca correspondente e texto de verdade.
+  // O arquivo e editavel a mao no repositorio, entao nada aqui pode confiar
+  // no formato.
+  const noteEntries = Object.entries(
+    (raw.markerNotes ?? {}) as Record<string, unknown>
+  ).filter(
+    (entry): entry is [string, string] =>
+      typeof entry[1] === 'string' && !!entry[1].trim() && markers.includes(entry[0])
+  );
+  const markerNotes = Object.fromEntries(noteEntries.map(([k, v]) => [k, v.trim()]));
+
   const isFolder = Array.isArray(raw.item) && !raw.request;
 
   if (isFolder) {
@@ -379,6 +409,9 @@ function convertPostmanItem(raw: any, warnings: string[], inheritedAuth?: unknow
       id:      raw.id   ?? uid(),
       name:    raw.name ?? 'Unnamed Folder',
       type:    'folder',
+      ...(description ? { description } : {}),
+      ...(markers.length ? { markers } : {}),
+      ...(noteEntries.length ? { markerNotes } : {}),
       item:    (raw.item as any[]).map(child => convertPostmanItem(child, warnings, folderAuth)),
       method:  undefined,
       request: undefined,
@@ -403,6 +436,9 @@ function convertPostmanItem(raw: any, warnings: string[], inheritedAuth?: unknow
     id:      raw.id   ?? uid(),
     name:    raw.name ?? 'Unnamed Request',
     type:    'request',
+    ...(description ? { description } : {}),
+    ...(markers.length ? { markers } : {}),
+    ...(noteEntries.length ? { markerNotes } : {}),
     method,
     request: normalizedRequest,
     item:    examples.length ? examples : undefined,

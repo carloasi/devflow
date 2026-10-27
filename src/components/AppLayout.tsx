@@ -100,7 +100,8 @@ import { GitHubConflictError } from './GitHubStorageClient';
 import { changedFieldLabels, describeChanges } from '@/lib/unsavedChanges';
 import { stripTabsForSession, sameSessionTabs } from '@/lib/tabSessions';
 import { safeSetItem, sweepDeadKeys } from '@/lib/safeStorage';
-import { loadWorkspaceLocalData, saveWorkspaceCollections, saveWorkspaceEnvironments } from '@/storage/localSyncStore';
+import { loadWorkspaceLocalData, loadWorkspaceMarkers, saveWorkspaceCollections, saveWorkspaceEnvironments, saveWorkspaceMarkers } from '@/storage/localSyncStore';
+import { type Marker, mergeCatalogs, purgeOrphans, remapMarkers } from '@/lib/markers';
 import {
   markCollectionsPendingPush,
   markEnvironmentsPendingPush,
@@ -851,6 +852,56 @@ export default function AppLayout() {
   const [importOpen, setImportOpen] = useState(false);
   const [hydrated,           setHydrated]           = useState(false);
   const [collections,        setCollections]        = useState<CollectionItem[]>([]);
+  // Catalogo de marcadores do workspace (ver lib/markers.ts). Vive aqui, e
+  // nao dentro da arvore, porque vale pra TODAS as collections do workspace.
+  const [markers, setMarkers] = useState<Marker[]>([]);
+
+  // Grava junto com o estado: o catalogo e pequeno (dezenas de entradas) e
+  // perde-lo e pior que reescreve-lo — um marcador criado e aplicado a 200
+  // nos deixaria a arvore apontando pra um id que nao existe mais.
+  const handleMarkersChange = useCallback((next: Marker[]) => {
+    setMarkers(next);
+    void saveWorkspaceMarkers(selectedWorkspaceRef.current, next);
+  }, []);
+
+  /**
+   * Catálogo que veio do repositório, aplicado sobre o local.
+   *
+   * União, nunca substituição (ver mergeCatalogs): duas pessoas criando
+   * marcadores em paralelo é o caso normal, e quem puxa não pode perder os
+   * seus só porque ainda não deu push. Quando as duas criaram o MESMO nome
+   * em máquinas diferentes, os ids divergem — o merge colapsa no id do time
+   * e o remap reescreve a árvore local pra apontar pra ele, senão a marca
+   * local continuaria num id que mais ninguém tem.
+   */
+  const handlePullMarkers = useCallback(async (
+    workspaceName: string,
+    remoteMarkers: Marker[]
+  ) => {
+    const { collections: storedCollections } = await loadWorkspaceLocalData(workspaceName);
+    const localCatalog = (await loadWorkspaceMarkers(workspaceName)) as Marker[];
+
+    const { catalog, remapped } = mergeCatalogs(localCatalog, remoteMarkers);
+    await saveWorkspaceMarkers(workspaceName, catalog);
+
+    // O pull acabou de gravar as collections; aqui elas são relidas e
+    // reescritas só se o remap tiver algo a fazer — não há caminho mais
+    // curto porque o merge do catálogo só é conhecido agora.
+    const tree = Array.isArray(storedCollections) ? (storedCollections as CollectionItem[]) : [];
+    const remappedTree = remapMarkers(tree, remapped);
+    // purgeOrphans depois do remap, nunca antes: um id que o remap ia
+    // converter seria apagado como "órfão" por não estar no catálogo ainda.
+    const cleaned = purgeOrphans(remappedTree, catalog);
+    if (cleaned !== tree) await saveWorkspaceCollections(workspaceName, cleaned);
+
+    if (selectedWorkspaceRef.current === workspaceName) {
+      setMarkers(catalog);
+      if (cleaned !== tree) {
+        suppressPendingMarkRef.current = true;
+        setCollections(cleaned);
+      }
+    }
+  }, []);
   const [tabs,               setTabs]               = useState<Tab[]>([]);
   const [activeTabId,        setActiveTabId]        = useState<string | null>(null);
   const [responseTab, setResponseTab] = useState<'body' | 'headers' | 'tests'>('body')
@@ -1220,12 +1271,13 @@ useEffect(() => {
           await persistSelectedWorkspace(initialWorkspace);
         }
       }
-  const [loadedTabs, loadedActiveId, loadedSessions, loadedSessionId, localData] = await Promise.all([
+  const [loadedTabs, loadedActiveId, loadedSessions, loadedSessionId, localData, loadedMarkers] = await Promise.all([
         loadTabs(initialWorkspace),
         loadActiveTabId(initialWorkspace),
         loadTabSessions(),
         loadCurrentSessionId(),
         loadWorkspaceLocalData(initialWorkspace),
+        loadWorkspaceMarkers(initialWorkspace),
       ]);
 
       if (cancelled) return;
@@ -1238,6 +1290,7 @@ useEffect(() => {
       setCurrentSessionId(loadedSessionId);
       setCollections(backfillExampleRequests(localData.collections));
       setEnvironments(localData.environments);
+      setMarkers(loadedMarkers as Marker[]);
     } catch (err) {
       // Dados corrompidos do workspace inicial não podem impedir o app de
       // abrir — segue com o estado vazio (o usuário ainda consegue trocar
@@ -1402,11 +1455,12 @@ const handleSelectWorkspace = useCallback(async (path: string) => {
       await saveActiveEnvironmentId(previousWorkspace, selectedEnvIdRef.current);
     }
 
-    const [workspaceTabs, workspaceActiveId, localData, savedEnvId] = await Promise.all([
+    const [workspaceTabs, workspaceActiveId, localData, savedEnvId, workspaceMarkers] = await Promise.all([
       loadTabs(path),
       loadActiveTabId(path),
       loadWorkspaceLocalData(path),
       loadActiveEnvironmentId(path),
+      loadWorkspaceMarkers(path),
     ]);
 
     selectedWorkspaceRef.current = path;
@@ -1423,6 +1477,7 @@ const handleSelectWorkspace = useCallback(async (path: string) => {
         suppressEnvPendingMarkRef.current = true;
     setCollections(backfillExampleRequests(localData.collections));
     setEnvironments(localData.environments);
+    setMarkers(workspaceMarkers as Marker[]);
     // Restauração autoritativa: usa o id salvo especificamente pra ESSE
     // workspace, em vez de deixar o id antigo (de outro workspace) parado
     // no estado e confiar numa checagem de "ainda existe na lista?" — que
@@ -2264,6 +2319,40 @@ const handleRenameFromTree = (id: string, newName: string) => {
 
     setTabs(prev => [...prev, buildTabFromItemOrDraft(item)]);
     setActiveTabId(item.id);
+  }, [tabs]);
+
+  /**
+   * Abre uma pasta inteira em abas.
+   *
+   * Um `setTabs` só, e não `handleRequestSelect` em laço: aquele lê `tabs`
+   * do closure, então quinze chamadas seguidas veriam todas a MESMA lista e
+   * abririam quinze abas duplicadas das que já estavam abertas.
+   */
+  const handleOpenAllRequests = useCallback((items: CollectionItem[]) => {
+    const requests = items.filter(i => i.type === 'request');
+    if (requests.length === 0) return;
+
+    const alreadyOpen = requests.filter(r => tabs.some(t => t.id === r.id)).length;
+
+    setTabs(prev => {
+      const known = new Set(prev.map(t => t.id));
+      const added = requests
+        .filter(r => !known.has(r.id))
+        .map(r => buildTabFromItemOrDraft(r));
+      return added.length > 0 ? [...prev, ...added] : prev;
+    });
+
+    // Foco na PRIMEIRA: quem abre uma pasta vai percorrer o fluxo do começo,
+    // e cair na última deixa a pessoa no fim dele.
+    setActiveTabId(requests[0].id);
+
+    const opened = requests.length - alreadyOpen;
+    toast.success(
+      opened === 0
+        ? `All ${requests.length} requests were already open`
+        : `${opened} request${opened === 1 ? '' : 's'} opened` +
+            (alreadyOpen > 0 ? ` · ${alreadyOpen} already open` : '')
+    );
   }, [tabs]);
 
   const handleUrlChange = useCallback((newUrl: string) => {
@@ -4801,6 +4890,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               onPushCompleted={handlePushCompleted}
               onCollectionPushed={handleCollectionPushed}
               onCompareRemote={handleCompareRemote}
+              currentMarkers={markers}
+              onPullMarkers={handlePullMarkers}
             />
 
             <div className="w-[1px] h-3 bg-pm-border ml-2"></div>
@@ -4857,6 +4948,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               setCollections={setCollections}
               activeId={activeTabId || undefined}
               onRequestSelect={handleRequestSelect}
+              onOpenAllRequests={handleOpenAllRequests}
               onRenameItem={handleRenameFromTree}
               onRunCollection={setRunnerItem}
               onLoadTestItem={setLoadTestItem}
@@ -4868,6 +4960,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               pickerLabel={flowPickerSession ? `Select a folder to create the "${flowPickerSession.name}" flow` : undefined}
               onPickFolder={handlePickFlowFolder}
               onCancelPicker={handleCancelFlowPicker}
+              markers={markers}
+              onMarkersChange={handleMarkersChange}
             />
           </ResizablePanel>
           

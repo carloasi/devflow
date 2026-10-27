@@ -1128,3 +1128,67 @@ export function restoreNames(
 
   return walk(items)
 }
+
+/**
+ * Grava (ou apaga) a descrição de um nó, em qualquer nível.
+ *
+ * Texto em branco remove o campo em vez de guardar string vazia: `description: ''`
+ * em todo item incharia o arquivo da collection e apareceria como alteração
+ * no diff do sync — a mesma razão do `markers` ausente em vez de `[]`.
+ */
+export function setDescription(
+  items: CollectionItem[],
+  id: string,
+  text: string
+): CollectionItem[] {
+  const clean = text.trim()
+
+  const walk = (list: CollectionItem[]): CollectionItem[] => {
+    let changed = false
+    const out = list.map((item) => {
+      if (item.id === id) {
+        if ((item.description ?? '') === clean) return item
+        changed = true
+        if (!clean) {
+          const { description: _dropped, ...rest } = item
+          return rest
+        }
+        return { ...item, description: clean }
+      }
+      if (item.item?.length) {
+        const children = walk(item.item)
+        if (children !== item.item) {
+          changed = true
+          return { ...item, item: children }
+        }
+      }
+      return item
+    })
+    return changed ? out : list
+  }
+
+  return walk(items)
+}
+
+/**
+ * Todas as requests de uma subárvore, em ordem de tela, descendo nas pastas.
+ *
+ * Examples ficam de fora: são filhos `type: 'example'` de uma request (ver
+ * CollectionItem.ts) e abrir um por um junto encheria a barra de abas de
+ * snapshots que ninguém pediu.
+ *
+ * Existe um `flattenRequests` igual no runCollectionRequest.ts. São dez
+ * linhas repetidas de propósito: importá-lo aqui arrastaria o módulo do
+ * Runner (e o `invoke` do Tauri junto) pra dentro da árvore.
+ */
+export function collectRequests(items: CollectionItem[]): CollectionItem[] {
+  const out: CollectionItem[] = []
+  const walk = (list: CollectionItem[]) => {
+    for (const item of list) {
+      if (item.type === 'request') out.push(item)
+      else if (item.type === 'folder' && item.item?.length) walk(item.item)
+    }
+  }
+  walk(items)
+  return out
+}

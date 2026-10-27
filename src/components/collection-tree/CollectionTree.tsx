@@ -21,8 +21,25 @@ import {
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { CollectionItem } from '@/app/types/CollectionItem'
+import {
+  type Marker,
+  applyMarker,
+  createMarker,
+  filterTreeByMarkers,
+  hasMarker,
+  markerCounts,
+  markerNote,
+  purgeMarker,
+  removeMarker,
+  setMarkerNote,
+  recolorMarker,
+  toggleMarker,
+} from '@/lib/markers'
 import { TreeNode } from './TreeNode'
 import { TreeSearch } from './TreeSearch'
+import { MarkersDialog } from './MarkersDialog'
+import { MarkerPopover } from './MarkerPopover'
+import { MarkerGlyph } from './MarkerGlyph'
 import { TreeContextMenu } from './TreeContextMenu'
 import { useCollectionTree } from './hooks/useCollectionTree'
 import {
@@ -32,7 +49,9 @@ import {
   projectSiblingDrop,
   DropPosition,
   parseTreeQuery,
+  setDescription,
   collectExpandableIds,
+  collectRequests,
   collectAllIds,
   collectStarred,
   removeNode,
@@ -68,6 +87,8 @@ interface Props {
   items: CollectionItem[]
   activeRequestId?: string
   onRequestSelect?: (item: CollectionItem) => void
+  // Abre todas as requests de uma pasta em abas, de uma vez so.
+  onOpenAllRequests?: (requests: CollectionItem[]) => void
   onUpdateItems: (items: CollectionItem[]) => void
   onRename?: (id: string, newName: string) => void
   onRunItem?: (item: CollectionItem) => void
@@ -87,6 +108,11 @@ interface Props {
   // storage/pendingPushStore). Por ora só o ponto na linha; enviar a
   // collection isolada vem na etapa seguinte.
   pendingPushIds?: Set<string>
+  // Catalogo de marcadores do workspace (ver lib/markers.ts). Vem de cima
+  // porque e do WORKSPACE, nao da arvore: a mesma lista vale pra todas as
+  // collections, e quem a persiste e o AppLayout.
+  markers?: Marker[]
+  onMarkersChange?: (markers: Marker[]) => void
 }
 
 // Pastas abertas, persistidas entre sessões (antes tudo reabria fechado).
@@ -168,6 +194,7 @@ export function CollectionTree({
   items,
   activeRequestId,
   onRequestSelect,
+  onOpenAllRequests,
   onUpdateItems,
   onRename,
   onRunItem,
@@ -180,6 +207,8 @@ export function CollectionTree({
   onPickFolder,
   collapseAllToken,
   pendingPushIds,
+  markers,
+  onMarkersChange,
 }: Props) {
   const { search, setSearch, filteredItems, actions } = useCollectionTree({
     items,
@@ -232,7 +261,17 @@ export function CollectionTree({
     e.preventDefault()
     e.stopPropagation()
 
-    setSelectedIds(prev => (prev.has(item.id) ? prev : new Set([item.id])))
+    // O clique direito não pinta a linha: ela fica igual ao que o clique
+    // esquerdo deixa. Quem diz em quem o menu manda é o próprio alvo do
+    // clique, via o fallback do deleteTargets/copyItems.
+    //
+    // Só a seleção que JÁ existe importa: clicar dentro dela preserva (o
+    // menu age sobre as N linhas); clicar fora dela limpa, senão o menu
+    // mostraria "Delete (3)" para uma linha que não é nenhuma das três.
+    setSelectedIds(prev => {
+      if (prev.has(item.id)) return prev
+      return prev.size === 0 ? prev : new Set()
+    })
     setContextMenu({ x: e.clientX, y: e.clientY, item, canPaste: hasClipboardItems() })
   }, [])
 
@@ -307,8 +346,177 @@ export function CollectionTree({
     return fallback ? [fallback] : []
   }, [selectedIds, items])
 
-  const handleCopySelected = useCallback(() => {
-    copyItems()
+  /*
+   * ============================================================
+   * MARCADORES
+   * ============================================================
+   */
+  const markerCatalog = useMemo(() => markers ?? [], [markers])
+
+  const markerMap = useMemo(
+    () => new Map(markerCatalog.map(m => [m.id, { name: m.name, color: m.color }])),
+    [markerCatalog]
+  )
+
+  // Alvos de marcar: a mesma regra do delete e do copy — a seleção, ou a
+  // linha clicada quando não há seleção.
+  const contextMarkerTargets = useMemo(
+    () => (contextMenu?.item ? deleteTargets(contextMenu.item) : []),
+    [contextMenu, deleteTargets]
+  )
+
+  // 'on' = todos os alvos têm; 'partial' = alguns. Ausente = nenhum.
+  const contextMarkerState = useMemo(() => {
+    const state: Record<string, 'on' | 'partial'> = {}
+    if (contextMarkerTargets.length === 0) return state
+    for (const marker of markerCatalog) {
+      const hits = contextMarkerTargets.filter(node => hasMarker(node, marker.id)).length
+      if (hits === 0) continue
+      state[marker.id] = hits === contextMarkerTargets.length ? 'on' : 'partial'
+    }
+    return state
+  }, [contextMarkerTargets, markerCatalog])
+
+  const handleToggleMarker = useCallback(
+    (markerId: string) => {
+      const ids = contextMarkerTargets.map(n => n.id)
+      if (ids.length === 0) return
+      onUpdateItems(toggleMarker(items, ids, markerId))
+    },
+    [contextMarkerTargets, items, onUpdateItems]
+  )
+
+  // Cria e já aplica, no mesmo gesto. Nome repetido reaproveita o marcador
+  // existente (createMarker devolve o que já havia), então digitar "flaky"
+  // de novo marca com o "flaky" do time em vez de criar um segundo.
+  const handleCreateMarker = useCallback(
+    (name: string, color?: string) => {
+      if (!onMarkersChange) return
+      let result
+      try {
+        result = createMarker(markerCatalog, name, { color })
+      } catch {
+        return
+      }
+      if (!result.existed) onMarkersChange(result.catalog)
+      const ids = contextMarkerTargets.map(n => n.id)
+      if (ids.length > 0) onUpdateItems(applyMarker(items, ids, result.marker.id))
+    },
+    [markerCatalog, onMarkersChange, contextMarkerTargets, items, onUpdateItems]
+  )
+
+  const handleRecolorMarker = useCallback(
+    (markerId: string, color: string) => {
+      onMarkersChange?.(recolorMarker(markerCatalog, markerId, color))
+    },
+    [markerCatalog, onMarkersChange]
+  )
+
+  // Marcadores escolhidos na barra de filtro. Só ids — o catálogo pode mudar
+  // (um marcador apagado por um colega chega no pull), e guardar o objeto
+  // deixaria o filtro preso numa cor/nome que já não existe.
+  const [filterMarkerIds, setFilterMarkerIds] = useState<string[]>([])
+
+  const toggleFilterMarker = useCallback((markerId: string) => {
+    setFilterMarkerIds(prev =>
+      prev.includes(markerId) ? prev.filter(id => id !== markerId) : [...prev, markerId]
+    )
+  }, [])
+
+  // Marcador que sumiu do catálogo não pode continuar filtrando a árvore em
+  // silêncio: sem isto o usuário veria a árvore recortada sem nenhum chip
+  // aceso explicando por quê.
+  const activeFilterIds = useMemo(
+    () => filterMarkerIds.filter(id => markerMap.has(id)),
+    [filterMarkerIds, markerMap]
+  )
+
+  // Só os marcadores em uso aparecem na barra: um catálogo de 20 com 3 em
+  // uso viraria uma parede de chips que não filtram nada.
+  const filterBarMarkers = useMemo(() => {
+    const counts = markerCounts(items)
+    return markerCatalog.filter(m => (counts.get(m.id) ?? 0) > 0 || activeFilterIds.includes(m.id))
+  }, [markerCatalog, items, activeFilterIds])
+
+  const handleSaveDescription = useCallback(
+    (nodeId: string, text: string) => {
+      onUpdateItems(setDescription(items, nodeId, text))
+    },
+    [items, onUpdateItems]
+  )
+
+  // Requests da pasta clicada, recursivo. Calculado na abertura do menu pra
+  // que o número já apareça no rótulo, antes do clique.
+  const contextOpenAll = useMemo(
+    () =>
+      contextMenu?.item?.type === 'folder'
+        ? collectRequests(contextMenu.item.item ?? [])
+        : [],
+    [contextMenu]
+  )
+
+  const [managingMarkers, setManagingMarkers] = useState(false)
+
+  // Marca aberta pelo clique no quadradinho da linha: o par (item, marcador)
+  // mais a posição, porque o popover nasce colado no quadradinho clicado.
+  const [openMarker, setOpenMarker] = useState<{
+    itemId: string
+    itemName: string
+    markerId: string
+    x: number
+    y: number
+  } | null>(null)
+
+  const handleMarkerClick = useCallback(
+    (node: CollectionItem, markerId: string, x: number, y: number) => {
+      setOpenMarker({ itemId: node.id, itemName: node.name, markerId, x, y })
+    },
+    []
+  )
+
+  const handleSaveMarkerNote = useCallback(
+    (nodeId: string, markerId: string, text: string) => {
+      onUpdateItems(setMarkerNote(items, nodeId, markerId, text))
+    },
+    [items, onUpdateItems]
+  )
+
+  const handleRemoveMarkerHere = useCallback(
+    (nodeId: string, markerId: string) => {
+      onUpdateItems(removeMarker(items, [nodeId], markerId))
+      setOpenMarker(null)
+    },
+    [items, onUpdateItems]
+  )
+
+  const markerUsage = useMemo(() => markerCounts(items), [items])
+
+  // Apagar do catálogo tem que tirar da árvore junto: deixar o id nos nós
+  // viraria uma marca invisível, que nenhum filtro alcança e nenhuma tela
+  // mostra — e que voltaria a aparecer se alguém criasse outro marcador
+  // reaproveitando o id.
+  const handleDeleteMarker = useCallback(
+    (markerId: string) => {
+      onUpdateItems(purgeMarker(items, markerId))
+      setFilterMarkerIds(prev => prev.filter(id => id !== markerId))
+    },
+    [items, onUpdateItems]
+  )
+
+  // Alvos do delete do menu de contexto. Fixados aqui porque o menu lê isso
+  // duas vezes (o rótulo da confirmação e a ação), e a seleção não muda
+  // enquanto ele está aberto.
+  const contextDeleteTargets = useMemo(
+    () => (contextMenu ? deleteTargets(contextMenu.item) : []),
+    [contextMenu, deleteTargets]
+  )
+
+  // Copia pelo menu: a seleção, ou a linha clicada quando não há seleção.
+  // O toast é o único retorno — o clique direito não acende mais a linha,
+  // então sem ele a cópia não dá sinal nenhum de que aconteceu.
+  const handleCopySelected = useCallback((fallbackId?: string | null) => {
+    const count = copyItems(fallbackId)
+    if (count > 0) toast.success(`${count} item${count === 1 ? '' : 's'} copied`)
   }, [copyItems])
 
   // Cola o clipboard da árvore: numa pasta -> dentro dela; num request ->
@@ -393,8 +601,13 @@ export function CollectionTree({
   )
 
   const uniqueFilteredItems = useMemo(() => {
+    // Marcador DEPOIS da busca: os dois recortam, e encadear deixa "@flaky
+    // + quote" significar o óbvio — entre os marcados, os que casam com a
+    // busca. A ordem inversa daria o mesmo conjunto, mas a busca é a que o
+    // usuário digitou por último e recortar primeiro por ela é mais barato.
+    const byMarker = filterTreeByMarkers(filteredItems, activeFilterIds)
     const seen = new Set<string>()
-    const deduped = filteredItems.filter((item) => {
+    const deduped = byMarker.filter((item) => {
       if (!item.id || seen.has(item.id)) return false
       seen.add(item.id)
       return true
@@ -405,7 +618,7 @@ export function CollectionTree({
     // "Order" favoritada, nada conseguia ficar acima de "Barramento B2B -
     // Dev". As favoritas continuam acessíveis pelo dropdown de Favorites.
     return deduped
-  }, [filteredItems])
+  }, [filteredItems, activeFilterIds])
 
   const rootIds = useMemo(() => {
     return uniqueFilteredItems.map((item) => item.id)
@@ -424,11 +637,14 @@ export function CollectionTree({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(loadExpandedIds)
   const [searchCollapsedIds, setSearchCollapsedIds] = useState<Set<string>>(new Set())
   const searchTokens = useMemo(() => parseTreeQuery(search), [search])
-  const isSearching = searchTokens.length > 0
+  // Filtrar por marcador tambem abre as pastas: o resultado costuma estar
+  // tres niveis abaixo, e deixar tudo fechado esconde justamente o que o
+  // filtro acabou de encontrar.
+  const isSearching = searchTokens.length > 0 || activeFilterIds.length > 0
 
   useEffect(() => {
     setSearchCollapsedIds(new Set())
-  }, [search])
+  }, [search, activeFilterIds])
 
   // Persiste, descartando ids que não existem mais (itens apagados). Com a
   // árvore ainda vazia (antes das collections carregarem) não poda nada, pra
@@ -552,20 +768,28 @@ export function CollectionTree({
     if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setTreeFocused(false)
   }, [])
 
-  const confirmDelete = useCallback(() => {
-    if (!pendingDelete) return
-    const updated = pendingDelete.reduce((acc, node) => removeNode(acc, node.id), items)
+  // Apaga de fato. Os dois gestos (tecla Delete e menu de contexto) passam
+  // por aqui — cada um com a sua confirmação, mas com uma única regra de
+  // remoção e de para onde o foco vai.
+  const deleteNodes = useCallback((nodes: CollectionItem[]) => {
+    if (nodes.length === 0) return
+    const updated = nodes.reduce((acc, node) => removeNode(acc, node.id), items)
     onUpdateItems(updated)
     setSelectedIds(new Set())
-    setPendingDelete(null)
     // Foco vai pra linha anterior visível (a apagada some).
     const rows = getVisibleRows()
     const idx = rows.findIndex(r => r.id === focusedId)
-    const deletedIds = new Set(pendingDelete.map(n => n.id))
+    const deletedIds = new Set(nodes.map(n => n.id))
     const fallback = rows.slice(0, Math.max(idx, 0)).reverse().find(r => !deletedIds.has(r.id))
     setFocusedId(fallback?.id ?? null)
     requestAnimationFrame(() => scrollRef.current?.focus({ preventScroll: true }))
-  }, [pendingDelete, items, onUpdateItems, getVisibleRows, focusedId])
+  }, [items, onUpdateItems, getVisibleRows, focusedId])
+
+  const confirmDelete = useCallback(() => {
+    if (!pendingDelete) return
+    deleteNodes(pendingDelete)
+    setPendingDelete(null)
+  }, [pendingDelete, deleteNodes])
 
   const handleTreeKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (isTextInput(e.target)) return
@@ -848,6 +1072,41 @@ export function CollectionTree({
     <div className="h-full flex flex-col pb-2"> 
       <TreeSearch value={search} onChange={setSearch} onArrowDown={focusTree} />
 
+      {/* Barra de marcadores: só os que estão em uso, logo abaixo da busca.
+          Chip aceso = filtrando. Vários acesos é OU — "flaky ou smoke" é o
+          que se quer ao varrer; E deixaria quase tudo vazio. */}
+      {filterBarMarkers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 px-2 pb-1.5">
+          {filterBarMarkers.map(marker => {
+            const on = activeFilterIds.includes(marker.id)
+            return (
+              <button
+                key={marker.id}
+                onClick={() => toggleFilterMarker(marker.id)}
+                title={on ? `Stop filtering by "${marker.name}"` : `Filter by "${marker.name}"`}
+                className={`flex items-center gap-1.5 rounded-full border px-2 py-[2px] text-[10.5px] transition-colors ${
+                  on
+                    ? 'border-transparent text-pm-text'
+                    : 'border-pm-border text-pm-text-muted hover:text-pm-text'
+                }`}
+                style={on ? { backgroundColor: `${marker.color}28`, borderColor: marker.color } : undefined}
+              >
+                <MarkerGlyph color={marker.color} size={11} className="shrink-0" />
+                <span className="max-w-[110px] truncate">{marker.name}</span>
+              </button>
+            )
+          })}
+          {activeFilterIds.length > 0 && (
+            <button
+              onClick={() => setFilterMarkerIds([])}
+              className="px-1 text-[10.5px] text-pm-text-muted hover:text-pm-text"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Favoritos: atalhos pras pastas favoritadas (em qualquer nível).
           Some durante a busca pra não disputar espaço com os resultados. */}
       {!isSearching && starred.length > 0 && (
@@ -975,6 +1234,8 @@ export function CollectionTree({
                   renamingId={renamingId}
                   onRenameHandled={handleRenameHandled}
                   searchTokens={searchTokens}
+                  markerMap={markerMap}
+                  onMarkerClick={onMarkersChange ? handleMarkerClick : undefined}
                   folderPickMode={folderPickMode}
                   onPickFolder={onPickFolder}
                 />
@@ -1054,7 +1315,10 @@ export function CollectionTree({
           targetItem={contextMenu.item}
           selectionCount={selectedIds.size}
           canPaste={contextMenu.canPaste}
-          onCopy={handleCopySelected}
+          onCopy={() => handleCopySelected(contextMenu.item?.id)}
+          onRename={
+            contextMenu.item ? () => setRenamingId(contextMenu.item!.id) : undefined
+          }
           onPaste={handlePaste}
           move={contextMenu.item ? buildMoveActions(contextMenu.item.id) : undefined}
           numberableCount={contextMenu.item?.item?.length ?? 0}
@@ -1063,16 +1327,62 @@ export function CollectionTree({
               ? () => handleNumberChildren(contextMenu.item!.id)
               : undefined
           }
-          onDelete={() => {
-            const targets = deleteTargets(contextMenu.item)
-            if (targets.length > 0) setPendingDelete(targets)
-          }}
+          markers={
+            onMarkersChange
+              ? {
+                  catalog: markerCatalog,
+                  state: contextMarkerState,
+                  onToggle: handleToggleMarker,
+                  onCreate: handleCreateMarker,
+                  onRecolor: handleRecolorMarker,
+                  onManage: () => setManagingMarkers(true),
+                }
+              : undefined
+          }
+          openAllCount={contextOpenAll.length}
+          onOpenAll={
+            onOpenAllRequests ? () => onOpenAllRequests(contextOpenAll) : undefined
+          }
+          onSaveDescription={
+            contextMenu.item
+              ? text => handleSaveDescription(contextMenu.item!.id, text)
+              : undefined
+          }
+          onDelete={() => deleteNodes(contextDeleteTargets)}
+          deleteHasFolder={contextDeleteTargets.some(n => n.type === 'folder')}
           onClose={() => setContextMenu(null)}
         />
       )}
 
-      {/* Confirmação do Del pelo teclado (o menu "…" tem a própria
-          confirmação inline). */}
+      {openMarker && markerMap.has(openMarker.markerId) && (
+        <MarkerPopover
+          x={openMarker.x}
+          y={openMarker.y}
+          marker={{ id: openMarker.markerId, ...markerMap.get(openMarker.markerId)! }}
+          itemName={openMarker.itemName}
+          // Lido da árvore a cada render, não congelado na abertura: o
+          // mesmo item pode ser editado por outro caminho com isto aberto.
+          note={markerNote(findNode(items, openMarker.itemId) ?? ({} as CollectionItem), openMarker.markerId)}
+          onSaveNote={text => handleSaveMarkerNote(openMarker.itemId, openMarker.markerId, text)}
+          onRemove={() => handleRemoveMarkerHere(openMarker.itemId, openMarker.markerId)}
+          onClose={() => setOpenMarker(null)}
+        />
+      )}
+
+      {onMarkersChange && (
+        <MarkersDialog
+          open={managingMarkers}
+          catalog={markerCatalog}
+          counts={markerUsage}
+          onChange={onMarkersChange}
+          onDelete={handleDeleteMarker}
+          onClose={() => setManagingMarkers(false)}
+        />
+      )}
+
+      {/* Confirmação da tecla Delete — é o único gesto sem um menu aberto
+          onde confirmar em linha (os menus "…" e de clique direito
+          confirmam dentro de si mesmos). */}
       <AlertDialog
         open={!!pendingDelete}
         onOpenChange={(open) => {

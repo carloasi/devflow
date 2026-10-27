@@ -16,6 +16,7 @@ import {
 
 import { CollectionTree } from './CollectionTree'
 import { CollectionItem } from '@/app/types/CollectionItem'
+import type { Marker } from '@/lib/markers'
 import { parsePostmanCollection } from '@/utils/postmanParser'
 import { parseOpenApi, detectOpenApiVersion } from '@/lib/openapiParser'
 import { parsePostmanImport } from '@/components/usePostmanImport'
@@ -41,6 +42,8 @@ interface SidebarProps {
   activeId?: string
 
   onRequestSelect: (item: CollectionItem) => void
+  // Abre todas as requests de uma pasta em abas.
+  onOpenAllRequests?: (requests: CollectionItem[]) => void
   onRenameItem?: (id: string, newName: string) => void
   onRunCollection?: (item: CollectionItem) => void
   onLoadTestItem?: (item: CollectionItem) => void
@@ -56,6 +59,11 @@ interface SidebarProps {
   pickerLabel?: string
   onPickFolder?: (id: string) => void
   onCancelPicker?: () => void
+
+  // Catalogo de marcadores do workspace (ver lib/markers.ts) — do
+  // AppLayout, que e quem persiste.
+  markers?: Marker[]
+  onMarkersChange?: (markers: Marker[]) => void
 }
 
 //const STORAGE_KEY = 'postman_clone_collections'
@@ -65,6 +73,7 @@ export default function Sidebar({
   setCollections,
   activeId,
   onRequestSelect,
+  onOpenAllRequests,
   onRenameItem,
   onRunCollection,
   onLoadTestItem,
@@ -76,6 +85,8 @@ export default function Sidebar({
   pickerLabel,
   onPickFolder,
   onCancelPicker,
+  markers,
+  onMarkersChange,
   pendingPushIds,
 }: SidebarProps) {
   const { importEnvironment } = useEnvironment()
@@ -409,6 +420,7 @@ export default function Sidebar({
           onRequestSelect={
             onRequestSelect
           }
+          onOpenAllRequests={onOpenAllRequests}
           onUpdateItems={setCollections}
           onRename={onRenameItem}
           onRunItem={onRunCollection}
@@ -421,6 +433,8 @@ export default function Sidebar({
           onPickFolder={onPickFolder}
           collapseAllToken={collapseAllToken}
           pendingPushIds={pendingPushIds}
+          markers={markers}
+          onMarkersChange={onMarkersChange}
         />
       </div>
     </div>

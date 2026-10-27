@@ -81,6 +81,12 @@ export function fieldDiffs(local: CollectionItem, remote: CollectionItem): Field
   compare('preRequestScript', local.request?.scripts?.preRequest, remote.request?.scripts?.preRequest);
   compare('postResponseScript', local.request?.scripts?.postResponse, remote.request?.scripts?.postResponse);
   compare('example', local.example, remote.example);
+  // Descrição e marcadores são do TIME (ver CollectionItem) — sem entrar
+  // aqui, o nó não conta como modificado e a alteração de quem deu push
+  // sumiria em silêncio no merge, sem nunca aparecer na tela de comparação.
+  compare('description', local.description, remote.description);
+  compare('markers', local.markers, remote.markers);
+  compare('markerNotes', local.markerNotes, remote.markerNotes);
 
   return out;
 }
