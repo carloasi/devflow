@@ -21,9 +21,11 @@ jobs:
           - os: windows-latest
             label: Windows
             args: ''
-          # macOS 14 é ARM (Apple Silicon). O alvo universal cobre Intel no
+          # macos-latest é ARM (Apple Silicon). O alvo universal cobre Intel no
           # mesmo .dmg, evitando publicar dois arquivos e explicar a diferença.
-          - os: macos-14
+          # "latest" e não um número fixo: o GitHub aposenta as imagens antigas
+          # (a macos-14 parou de ser aceita) e o job era cancelado sem rodar.
+          - os: macos-latest
             label: macOS (universal)
             args: '--target universal-apple-darwin'
           - os: ubuntu-22.04
@@ -56,7 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           # Sem os dois alvos o --target universal-apple-darwin falha.
-          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       # Ubuntu 22.04 e não 24.04: o Tauri 2 usa webkit2gtk-4.1, e a 24.04
       # empacota uma combinação de versões que costuma quebrar o build.
