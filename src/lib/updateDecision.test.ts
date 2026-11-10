@@ -118,6 +118,15 @@ describe('normalizeVersion', () => {
     expect(normalizeVersion(' V1.2.3 ')).toBe('1.2.3')
     expect(normalizeVersion('1.2.3-beta')).toBeNull()
   })
+
+  it('ignora o apóstrofo do Sheets digitado no começo ou no fim', () => {
+    expect(normalizeVersion("1.1.7'")).toBe('1.1.7')
+    expect(normalizeVersion("'1.1.7")).toBe('1.1.7')
+    expect(normalizeVersion('"1.1.7"')).toBe('1.1.7')
+    expect(releasesWithLegacyFallback([], "1.1.7'")).toEqual([
+      { version: '1.1.7', mandatory: false, notes: undefined },
+    ])
+  })
 })
 
 describe('releasesWithLegacyFallback', () => {

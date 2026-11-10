@@ -63,7 +63,9 @@ const VERSION_RE = /^\d+(\.\d+)*$/
 
 export function normalizeVersion(value: unknown): string | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null
-  const v = String(value).trim().replace(/^v/i, '')
+  // Aspas soltas também saem: o apóstrofo que força texto no Sheets às
+  // vezes é digitado no fim ("1.1.7'") em vez do começo e vai junto no valor.
+  const v = String(value).trim().replace(/^['"‘’]+|['"‘’]+$/g, '').trim().replace(/^v/i, '')
   return VERSION_RE.test(v) ? v : null
 }
 
