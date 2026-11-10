@@ -12,6 +12,12 @@ interface ClaudeChatPanelProps {
   onClose: () => void;
   chat: UseClaudeChatResult;
   mcpEnabled: boolean;
+  // Pré-preenche o campo de pergunta sem enviar sozinho (ver AppLayout,
+  // atalho "Perguntar pra IA" do Collection Runner). O `nonce` existe pra
+  // que clicar de novo, mesmo com o MESMO texto, ainda sobrescreva o que
+  // o usuário tiver digitado no meio tempo — comparar só `text` não
+  // dispararia o efeito se o texto repetir.
+  draftPrompt?: { text: string; nonce: number } | null;
 }
 
 const WIDTH_KEY = 'devflow_claude_panel_width';
@@ -29,7 +35,7 @@ function readStoredWidth(): number {
   }
 }
 
-export function ClaudeChatPanel({ open, onClose, chat, mcpEnabled }: ClaudeChatPanelProps) {
+export function ClaudeChatPanel({ open, onClose, chat, mcpEnabled, draftPrompt }: ClaudeChatPanelProps) {
   const [input, setInput] = useState('');
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const [resizing, setResizing] = useState(false);
@@ -37,6 +43,18 @@ export function ClaudeChatPanel({ open, onClose, chat, mcpEnabled }: ClaudeChatP
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const auth = useClaudeAuth();
   const [apiKeyDraft, setApiKeyDraft] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Preenche o campo com a pergunta pronta vinda de fora, sem enviar — o
+  // usuário revisa/edita e aperta Enviar ele mesmo. Dispara no `nonce`, não
+  // no texto: clicar o atalho de novo com a MESMA pergunta ainda deve
+  // sobrescrever o que o usuário tiver editado no meio tempo.
+  useEffect(() => {
+    if (!draftPrompt) return;
+    setInput(draftPrompt.text);
+    textareaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftPrompt?.nonce]);
   // Painel de credencial aberto pelo botão de chave no cabeçalho. Antes ele
   // só existia enquanto NÃO havia credencial: depois de salvar uma chave
   // (mesmo inválida) a faixa sumia e não sobrava nenhum jeito de trocar a
@@ -485,6 +503,7 @@ export function ClaudeChatPanel({ open, onClose, chat, mcpEnabled }: ClaudeChatP
 
         <div className="shrink-0 border-t border-pm-border p-2">
           <textarea
+            ref={textareaRef}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => {

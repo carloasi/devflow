@@ -64,6 +64,8 @@ interface SidebarProps {
   // AppLayout, que e quem persiste.
   markers?: Marker[]
   onMarkersChange?: (markers: Marker[]) => void
+  // Repassado direto pro CollectionTree — ver o prop de mesmo nome lá.
+  focusRequest?: { id: string; nonce: number } | null
 }
 
 //const STORAGE_KEY = 'postman_clone_collections'
@@ -88,6 +90,7 @@ export default function Sidebar({
   markers,
   onMarkersChange,
   pendingPushIds,
+  focusRequest,
 }: SidebarProps) {
   const { importEnvironment } = useEnvironment()
   const collectionFileInputRef = useRef<HTMLInputElement>(null)
@@ -255,6 +258,113 @@ export default function Sidebar({
   }
 
   /*
+   * IMPORT POR ARRASTAR-E-SOLTAR (collection OU environment)
+   *
+   * Arrastar não diz de antemão qual dos dois é — por isso usa o MESMO
+   * parser que já decide isso pros dois botões de Import (parsePostmanImport)
+   * e importa o que o arquivo realmente tiver, um ou os dois ao mesmo tempo
+   * (o wrapper { collections, environments } do Sync com GitHub permite os
+   * dois no mesmo arquivo). Reaproveita parsePostmanCollection pra não
+   * duplicar a lógica de nomear a pasta raiz / trocar os ids.
+   */
+  const processImportFile = (file: File) => {
+    const reader = new FileReader()
+
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string
+        const parsed = JSON.parse(text)
+
+        // Mesma regra do botão "Import Collection": quem decide o caminho é
+        // o conteúdo, não a extensão nem de onde o arquivo veio.
+        if (detectOpenApiVersion(parsed)) {
+          const fallbackName = file.name.replace(/\.(json|ya?ml)$/i, '')
+          const result = parseOpenApi(parsed, fallbackName)
+
+          if (!result.collection) {
+            alert(result.warnings.join('\n') || 'Could not import this OpenAPI document.')
+            return
+          }
+
+          setCollections(prev => [...prev, result.collection!])
+
+          const notes = [...result.warnings]
+          if (result.variables.length > 0) {
+            notes.unshift(`Base URL: ${result.variables[0].value}`)
+          }
+          if (notes.length > 0) alert(notes.join('\n'))
+          return
+        }
+
+        const result = parsePostmanImport(parsed)
+        let importedSomething = false
+
+        if (result.collections && result.collections.length > 0) {
+          setCollections(prev => parsePostmanCollection(text, file.name, prev))
+          importedSomething = true
+        }
+
+        if (result.environments && result.environments.length > 0) {
+          result.environments.forEach(env => {
+            importEnvironment({
+              id: env.id,
+              name: env.name,
+              values: env.values.map(v => ({
+                id: crypto.randomUUID(),
+                key: v.key,
+                value: v.value,
+                type: v.type,
+                enabled: v.enabled,
+                description: v.description,
+              })),
+            })
+          })
+          importedSomething = true
+        }
+
+        if (!importedSomething) {
+          alert(result.warnings.length ? result.warnings.join('\n') : 'No collection or environment found in this file.')
+        }
+      } catch (err) {
+        console.log('Falha ao importar arquivo arrastado:', err)
+        alert('Could not read this file. It must be a valid JSON (Postman collection, environment, or OpenAPI).')
+      }
+    }
+
+    reader.readAsText(file)
+  }
+
+  // Contador, não booleano: arrastar sobre um filho dispara dragLeave do pai
+  // antes do dragEnter do filho, e um booleano simples piscaria a sobreposição
+  // toda vez que o cursor passasse por cima de qualquer elemento da árvore.
+  const dragCounterRef = useRef(0)
+  const [isDraggingFile, setIsDraggingFile] = useState(false)
+
+  const handleSidebarDragEnter = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (!e.dataTransfer.types.includes('Files')) return
+    dragCounterRef.current += 1
+    setIsDraggingFile(true)
+  }
+  const handleSidebarDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+  }
+  const handleSidebarDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1)
+    if (dragCounterRef.current === 0) setIsDraggingFile(false)
+  }
+  const handleSidebarDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current = 0
+    setIsDraggingFile(false)
+    const files = Array.from(e.dataTransfer.files ?? []).filter(f =>
+      f.name.toLowerCase().endsWith('.json')
+    )
+    files.forEach(processImportFile)
+  }
+
+  /*
    * CREATE COLLECTION
    */
   const createCollection = () => {
@@ -273,7 +383,23 @@ export default function Sidebar({
   }
 
   return (
-    <div className="h-full flex flex-col bg-pm-sidebar">
+    <div
+      className="relative h-full flex flex-col bg-pm-sidebar"
+      onDragEnter={handleSidebarDragEnter}
+      onDragOver={handleSidebarDragOver}
+      onDragLeave={handleSidebarDragLeave}
+      onDrop={handleSidebarDrop}
+    >
+      {/* Sobreposição enquanto arrasta um arquivo por cima — some no drop
+          (handleSidebarDrop) ou ao sair da área (handleSidebarDragLeave). */}
+      {isDraggingFile && (
+        <div className="absolute inset-1.5 z-50 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-pm-accent bg-pm-bg/95 pointer-events-none">
+          <Upload size={20} className="text-pm-accent" />
+          <span className="text-[12px] font-medium text-pm-text">Drop to import</span>
+          <span className="text-[10.5px] text-pm-text-muted">Collection or Environment (.json)</span>
+        </div>
+      )}
+
       {/* Header */}
       <div
         className="
@@ -358,21 +484,30 @@ export default function Sidebar({
               </button>
             </DropdownMenuTrigger>
 
-            <DropdownMenuContent align="start" className="w-52 bg-pm-surface border border-pm-border rounded-xl p-1">
+            <DropdownMenuContent align="start" className="w-60 bg-pm-surface border border-pm-border rounded-lg p-1">
               <DropdownMenuItem
                 onClick={() => collectionFileInputRef.current?.click()}
-                className="rounded-lg text-xs cursor-pointer py-2 px-2.5 gap-2 outline-none focus:bg-pm-hover text-pm-text"
+                className="rounded-lg text-xs cursor-pointer py-2 px-2.5 gap-2 items-start outline-none focus:bg-pm-hover text-pm-text"
               >
-                <FileJson size={13} className="text-pm-text-muted" />
-                Import Collection
+                <FileJson size={13} className="text-pm-text-muted mt-0.5" />
+                <span className="flex flex-col gap-0.5">
+                  <span>Import Collection</span>
+                  <span className="text-[10.5px] font-normal text-pm-text-muted">Postman, OpenAPI/Swagger</span>
+                </span>
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => environmentFileInputRef.current?.click()}
-                className="rounded-lg text-xs cursor-pointer py-2 px-2.5 gap-2 outline-none focus:bg-pm-hover text-pm-text"
+                className="rounded-lg text-xs cursor-pointer py-2 px-2.5 gap-2 items-start outline-none focus:bg-pm-hover text-pm-text"
               >
-                <Globe2 size={13} className="text-pm-text-muted" />
-                Import Environment
+                <Globe2 size={13} className="text-pm-text-muted mt-0.5" />
+                <span className="flex flex-col gap-0.5">
+                  <span>Import Environment</span>
+                  <span className="text-[10.5px] font-normal text-pm-text-muted">Postman environment</span>
+                </span>
               </DropdownMenuItem>
+              <div className="mt-1 border-t border-pm-border px-2.5 pt-1.5 pb-1 text-[10.5px] text-pm-text-muted">
+                or drag a .json file into the sidebar
+              </div>
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -435,6 +570,7 @@ export default function Sidebar({
           pendingPushIds={pendingPushIds}
           markers={markers}
           onMarkersChange={onMarkersChange}
+          focusRequest={focusRequest}
         />
       </div>
     </div>

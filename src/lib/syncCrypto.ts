@@ -84,22 +84,41 @@ async function deriveKey(
 
 // 600k iterações custam centenas de ms. Um push toca vários arquivos, e
 // derivar por arquivo deixaria o sync lento sem ganhar segurança nenhuma —
-// a chave é a mesma. O cache guarda a última derivação por (senha, salt).
-let cached: { secret: string; saltB64: string; key: CryptoKey } | null = null;
+// a chave é a mesma pro mesmo (senha, salt).
+//
+// VÁRIAS chaves, não uma: cada arquivo traz o salt de quem o gravou, e um
+// workspace editado por várias pessoas tem vários. Com uma chave só, os
+// downloads paralelos de um pull alternavam os salts e cada troca refazia a
+// derivação inteira — segundos a mais a cada pull/push. Guarda a promessa
+// (não a chave pronta), pra dois arquivos do mesmo salt baixados ao mesmo
+// tempo não derivarem duas vezes.
+const KEY_CACHE_MAX = 32;
+const keyCache = new Map<string, Promise<CryptoKey>>();
+// O salt que ESTA sessão usa pra gravar (ver encryptData).
+let writeSalt: { secret: string; saltB64: string } | null = null;
+let legacyKey: Promise<CryptoKey> | null = null;
 
 async function deriveV2Key(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
   const saltB64 = toBase64(salt);
-  if (cached && cached.secret === passphrase && cached.saltB64 === saltB64) {
-    return cached.key;
+  const cacheKey = `${saltB64}\u0000${passphrase}`;
+  let key = keyCache.get(cacheKey);
+  if (key) {
+    // Recém-usada vai pro fim: quem sai quando enche é a mais antiga.
+    keyCache.delete(cacheKey);
+    keyCache.set(cacheKey, key);
+    return key;
   }
-  const key = await deriveKey(passphrase, salt, V2_ITERATIONS);
-  cached = { secret: passphrase, saltB64, key };
+  key = deriveKey(passphrase, salt, V2_ITERATIONS);
+  keyCache.set(cacheKey, key);
+  key.catch(() => keyCache.delete(cacheKey));
+  while (keyCache.size > KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value as string);
   return key;
 }
 
-/** Esquece a chave derivada — usar ao trocar de senha ou ao desconectar. */
+/** Esquece as chaves derivadas — usar ao trocar de senha ou ao desconectar. */
 export function clearDerivedKeyCache(): void {
-  cached = null;
+  keyCache.clear();
+  writeSalt = null;
 }
 
 /** true quando o conteúdo está no formato novo (exige senha pra ler). */
@@ -116,10 +135,10 @@ export async function encryptData(data: unknown, passphrase: string): Promise<st
   // derivação de 600k iterações em cada um — segundos de espera sem ganho,
   // já que o IV, esse sim sorteado por arquivo, é o que garante cifras
   // diferentes para conteúdos iguais.
-  const salt =
-    cached && cached.secret === passphrase
-      ? fromBase64(cached.saltB64)
-      : crypto.getRandomValues(new Uint8Array(V2_SALT_BYTES));
+  if (!writeSalt || writeSalt.secret !== passphrase) {
+    writeSalt = { secret: passphrase, saltB64: toBase64(crypto.getRandomValues(new Uint8Array(V2_SALT_BYTES))) };
+  }
+  const salt = fromBase64(writeSalt.saltB64);
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const key = await deriveV2Key(passphrase, salt);
 
@@ -171,11 +190,10 @@ export async function decryptData(
   const payload = fromBase64(trimmed);
   const iv = payload.slice(0, IV_BYTES);
   const body = payload.slice(IV_BYTES);
-  const key = await deriveKey(
-    LEGACY_SECRET,
-    new TextEncoder().encode(LEGACY_SALT),
-    LEGACY_ITERATIONS
-  );
+  // Chave fixa do formato antigo: deriva uma vez só por sessão.
+  legacyKey ??= deriveKey(LEGACY_SECRET, new TextEncoder().encode(LEGACY_SALT), LEGACY_ITERATIONS);
+  legacyKey.catch(() => { legacyKey = null; });
+  const key = await legacyKey;
 
   try {
     const plain = await crypto.subtle.decrypt(

@@ -17,7 +17,7 @@ import type { DiffNode, FieldDiff } from './collectionDiff';
 const nodeId = (envId: string, key: string) => `${envId}:${key}`;
 
 /** Só a entrada habilitada de cada key — a mesma regra do lib/envMap. */
-function enabledByKey(values: EnvironmentValue[] | undefined): Map<string, EnvironmentValue> {
+export function enabledByKey(values: EnvironmentValue[] | undefined): Map<string, EnvironmentValue> {
   const map = new Map<string, EnvironmentValue>();
   for (const v of values ?? []) {
     if (!v.key || !v.enabled) continue;
@@ -44,7 +44,7 @@ function fieldsOf(local: EnvironmentValue, remote: EnvironmentValue): FieldDiff[
  * environment têm ids diferentes, e sem o nome o diff mostraria um para
  * adicionar e um para remover em vez de uma comparação.
  */
-function matchEnvironments(local: Environment[], remote: Environment[]) {
+export function matchEnvironments(local: Environment[], remote: Environment[]) {
   const pairs: { local?: Environment; remote?: Environment }[] = [];
   const used = new Set<string>();
 

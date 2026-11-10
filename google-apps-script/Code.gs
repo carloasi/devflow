@@ -51,6 +51,10 @@
  *   - Bloquear UMA VERSÃO específica (ex: um release com bug, sem mexer no
  *     mínimo exigido pra todo mundo): preencha blockedVersions com a versão
  *     exata (ex: "1.1.7"). Aceita várias separadas por vírgula.
+ *   - Publicar uma versão nova, opcional ou obrigatória: adicione uma linha
+ *     na aba "Releases" (crie com setupReleasesSheet(), ver readReleases
+ *     mais abaixo) e marque a coluna "mandatory" se ela for obrigatória.
+ *     Com a aba preenchida, ela substitui o latestVersion da primeira aba.
  *   - Ver quem está usando o app: abra a aba "Users" (criada automaticamente
  *     no primeiro check-in) — uma linha por pessoa, com a versão e o horário
  *     do último acesso.
@@ -221,7 +225,134 @@ function doGet(e) {
     }
   }
 
+  // Lista de versões publicadas, cada uma marcada como obrigatória ou não
+  // (aba "Releases", ver readReleases abaixo). O app decide sozinho, a partir
+  // da versão instalada, se mostra o aviso opcional ou a tela obrigatória.
+  status.releases = readReleases();
+
   return ContentService
     .createTextOutput(JSON.stringify(status))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * ─── Aba "Releases": atualização opcional x obrigatória ───────────────────
+ *
+ * Uma linha por versão publicada, com cabeçalho na linha 1:
+ *
+ *   version | mandatory | notes                       | date       | url
+ *   1.4.5   | ☐         | Correções no runner         | 2026-11-01 |
+ *   1.5.0   | ☑         | Corrige falha de segurança  | 2026-11-10 | https://...
+ *
+ *   version    versão publicada (texto simples, ex. 1.5.0)
+ *   mandatory  caixa de seleção (ou "Sim"/"Não"): marcada = obrigatória
+ *   notes      o que mudou (aparece no aviso e na tela obrigatória)
+ *   date       data da publicação (só informativa)
+ *   url        link do instalador desta versão; vazio = usa o updateUrl
+ *              da primeira aba
+ *
+ * Regra aplicada no app (src/lib/updateDecision.ts): pega todas as versões
+ * acima da instalada; se QUALQUER uma delas for obrigatória, a atualização
+ * é obrigatória (tela bloqueante só com "Atualizar"); senão, é um aviso que
+ * dá pra dispensar ou adiar. Se a planilha falhar ou a pessoa estiver
+ * offline, o app não bloqueia.
+ *
+ * Os nomes do cabeçalho também valem em português: versao/versão,
+ * obrigatoria/obrigatória, notas, data, link. A ordem das colunas não
+ * importa.
+ *
+ * Pra criar a aba já formatada, rode setupReleasesSheet() uma vez pelo
+ * editor (selecione a função no topo e clique em Executar).
+ */
+var RELEASES_SHEET = 'Releases';
+
+var RELEASE_COLUMNS = {
+  version: ['version', 'versao', 'versão'],
+  mandatory: ['mandatory', 'obrigatoria', 'obrigatória', 'obrigatorio', 'obrigatório'],
+  notes: ['notes', 'notas', 'novidades', 'changelog'],
+  date: ['date', 'data'],
+  url: ['url', 'link', 'download'],
+};
+
+function readReleases() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(RELEASES_SHEET);
+  if (!sheet) return [];
+
+  var rows = sheet.getDataRange().getValues();
+  if (rows.length < 2) return [];
+
+  // Descobre a coluna de cada campo pelo cabeçalho (linha 1).
+  var header = rows[0].map(function (h) { return String(h || '').trim().toLowerCase(); });
+  var col = {};
+  Object.keys(RELEASE_COLUMNS).forEach(function (field) {
+    col[field] = -1;
+    for (var c = 0; c < header.length; c++) {
+      if (RELEASE_COLUMNS[field].indexOf(header[c]) !== -1) { col[field] = c; break; }
+    }
+  });
+  if (col.version === -1) return [];
+
+  var tz = ss.getSpreadsheetTimeZone();
+  var releases = [];
+  for (var i = 1; i < rows.length; i++) {
+    var row = rows[i];
+    var version = releaseVersion(row[col.version]);
+    if (!version) continue;
+
+    releases.push({
+      version: version,
+      mandatory: col.mandatory === -1 ? false : isTruthyCell(row[col.mandatory]),
+      notes: col.notes === -1 ? '' : String(row[col.notes] || '').trim(),
+      date: col.date === -1 ? '' : releaseDate(row[col.date], tz),
+      url: col.url === -1 ? '' : String(row[col.url] || '').trim(),
+    });
+  }
+  return releases;
+}
+
+// Mesma rede de segurança do latestVersion: se o Sheets converteu "1.1.2008"
+// numa Data, reconstrói M.D.YYYY. O certo é a coluna estar como Texto simples
+// (setupReleasesSheet já deixa assim).
+function releaseVersion(value) {
+  if (value === '' || value === null || value === undefined) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return (value.getMonth() + 1) + '.' + value.getDate() + '.' + value.getFullYear();
+  }
+  return String(value).trim();
+}
+
+function releaseDate(value, tz) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, tz, 'yyyy-MM-dd');
+  }
+  return String(value || '').trim();
+}
+
+// Caixa de seleção (true/false) ou texto ("Sim", "x", "TRUE"...).
+function isTruthyCell(value) {
+  if (value === true || value === 1) return true;
+  var s = String(value || '').trim().toLowerCase();
+  return ['true', 'sim', 's', 'yes', 'y', '1', 'x', 'obrigatoria', 'obrigatória'].indexOf(s) !== -1;
+}
+
+/**
+ * Cria a aba "Releases" com cabeçalho, coluna de versão como texto simples e
+ * caixa de seleção na coluna "mandatory". Rode UMA vez pelo editor do Apps
+ * Script. Se a aba já existir, não mexe em nada.
+ */
+function setupReleasesSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (ss.getSheetByName(RELEASES_SHEET)) return;
+
+  // No fim da lista: a PRIMEIRA aba continua sendo a de chave/valor.
+  var sheet = ss.insertSheet(RELEASES_SHEET, ss.getNumSheets());
+  sheet.getRange(1, 1, 1, 5).setValues([['version', 'mandatory', 'notes', 'date', 'url']]);
+  sheet.getRange(1, 1, 1, 5).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+
+  sheet.getRange('A:A').setNumberFormat('@');
+  sheet.getRange('B2:B').insertCheckboxes();
+  sheet.getRange('D2:D').setNumberFormat('yyyy-mm-dd');
+  sheet.setColumnWidth(3, 360);
 }

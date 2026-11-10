@@ -64,6 +64,59 @@ appears in any of them (global, minimum version, specific user or specific
 version). Leave it blank for each case to show its own default English
 message.
 
+## Optional vs. mandatory updates (Releases tab)
+
+List every published version on a tab called **Releases**, one row per
+version. To create it already formatted, open **Extensions → Apps Script**,
+pick `setupReleasesSheet` in the function dropdown and click **Run** once.
+
+| version | mandatory | notes | date | url |
+|---|---|---|---|---|
+| 1.4.5 | ☐ | Runner fixes | 2026-11-01 | |
+| 1.5.0 | ☑ | Security fix | 2026-11-10 | https://github.com/.../v1.5.0 |
+
+- `version` — plain text (the setup function formats the column).
+- `mandatory` — checkbox (or `Sim`/`Não`, `TRUE`/`FALSE`, `x`). Anything not
+  clearly "yes" counts as optional.
+- `notes` — shown in the toast and on the mandatory screen.
+- `date` — informative only.
+- `url` — installer for that version; empty falls back to `updateUrl` from
+  the first tab. It must be on a domain allowed by the opener (see below).
+
+Header names may also be in Portuguese (`versão`, `obrigatória`, `notas`,
+`data`, `link`), and column order does not matter.
+
+What the app does (`src/lib/updateDecision.ts`): it takes every version above
+the installed one. If **any** of them is mandatory — even an intermediate one,
+when the newest is optional — the update is mandatory: a blocking screen with
+only an **Update** button. Otherwise it shows a toast with **Update**,
+**Later** (hides it for 24 h) and **×** (no more notices for that version; a
+newer one brings it back). Network or sheet failure never blocks.
+
+### Publishing a new version
+
+The installers live in the repository's **GitHub Releases**, built by
+`.github/workflows/release.yml`:
+
+1. Bump `"version"` in `src-tauri/tauri.conf.json` (e.g. `1.5.0`) and commit.
+2. Tag and push: `git tag v1.5.0` then `git push origin v1.5.0`. The workflow
+   fails early if the tag does not match `tauri.conf.json`.
+3. Wait for the **Build** workflow: it builds Windows, macOS and Linux and,
+   only if all three succeed, publishes the `v1.5.0` release with the
+   installers attached. A tag with `-` (`v1.5.0-beta.1`) becomes a
+   pre-release and does not move `releases/latest`.
+4. **Only then** add the row to the Releases tab, with the installer link
+   (`https://github.com/<owner>/<repo>/releases/download/v1.5.0/<file>`) in
+   `url`, or leave `url` empty and point `updateUrl` at
+   `https://github.com/<owner>/<repo>/releases/latest`.
+
+Marking a version mandatory before its release exists leaves everyone stuck
+on the blocking screen with nothing to download.
+
+Once the Releases tab has at least one valid row, it replaces `latestVersion`
+from the first tab. `minVersion`, `blocked`, `blockedUsers` and
+`blockedVersions` keep working as before and take precedence.
+
 ## Seeing who is using the app
 
 Every time someone opens the app it records a "check-in" (Windows user +

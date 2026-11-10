@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Plus, X, RefreshCw, FolderPlus, FolderMinus, Check } from 'lucide-react'
+import { Plus, X, RefreshCw, FolderPlus, FolderMinus, Check, Workflow } from 'lucide-react'
 import {
   DndContext,
   DragEndEvent,
@@ -189,6 +189,8 @@ interface TabContextMenuProps {
   onCloseToRight: () => void
   onCloseAll: () => void
   onUpdateGroup?: () => void
+  tabCount: number
+  onAddAllToFlow?: () => void
   // Ausente quando a barra roda sem agrupamento (onGroupsChange não veio).
   groupActions?: {
     groups: TabGroup[]
@@ -215,6 +217,8 @@ function TabContextMenu({
   onCloseToRight,
   onCloseAll,
   onUpdateGroup,
+  tabCount,
+  onAddAllToFlow,
 }: TabContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuHeight, setMenuHeight] = useState(180);
@@ -363,6 +367,23 @@ function TabContextMenu({
         </>
       )}
 
+      {onAddAllToFlow && (
+        <>
+          <div className="h-[1px] bg-pm-hover my-1 mx-1.5" />
+          <button
+            disabled={tabCount === 0}
+            className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs text-[#3794ff] bg-transparent border-none text-left rounded-md transition-colors disabled:text-pm-text-muted disabled:opacity-50 disabled:cursor-not-allowed enabled:cursor-pointer enabled:hover:bg-[#3794ff]/10"
+            onClick={() => {
+              onAddAllToFlow()
+              onClose()
+            }}
+          >
+            <Workflow size={11} />
+            {tabCount > 1 ? `Add all ${tabCount} open tabs to a flow` : 'Add open tab to a flow'}
+          </button>
+        </>
+      )}
+
       <div className="h-[1px] bg-pm-hover my-1 mx-1.5" />
 
       <button
@@ -433,6 +454,9 @@ interface TabBarProps {
   // barra funciona como antes, sem nenhuma opção de grupo.
   groups?: TabGroup[]
   onGroupsChange?: (groups: TabGroup[]) => void
+  // "Add all open tabs to a flow" no menu de contexto — opcional, sem ela a
+  // opção some do menu.
+  onAddAllTabsToFlow?: () => void
 }
 
 export function TabBar({
@@ -449,6 +473,7 @@ export function TabBar({
   onUpdateCurrentSession,
   groups = [],
   onGroupsChange,
+  onAddAllTabsToFlow,
 }: TabBarProps) {
   const [draggingTab, setDraggingTab] = useState<Tab | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
@@ -821,6 +846,8 @@ const handleWheel = (e: React.WheelEvent) => {
           onCloseToRight={() => onCloseToRight(contextMenu.tabId)}
           onCloseAll={onCloseAll}
           onUpdateGroup={onUpdateCurrentSession}
+          tabCount={tabs.length}
+          onAddAllToFlow={onAddAllTabsToFlow}
           groupActions={
             onGroupsChange
               ? {

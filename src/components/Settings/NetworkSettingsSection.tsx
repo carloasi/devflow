@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { RelaySettingsBlock } from './RelaySettingsBlock';
 
 // Mesmo default do backend (RequestTimeoutState em lib.rs) — só usado aqui
 // pra pré-preencher o campo antes do valor real chegar do backend, e como
@@ -135,6 +136,8 @@ export function NetworkSettingsSection() {
           {cleared ? 'Cookies cleared' : clearing ? 'Clearing...' : 'Clear all cookies'}
         </button>
       </div>
+
+      <RelaySettingsBlock />
     </div>
   );
 }

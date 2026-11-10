@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -28,8 +28,15 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+// Requisição aguardando resposta do frontend. O prazo é renovado pelo
+// heartbeat (mcp_heartbeat) enquanto a ferramenta trabalha.
+struct PendingEntry {
+    tx: oneshot::Sender<String>,
+    deadline: Instant,
+}
+
 // Requisições aguardando resposta do frontend, por id.
-type PendingMap = Mutex<HashMap<u64, oneshot::Sender<String>>>;
+type PendingMap = Mutex<HashMap<u64, PendingEntry>>;
 
 fn pending() -> &'static PendingMap {
     static PENDING: OnceLock<PendingMap> = OnceLock::new();
@@ -60,17 +67,39 @@ struct McpRequestEvent {
     payload: String,
 }
 
-// Tempo máximo esperando o frontend responder. Existe pra uma janela
-// travada (ou o app minimizado com o handler quebrado) não deixar conexões
-// penduradas pra sempre do lado do Claude Code.
-const FRONTEND_TIMEOUT_SECS: u64 = 120;
+// Tempo máximo SEM SINAL DE VIDA do frontend. Existe pra uma janela travada
+// (ou o handler quebrado) não deixar conexões penduradas pra sempre do lado do
+// Claude Code.
+//
+// Não é mais um teto pra ferramenta: run_collection, run_load_test e o login
+// do get_oauth2_token levam minutos, e um teto fixo de 120 s devolvia "Timed
+// out" ao agente enquanto o fluxo seguia batendo na API real — e o agente,
+// achando que falhou, rodava de novo. O frontend manda heartbeat enquanto
+// trabalha; só o silêncio dele estoura o prazo.
+const FRONTEND_IDLE_TIMEOUT_SECS: u64 = 120;
+
+// Intervalo do keepalive SSE. O cliente HTTP do Claude Code (undici) desiste
+// de uma resposta que fica 300 s sem mandar nada — nem cabeçalho, nem byte de
+// corpo. Mandar o cabeçalho na hora e um comentário SSE de tempos em tempos
+// mantém a conexão viva durante ferramentas longas.
+const SSE_KEEPALIVE_SECS: u64 = 15;
 
 /// O frontend devolve aqui o resultado de uma requisição repassada.
 #[tauri::command]
 pub fn mcp_respond(id: u64, payload: String) {
-    let sender = pending().lock().ok().and_then(|mut map| map.remove(&id));
-    if let Some(tx) = sender {
-        let _ = tx.send(payload);
+    let entry = pending().lock().ok().and_then(|mut map| map.remove(&id));
+    if let Some(entry) = entry {
+        let _ = entry.tx.send(payload);
+    }
+}
+
+/// Sinal de vida do frontend enquanto uma ferramenta roda: empurra o prazo.
+#[tauri::command]
+pub fn mcp_heartbeat(id: u64) {
+    if let Ok(mut map) = pending().lock() {
+        if let Some(entry) = map.get_mut(&id) {
+            entry.deadline = Instant::now() + Duration::from_secs(FRONTEND_IDLE_TIMEOUT_SECS);
+        }
     }
 }
 
@@ -180,12 +209,15 @@ async fn handle_connection(
 
     let mut content_length = 0usize;
     let mut auth_header = String::new();
+    let mut accepts_sse = false;
     for line in lines {
         let lower = line.to_ascii_lowercase();
         if let Some(rest) = lower.strip_prefix("content-length:") {
             content_length = rest.trim().parse().unwrap_or(0);
         } else if lower.starts_with("authorization:") {
             auth_header = line["authorization:".len()..].trim().to_string();
+        } else if let Some(rest) = lower.strip_prefix("accept:") {
+            accepts_sse = rest.contains("text/event-stream");
         }
     }
 
@@ -235,50 +267,138 @@ async fn handle_connection(
         return write_response(&mut stream, 200, "{}").await;
     }
 
+    // Id JSON-RPC do pedido, pra que um erro gerado aqui (timeout, janela
+    // fora do ar) chegue ao cliente amarrado à chamada certa. Com `id: null`
+    // o cliente não tem como saber qual chamada falhou, e numa resposta SSE
+    // ficaria esperando pra sempre.
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+    let rpc_id = parsed
+        .as_ref()
+        .and_then(|v| v.get("id").cloned())
+        .unwrap_or(serde_json::Value::Null);
+
+    // Só tools/call pode demorar (é o que executa request, fluxo, load test e
+    // login). O resto responde em milissegundos e segue em JSON simples.
+    let is_tool_call = parsed
+        .as_ref()
+        .and_then(|v| v.get("method"))
+        .and_then(|m| m.as_str())
+        == Some("tools/call");
+    let use_sse = accepts_sse && is_tool_call && !rpc_id.is_null();
+
     // ── Repassa pro frontend e espera a resposta ──────────────────────────
     let id = next_id();
-    let (tx, rx) = oneshot::channel::<String>();
+    let (tx, mut rx) = oneshot::channel::<String>();
     if let Ok(mut map) = pending().lock() {
-        map.insert(id, tx);
+        map.insert(
+            id,
+            PendingEntry {
+                tx,
+                deadline: Instant::now() + Duration::from_secs(FRONTEND_IDLE_TIMEOUT_SECS),
+            },
+        );
     }
 
     if let Err(e) = app.emit("mcp-request", McpRequestEvent { id, payload: body }) {
-        if let Ok(mut map) = pending().lock() {
-            map.remove(&id);
-        }
+        remove_pending(id);
         return write_response(
             &mut stream,
             500,
-            &error_response(&format!("Failed to reach the app window: {e}")),
+            &error_response(&format!("Failed to reach the app window: {e}"), &rpc_id),
         )
         .await;
     }
 
-    let result = tokio::time::timeout(Duration::from_secs(FRONTEND_TIMEOUT_SECS), rx).await;
+    if use_sse {
+        // Cabeçalho já: é ele que o cliente espera pra não desistir.
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.flush().await.map_err(|e| e.to_string())?;
+    }
 
-    let response_body = match result {
-        Ok(Ok(payload)) => payload,
-        Ok(Err(_)) => error_response("The app window dropped the request"),
-        Err(_) => {
-            if let Ok(mut map) = pending().lock() {
-                map.remove(&id);
+    let response_body = loop {
+        let tick = Duration::from_secs(if use_sse { SSE_KEEPALIVE_SECS } else { 5 });
+        match tokio::time::timeout(tick, &mut rx).await {
+            Ok(Ok(payload)) => break payload,
+            Ok(Err(_)) => break error_response("The app window dropped the request", &rpc_id),
+            Err(_) => {
+                if use_sse && write_chunk(&mut stream, ": keepalive\n\n").await.is_err() {
+                    // O cliente foi embora (cancelou ou caiu): não há mais pra
+                    // quem responder.
+                    remove_pending(id);
+                    return Ok(());
+                }
+                // Entrada ausente = a resposta acabou de chegar; o próximo
+                // giro a lê do canal.
+                let expired = pending()
+                    .lock()
+                    .map(|map| map.get(&id).map(|e| Instant::now() >= e.deadline).unwrap_or(false))
+                    .unwrap_or(true);
+                if expired {
+                    remove_pending(id);
+                    break error_response(
+                        "The DevFlow window stopped answering (no sign of life for 120 s). Check that the app is open and responsive.",
+                        &rpc_id,
+                    );
+                }
             }
-            error_response("Timed out waiting for the DevFlow window to answer")
         }
     };
 
+    if use_sse {
+        if !response_body.is_empty() {
+            let mut event = String::from("event: message\n");
+            for line in response_body.lines() {
+                event.push_str("data: ");
+                event.push_str(line);
+                event.push('\n');
+            }
+            event.push('\n');
+            write_chunk(&mut stream, &event).await?;
+        }
+        stream.write_all(b"0\r\n\r\n").await.map_err(|e| e.to_string())?;
+        return stream.flush().await.map_err(|e| e.to_string());
+    }
+
     write_response(&mut stream, 200, &response_body).await
+}
+
+fn remove_pending(id: u64) {
+    if let Ok(mut map) = pending().lock() {
+        map.remove(&id);
+    }
+}
+
+// Um pedaço da resposta em Transfer-Encoding: chunked.
+async fn write_chunk(stream: &mut tokio::net::TcpStream, data: &str) -> Result<(), String> {
+    let framed = format!("{:x}\r\n{data}\r\n", data.len());
+    stream
+        .write_all(framed.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.flush().await.map_err(|e| e.to_string())
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn error_response(message: &str) -> String {
-    format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":{}}},"id":null}}"#,
-        serde_json::to_string(message).unwrap_or_else(|_| "\"internal error\"".to_string())
-    )
+fn error_response(message: &str, id: &serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": { "code": -32603, "message": message },
+        "id": id,
+    })
+    .to_string()
 }
 
 async fn write_response(

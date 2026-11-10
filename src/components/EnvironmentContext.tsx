@@ -1,5 +1,6 @@
 'use client'
 
+import { applyEnvPatch, detectEnvLosses, type EnvLoss } from '@/lib/envWrite'
 import React, {
   createContext,
   useContext,
@@ -29,7 +30,11 @@ interface EnvironmentContextType {
   patchEnvironmentVariables: (
     envId: string,
     previousEnvMap: Record<string, string>,
-    currentEnvMap: Record<string, string>
+    currentEnvMap: Record<string, string>,
+    // Avisado a cada valor DESTRUIDO por esta gravacao. Quem chama e quem
+    // sabe o contexto (qual request, qual passo do run), e e isso que torna
+    // o aviso acionavel — o contexto sozinho so sabe o nome da variavel.
+    onLoss?: (loss: EnvLoss) => void
   ) => void
   replaceVariables: (text: string) => string
   markEnvironmentSynced: (envId: string) => void
@@ -66,6 +71,12 @@ export function EnvironmentProvider({
   children: React.ReactNode
 }) {
   const [environments, setEnvironments] = useState<Environment[]>([])
+  // Espelho do estado pra ler FORA do updater — ver patchEnvironmentVariables.
+  // Um render atrás no pior caso, o que basta pra dizer qual valor se perdeu.
+  const environmentsRef = useRef(environments)
+  useEffect(() => {
+    environmentsRef.current = environments
+  })
   const [selectedEnvId, setSelectedEnvIdState] = useState<string | null>(null)
   // varKey -> lista de valores anteriores, mais recente primeiro (no máximo
   // MAX_VARIABLE_HISTORY entradas). Sem separação por ambiente: ver o
@@ -147,50 +158,42 @@ const updateEnvironment = useCallback((updatedEnv: Environment) => {
 // script no Collection Runner. Agora só a entrada habilitada de cada key é
 // alterada/removida, preservando o resto do array intocado.
 const patchEnvironmentVariables = useCallback(
-  (envId: string, previousEnvMap: Record<string, string>, currentEnvMap: Record<string, string>) => {
+  (
+    envId: string,
+    previousEnvMap: Record<string, string>,
+    currentEnvMap: Record<string, string>,
+    onLoss?: (loss: EnvLoss) => void
+  ) => {
+    // Os avisos saem ANTES e FORA do updater. O updater do setState tem que
+    // ser puro: o React pode chamá-lo duas vezes, e pode chamá-lo durante o
+    // render de outro componente — avisar lá dentro era um setState no meio
+    // do render ("Cannot update a component while rendering a different one"),
+    // e saía em dobro.
+    const alvo = environmentsRef.current.find(env => env.id === envId)
+    if (alvo) {
+      for (const loss of detectEnvLosses(alvo.values, previousEnvMap, currentEnvMap)) {
+        // O console do navegador é o piso: vale mesmo quando quem chamou não
+        // passou reporter, e leva os dois mapas inteiros pra inspeção.
+        console.warn(
+          `[env] "${loss.key}" ${loss.kind === 'removed' ? 'REMOVIDA de' : 'ESVAZIADA em'} ` +
+            `"${alvo.name}" — valor perdido: ${JSON.stringify(loss.previous)}. ` +
+            `Mapa antes: ${Object.keys(previousEnvMap).length} keys, depois: ${Object.keys(currentEnvMap).length}.`,
+          { antes: previousEnvMap, depois: currentEnvMap }
+        )
+        onLoss?.(loss)
+      }
+    }
+
     setEnvironments(prev =>
-      prev.map(env => {
-        if (env.id !== envId) return env
-
-        const nextValues = [...env.values]
-
-        Object.keys(previousEnvMap).forEach((key) => {
-          if (key in currentEnvMap) return
-          const idx = nextValues.findIndex(v => v.key === key && v.enabled)
-          if (idx !== -1) nextValues.splice(idx, 1)
-        })
-
-        Object.entries(currentEnvMap).forEach(([key, value]) => {
-          if (previousEnvMap[key] === value) return
-
-          const enabledIdx = nextValues.findIndex(v => v.key === key && v.enabled)
-          if (enabledIdx !== -1) {
-            nextValues[enabledIdx] = { ...nextValues[enabledIdx], value: String(value) }
-            return
-          }
-
-          const anyIdx = nextValues.findIndex(v => v.key === key)
-          if (anyIdx !== -1) {
-            nextValues[anyIdx] = { ...nextValues[anyIdx], value: String(value), enabled: true }
-            return
-          }
-
-          nextValues.push({
-            id: crypto.randomUUID(),
-            key,
-            value: String(value),
-            type: 'default',
-            enabled: true,
-            description: '',
-          })
-        })
-
-        return {
-          ...env,
-          values: nextValues
-          // sem isDirty aqui de propósito
-        }
-      })
+      prev.map(env =>
+        env.id === envId
+          ? {
+              ...env,
+              values: applyEnvPatch(env.values, previousEnvMap, currentEnvMap),
+              // sem isDirty aqui de propósito
+            }
+          : env
+      )
     )
   },
   []

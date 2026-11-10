@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   setDescription,
+  setRequestScript,
+  setRequestUrl,
   moveNode,
+  pasteNodesBeside,
   projectSiblingDrop,
   toggleStarNode,
   stripStarredFlags,
@@ -10,6 +13,8 @@ import {
   duplicateNode,
   moveUp,
   moveDown,
+  moveToFirst,
+  moveToLast,
   moveOut,
   canMoveUp,
   canMoveDown,
@@ -80,6 +85,40 @@ describe('moveNode', () => {
   it('ignora id inexistente', () => {
     const original = tree();
     expect(moveNode(original, 'naoExiste', 'ColB', 'inside')).toBe(original);
+  });
+});
+
+describe('pasteNodesBeside', () => {
+  const req = (id: string): CollectionItem =>
+    ({ id, name: id, type: 'request', method: 'GET' }) as CollectionItem;
+
+  it('insere antes do alvo', () => {
+    const items = [req('a'), req('b'), req('c')];
+    const next = pasteNodesBeside(items, 'b', [req('novo')], 'before');
+    expect(names(next)).toEqual(['a', 'novo', 'b', 'c']);
+  });
+
+  it('insere depois do alvo', () => {
+    const items = [req('a'), req('b'), req('c')];
+    const next = pasteNodesBeside(items, 'b', [req('novo')], 'after');
+    expect(names(next)).toEqual(['a', 'b', 'novo', 'c']);
+  });
+
+  it('insere vários nós de uma vez, na ordem dada', () => {
+    const items = [req('a'), req('b')];
+    const next = pasteNodesBeside(items, 'a', [req('x'), req('y')], 'after');
+    expect(names(next)).toEqual(['a', 'x', 'y', 'b']);
+  });
+
+  it('acha o alvo dentro de uma subpasta', () => {
+    const items = [folder('F', [req('a'), req('b')])];
+    const next = pasteNodesBeside(items, 'a', [req('novo')], 'after');
+    expect(names(find(next, 'F')!.item)).toEqual(['a', 'novo', 'b']);
+  });
+
+  it('não altera a árvore quando o alvo não existe', () => {
+    const original = [req('a'), req('b')];
+    expect(pasteNodesBeside(original, 'naoExiste', [req('novo')], 'after')).toEqual(original);
   });
 });
 
@@ -192,16 +231,16 @@ describe('duplicateNode', () => {
 
   it('insere a cópia logo depois do original', () => {
     const result = duplicateNode([named('a', 'Pagamentos'), named('b', 'Reservas')], 'a');
-    expect(names(result)).toEqual(['Pagamentos', 'Pagamentos (Copy)', 'Reservas']);
+    expect(names(result)).toEqual(['Pagamentos', 'Pagamentos', 'Reservas']);
   });
 
-  // O que motivou a mudança: num fluxo o nome da request é o passo
-  // ("1 - Gerar token"), e o sufixo em cada filho estraga o que se lê pra
-  // entender a ordem.
-  it('só o nó duplicado ganha (Copy) — os filhos mantêm o nome', () => {
+  // O nome sai idêntico, sem sufixo nenhum — "(Copy)" só sujava a leitura
+  // num fluxo, onde o nome da request é o passo ("1 - Gerar token"). Quem
+  // quer distinguir as duas usa o rename (F2).
+  it('a cópia mantém o nome do original, inclusive nos filhos', () => {
     const tree = [named('f', 'Fluxo', [named('r1', '1 - Gerar token'), named('r2', '2 - Checkout')])];
     const copy = duplicateNode(tree, 'f')[1];
-    expect(copy.name).toBe('Fluxo (Copy)');
+    expect(copy.name).toBe('Fluxo');
     expect(names(copy.item)).toEqual(['1 - Gerar token', '2 - Checkout']);
   });
 
@@ -224,7 +263,7 @@ describe('duplicateNode', () => {
   it('duplica um nó aninhado sem tocar nos irmãos', () => {
     const tree = [named('f', 'Fluxo', [named('r1', 'A'), named('r2', 'B')])];
     const result = duplicateNode(tree, 'r1');
-    expect(names(result[0].item)).toEqual(['A', 'A (Copy)', 'B']);
+    expect(names(result[0].item)).toEqual(['A', 'A', 'B']);
   });
 
   it('id inexistente não altera nada', () => {
@@ -270,6 +309,54 @@ describe('mover pelo menu', () => {
       expect(ids(moveDown(tree(), 'z')[0].item)).toEqual(['x', 'y', 'z']);
     });
   });
+
+  describe('moveToFirst', () => {
+    it('pula direto pra primeira posição', () => {
+      expect(ids(moveToFirst(tree(), 'z')[0].item)).toEqual(['z', 'x', 'y'])
+    })
+
+    it('não faz nada em quem já é o primeiro', () => {
+      const before = tree()
+      expect(moveToFirst(before, 'x')).toBe(before)
+    })
+
+    it('funciona na raiz', () => {
+      expect(ids(moveToFirst(tree(), 'b'))).toEqual(['b', 'a'])
+    })
+
+    it('não tira o nó da pasta', () => {
+      expect(ids(moveToFirst(tree(), 'z'))).toEqual(['a', 'b'])
+    })
+
+    it('id inexistente não altera nada', () => {
+      const before = tree()
+      expect(moveToFirst(before, 'zzz')).toBe(before)
+    })
+  })
+
+  describe('moveToLast', () => {
+    it('pula direto pra última posição', () => {
+      expect(ids(moveToLast(tree(), 'x')[0].item)).toEqual(['y', 'z', 'x'])
+    })
+
+    it('não faz nada em quem já é o último', () => {
+      const before = tree()
+      expect(moveToLast(before, 'z')).toBe(before)
+    })
+
+    it('funciona na raiz', () => {
+      expect(ids(moveToLast(tree(), 'a'))).toEqual(['b', 'a'])
+    })
+
+    it('não tira o nó da pasta', () => {
+      expect(ids(moveToLast(tree(), 'x'))).toEqual(['a', 'b'])
+    })
+
+    it('id inexistente não altera nada', () => {
+      const before = tree()
+      expect(moveToLast(before, 'zzz')).toBe(before)
+    })
+  })
 
   describe('moveOut', () => {
     // Depois da pasta, não antes: ele veio de dentro dela.
@@ -614,5 +701,163 @@ describe('setDescription', () => {
   it('id que não existe não muda nada', () => {
     const antes = arvore()
     expect(setDescription(antes, 'fantasma', 'x')).toBe(antes)
+  })
+})
+
+describe('setRequestScript', () => {
+  const arvore = (): CollectionItem[] => [
+    {
+      id: 'c',
+      name: 'Collection',
+      type: 'folder',
+      item: [
+        {
+          id: 'r',
+          name: 'Req',
+          type: 'request',
+          request: {
+            url: '{{baseUrl}}/x',
+            urlexport: { host: [], path: [], raw: '{{baseUrl}}/x' },
+            headers: [{ key: 'Accept', value: 'application/json', enabled: true }],
+            body: '',
+            scripts: { preRequest: 'antigo pre', postResponse: 'antigo post' },
+          },
+        },
+        { id: 'f', name: 'Pasta', type: 'folder', item: [] },
+      ],
+    } as CollectionItem,
+  ]
+
+  const acha = (items: CollectionItem[], id: string): CollectionItem | undefined => {
+    for (const i of items) {
+      if (i.id === id) return i
+      const hit = i.item && acha(i.item, id)
+      if (hit) return hit
+    }
+    return undefined
+  }
+
+  it('grava a fase pedida', () => {
+    const out = setRequestScript(arvore(), 'r', 'preRequest', 'novo pre')
+    expect(acha(out, 'r')!.request!.scripts!.preRequest).toBe('novo pre')
+  })
+
+  it('não mexe na OUTRA fase', () => {
+    const out = setRequestScript(arvore(), 'r', 'preRequest', 'novo pre')
+    expect(acha(out, 'r')!.request!.scripts!.postResponse).toBe('antigo post')
+  })
+
+  it('não mexe no resto de `request` — url, headers, body', () => {
+    const out = setRequestScript(arvore(), 'r', 'postResponse', 'novo post')
+    const req = acha(out, 'r')!.request!
+    expect(req.url).toBe('{{baseUrl}}/x')
+    expect(req.headers).toEqual([{ key: 'Accept', value: 'application/json', enabled: true }])
+  })
+
+  it('funciona em qualquer nível, não só na raiz', () => {
+    const tree = [{ id: 'top', name: 'Top', type: 'folder', item: arvore() } as CollectionItem]
+    const out = setRequestScript(tree, 'r', 'preRequest', 'fundo do poço')
+    expect(acha(out, 'r')!.request!.scripts!.preRequest).toBe('fundo do poço')
+  })
+
+  it('pasta (sem `request`) não quebra — devolve a mesma árvore', () => {
+    const antes = arvore()
+    expect(setRequestScript(antes, 'f', 'preRequest', 'x')).toBe(antes)
+  })
+
+  it('gravar o mesmo texto devolve a mesma árvore', () => {
+    const com = setRequestScript(arvore(), 'r', 'preRequest', 'novo pre')
+    expect(setRequestScript(com, 'r', 'preRequest', 'novo pre')).toBe(com)
+  })
+
+  it('não toca nos irmãos — mesma referência', () => {
+    const antes = arvore()
+    const depois = setRequestScript(antes, 'r', 'preRequest', 'novo pre')
+    expect(acha(depois, 'f')).toBe(acha(antes, 'f'))
+  })
+
+  it('request sem scripts nenhum ainda ganha o campo certo', () => {
+    const tree = [{ id: 'r', name: 'Req', type: 'request', request: { url: 'x' } } as CollectionItem]
+    const out = setRequestScript(tree, 'r', 'postResponse', 'primeiro script')
+    expect(acha(out, 'r')!.request!.scripts).toEqual({ preRequest: '', postResponse: 'primeiro script' })
+  })
+
+  it('id que não existe não muda nada', () => {
+    const antes = arvore()
+    expect(setRequestScript(antes, 'fantasma', 'preRequest', 'x')).toBe(antes)
+  })
+})
+
+describe('setRequestUrl', () => {
+  const arvore = (): CollectionItem[] => [
+    {
+      id: 'c',
+      name: 'Collection',
+      type: 'folder',
+      item: [
+        {
+          id: 'r',
+          name: 'Req',
+          type: 'request',
+          request: {
+            url: '{{baseUrl}}/x',
+            urlexport: { host: [], path: [], raw: '{{baseUrl}}/x' },
+            headers: [{ key: 'Accept', value: 'application/json', enabled: true }],
+            body: '',
+            scripts: { preRequest: 'pre', postResponse: 'post' },
+          },
+        },
+        { id: 'f', name: 'Pasta', type: 'folder', item: [] },
+      ],
+    } as CollectionItem,
+  ]
+
+  const acha = (items: CollectionItem[], id: string): CollectionItem | undefined => {
+    for (const i of items) {
+      if (i.id === id) return i
+      const hit = i.item && acha(i.item, id)
+      if (hit) return hit
+    }
+    return undefined
+  }
+
+  it('grava a URL nova', () => {
+    const out = setRequestUrl(arvore(), 'r', '{{otherUrl}}/x')
+    expect(acha(out, 'r')!.request!.url).toBe('{{otherUrl}}/x')
+  })
+
+  it('não mexe no resto de `request` — headers, body, scripts', () => {
+    const out = setRequestUrl(arvore(), 'r', '{{otherUrl}}/x')
+    const req = acha(out, 'r')!.request!
+    expect(req.headers).toEqual([{ key: 'Accept', value: 'application/json', enabled: true }])
+    expect(req.scripts).toEqual({ preRequest: 'pre', postResponse: 'post' })
+  })
+
+  it('funciona em qualquer nível, não só na raiz', () => {
+    const tree = [{ id: 'top', name: 'Top', type: 'folder', item: arvore() } as CollectionItem]
+    const out = setRequestUrl(tree, 'r', '{{otherUrl}}/x')
+    expect(acha(out, 'r')!.request!.url).toBe('{{otherUrl}}/x')
+  })
+
+  it('pasta (sem `request`) não quebra — devolve a mesma árvore', () => {
+    const antes = arvore()
+    expect(setRequestUrl(antes, 'f', '{{x}}')).toBe(antes)
+  })
+
+  it('gravar a mesma URL devolve a mesma árvore', () => {
+    expect(setRequestUrl(arvore(), 'r', '{{baseUrl}}/x')).toEqual(arvore())
+    const antes = arvore()
+    expect(setRequestUrl(antes, 'r', '{{baseUrl}}/x')).toBe(antes)
+  })
+
+  it('não toca nos irmãos — mesma referência', () => {
+    const antes = arvore()
+    const depois = setRequestUrl(antes, 'r', '{{otherUrl}}/x')
+    expect(acha(depois, 'f')).toBe(acha(antes, 'f'))
+  })
+
+  it('id que não existe não muda nada', () => {
+    const antes = arvore()
+    expect(setRequestUrl(antes, 'fantasma', '{{x}}')).toBe(antes)
   })
 })

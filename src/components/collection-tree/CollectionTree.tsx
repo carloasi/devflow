@@ -26,7 +26,6 @@ import {
   applyMarker,
   createMarker,
   filterTreeByMarkers,
-  hasMarker,
   markerCounts,
   markerNote,
   purgeMarker,
@@ -39,6 +38,9 @@ import { TreeNode } from './TreeNode'
 import { TreeSearch } from './TreeSearch'
 import { MarkersDialog } from './MarkersDialog'
 import { MarkerPopover } from './MarkerPopover'
+import { scanTree, type SecretFinding } from '@/lib/secretScan'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { useDraggableDialog } from '@/components/helper/useDraggableDialog'
 import { MarkerGlyph } from './MarkerGlyph'
 import { TreeContextMenu } from './TreeContextMenu'
 import { useCollectionTree } from './hooks/useCollectionTree'
@@ -57,6 +59,8 @@ import {
   removeNode,
   moveUp,
   moveDown,
+  moveToFirst,
+  moveToLast,
   moveOut,
   canMoveUp,
   canMoveDown,
@@ -65,8 +69,11 @@ import {
   restoreNames,
 } from './utils/tree.utils'
 import { buildItemCurl, buildItemUrl } from './utils/requestCopy'
-import { ChevronRight, FileText, Folder, GripVertical, Star } from 'lucide-react'
+import { ArrowUpRight, ChevronRight, FileText, Folder, GripVertical, KeyRound, ShieldAlert, Star, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
+import { ExportFlowHtmlDialog, type ExportFlowHtmlChoice } from './ExportFlowHtmlDialog'
+import type { ActionMenuView } from './TreeActionMenu'
+import { shortcutFor } from './treeShortcuts'
 import { ImportCurlDialog } from '../SlidePanel/ImportCurlDialog'
 import { copyItemsToClipboard, getClipboardItems, hasClipboardItems } from '@/storage/treeClipboard'
 import { useEnvironment } from '@/components/EnvironmentContext'
@@ -76,8 +83,6 @@ import {
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { buildEnvMap } from '@/lib/envMap';
@@ -113,6 +118,12 @@ interface Props {
   // collections, e quem a persiste e o AppLayout.
   markers?: Marker[]
   onMarkersChange?: (markers: Marker[]) => void
+  // Pedido de "abre onde está o item X" vindo de FORA da árvore (ex: um
+  // achado clicado no scanner de segredos, em Settings → Security — uma
+  // tela que não tem acesso nenhum ao estado interno daqui). O `nonce`
+  // garante que pedir o MESMO id de novo (clicar o mesmo achado duas vezes)
+  // ainda dispara o efeito — comparar só o id não mudaria.
+  focusRequest?: { id: string; nonce: number } | null
 }
 
 // Pastas abertas, persistidas entre sessões (antes tudo reabria fechado).
@@ -209,13 +220,16 @@ export function CollectionTree({
   pendingPushIds,
   markers,
   onMarkersChange,
+  focusRequest,
 }: Props) {
   const { search, setSearch, filteredItems, actions } = useCollectionTree({
     items,
     onUpdateItems,
     onRename
   })
-  const { activeEnv } = useEnvironment()
+  const { activeEnv, environments } = useEnvironment()
+  // Pasta cujo "Export as HTML runner" está com a janela de escolhas aberta.
+  const [exportHtmlItem, setExportHtmlItem] = useState<CollectionItem | null>(null)
 
   const [activeItem, setActiveItem] = useState<CollectionItem | null>(null)
   const [curlDialogParentId, setCurlDialogParentId] = useState<string | null>(null)
@@ -231,6 +245,29 @@ export function CollectionTree({
     item: CollectionItem | null
     canPaste: boolean
   } | null>(null)
+
+  // Id do item cujo menu "..." (TreeActionMenu) está aberto. Os dois menus
+  // da árvore — este e o de clique direito acima — são componentes
+  // independentes, sem nada em comum; sem isto, abrir um nunca fechava o
+  // outro.
+  const [openActionMenuId, setOpenActionMenuId] = useState<string | null>(null)
+  // Vista em que o "..." abre: 'main' pelo mouse; Markers/descrição quando
+  // quem abre é o atalho M / Shift+M (ver treeShortcuts).
+  const [actionMenuView, setActionMenuView] = useState<ActionMenuView>('main')
+
+  const handleActionMenuOpenChange = useCallback((itemId: string, open: boolean) => {
+    if (open) {
+      // O "..." vai abrir: o de clique direito não pode continuar na tela.
+      setContextMenu(null)
+      setActionMenuView('main')
+      setOpenActionMenuId(itemId)
+    } else {
+      // Só fecha se for ESTE que estava aberto — evita a corrida em que o
+      // onOpenChange(false) de um item antigo chega depois do onOpenChange
+      // (true) de um novo e apaga o que acabou de abrir.
+      setOpenActionMenuId(prev => (prev === itemId ? null : prev))
+    }
+  }, [])
 
   const handleToggleSelect = useCallback((id: string) => {
     setSelectedIds(prev => {
@@ -272,6 +309,10 @@ export function CollectionTree({
       if (prev.has(item.id)) return prev
       return prev.size === 0 ? prev : new Set()
     })
+    // O de clique direito vai abrir: fecha o "..." que porventura esteja
+    // aberto em outra linha — mesma regra do sentido contrário, em
+    // handleActionMenuOpenChange.
+    setOpenActionMenuId(null)
     setContextMenu({ x: e.clientX, y: e.clientY, item, canPaste: hasClipboardItems() })
   }, [])
 
@@ -280,6 +321,7 @@ export function CollectionTree({
     // uma linha da árvore, que já dá stopPropagation no próprio handler).
     if (e.target !== e.currentTarget) return
     e.preventDefault()
+    setOpenActionMenuId(null)
     setContextMenu({ x: e.clientX, y: e.clientY, item: null, canPaste: hasClipboardItems() })
   }, [])
 
@@ -299,11 +341,16 @@ export function CollectionTree({
   // abertura do menu, pra que as entradas impossíveis nasçam desabilitadas em
   // vez de não fazer nada ao serem clicadas.
   const buildMoveActions = useCallback((id: string) => ({
+    // canMoveUp/canMoveDown servem tanto pro passo único quanto pro pulo
+    // direto (ver moveToFirst/moveToLast): a condição de habilitar é a
+    // mesma, "não está já na ponta" — só o destino do pulo muda.
     canUp: canMoveUp(items, id),
     canDown: canMoveDown(items, id),
     canOut: canMoveOut(items, id),
     onUp: () => onUpdateItems(moveUp(items, id)),
     onDown: () => onUpdateItems(moveDown(items, id)),
+    onToFirst: () => onUpdateItems(moveToFirst(items, id)),
+    onToLast: () => onUpdateItems(moveToLast(items, id)),
     onOut: () => onUpdateItems(moveOut(items, id)),
   }), [items, onUpdateItems])
 
@@ -358,39 +405,22 @@ export function CollectionTree({
     [markerCatalog]
   )
 
-  // Alvos de marcar: a mesma regra do delete e do copy — a seleção, ou a
-  // linha clicada quando não há seleção.
-  const contextMarkerTargets = useMemo(
-    () => (contextMenu?.item ? deleteTargets(contextMenu.item) : []),
-    [contextMenu, deleteTargets]
-  )
-
-  // 'on' = todos os alvos têm; 'partial' = alguns. Ausente = nenhum.
-  const contextMarkerState = useMemo(() => {
-    const state: Record<string, 'on' | 'partial'> = {}
-    if (contextMarkerTargets.length === 0) return state
-    for (const marker of markerCatalog) {
-      const hits = contextMarkerTargets.filter(node => hasMarker(node, marker.id)).length
-      if (hits === 0) continue
-      state[marker.id] = hits === contextMarkerTargets.length ? 'on' : 'partial'
-    }
-    return state
-  }, [contextMarkerTargets, markerCatalog])
-
+  // Marcar mora só no menu "…" (TreeActionMenu) agora — um menu por LINHA,
+  // então o alvo é sempre o próprio item dessa linha, nunca uma seleção.
+  // Isso simplificou o que era "alguns dos selecionados têm" (estado
+  // 'partial'): aqui só existe 'on' ou ausente.
   const handleToggleMarker = useCallback(
-    (markerId: string) => {
-      const ids = contextMarkerTargets.map(n => n.id)
-      if (ids.length === 0) return
-      onUpdateItems(toggleMarker(items, ids, markerId))
+    (itemId: string, markerId: string) => {
+      onUpdateItems(toggleMarker(items, [itemId], markerId))
     },
-    [contextMarkerTargets, items, onUpdateItems]
+    [items, onUpdateItems]
   )
 
   // Cria e já aplica, no mesmo gesto. Nome repetido reaproveita o marcador
   // existente (createMarker devolve o que já havia), então digitar "flaky"
   // de novo marca com o "flaky" do time em vez de criar um segundo.
   const handleCreateMarker = useCallback(
-    (name: string, color?: string) => {
+    (itemId: string, name: string, color?: string) => {
       if (!onMarkersChange) return
       let result
       try {
@@ -399,10 +429,9 @@ export function CollectionTree({
         return
       }
       if (!result.existed) onMarkersChange(result.catalog)
-      const ids = contextMarkerTargets.map(n => n.id)
-      if (ids.length > 0) onUpdateItems(applyMarker(items, ids, result.marker.id))
+      onUpdateItems(applyMarker(items, [itemId], result.marker.id))
     },
-    [markerCatalog, onMarkersChange, contextMarkerTargets, items, onUpdateItems]
+    [markerCatalog, onMarkersChange, items, onUpdateItems]
   )
 
   const handleRecolorMarker = useCallback(
@@ -541,6 +570,21 @@ export function CollectionTree({
     pasteInto(contextMenu.item)
   }, [contextMenu, pasteInto])
 
+  // Cola como irmão de `target`, logo antes ou logo depois dele — em vez de
+  // sempre no fim da lista do pai (que é o que pasteInto faz pra requests).
+  // Só faz sentido com um alvo de verdade: sem ele não há "ao lado de quem".
+  const pasteBeside = useCallback((target: CollectionItem, position: 'before' | 'after'): boolean => {
+    const clipboardItems = getClipboardItems()
+    if (clipboardItems.length === 0) return false
+    actions.pasteItemsBeside(target.id, clipboardItems, position)
+    return true
+  }, [actions])
+
+  const handlePasteBeside = useCallback((position: 'before' | 'after') => {
+    if (!contextMenu?.item) return
+    pasteBeside(contextMenu.item, position)
+  }, [contextMenu, pasteBeside])
+
   // Posição Y real do ponteiro durante o drag — mais preciso que o centro do
   // elemento "fantasma" arrastado (que fica deslocado do cursor dependendo
   // de onde dentro da linha o usuário agarrou pra arrastar). Isso deixa o
@@ -579,8 +623,67 @@ export function CollectionTree({
     }
   }, [])
 
+  // Antes de escrever o arquivo, checa por credencial literal (header,
+  // auth, resposta salva) — exportar sem avisar é o jeito mais fácil de
+  // mandar um JWT/Bearer de verdade pra quem importar. Sem achado, segue
+  // direto pro export de sempre.
+  //
+  // Precisa ser um useCallback À PARTE, referenciado por nome dentro de
+  // actionsWithImport (não um closure escrito ali dentro): um closure
+  // inline chamando setPendingExportSecrets direto no objeto fazia o React
+  // Compiler desistir de memoizar uma dúzia de outros callbacks do
+  // componente, sem relação nenhuma com isto — confirmado comparando o lint
+  // com/sem essa única mudança.
+  const exportWithSecretCheck = useCallback(async (item: CollectionItem) => {
+    const findings = scanTree([item])
+    if (findings.length > 0) {
+      setPendingExportSecrets({ item, findings })
+      return
+    }
+    await actions.export(item)
+  }, [actions])
+
+  // "Export as HTML runner": o flow vira um .html que roda os passos no
+  // navegador (lib/flowHtml). Primeiro abre a janela de escolhas
+  // (environments, segredos — ExportFlowHtmlDialog); o export roda no OK.
+  // useCallback à parte pelo mesmo motivo do exportWithSecretCheck acima.
+  const exportFlowAsHtml = useCallback(async (item: CollectionItem) => {
+    setExportHtmlItem(item)
+  }, [])
+
+  const runExportFlowHtml = useCallback(async (item: CollectionItem, choice: ExportFlowHtmlChoice) => {
+    setExportHtmlItem(null)
+    const pathOf = (list: CollectionItem[], trail: string[]): string[] | null => {
+      for (const node of list) {
+        const here = [...trail, node.name]
+        if (node.id === item.id) return here
+        const inner = node.item ? pathOf(node.item, here) : null
+        if (inner) return inner
+      }
+      return null
+    }
+    try {
+      const { exportFlowHtml } = await import('@/lib/flowHtml/exportFlowHtml')
+      const result = await exportFlowHtml(item, { path: pathOf(items, []) ?? [item.name], ...choice })
+      if (!result.saved) return
+      toast.success(`"${item.name}" exported as ${choice.format === 'har' ? 'HAR' : 'an HTML runner'}`, {
+        description:
+          `${result.steps} step(s), ${result.environments} environment(s).` +
+          (result.secrets === 0
+            ? ''
+            : result.secretsIncluded
+            ? ` It contains ${result.secrets} secret value(s) — share it only within the team.`
+            : ` ${result.secrets} secret value(s) were left out — whoever opens it pastes them in.`),
+      })
+    } catch (e) {
+      toast.error('Could not export the flow', { description: (e as Error)?.message ?? String(e) })
+    }
+  }, [items])
+
   const actionsWithImport = {
     ...actions,
+    export: exportWithSecretCheck,
+    exportHtml: exportFlowAsHtml,
     copyUrl: (item: CollectionItem) => copyText(buildItemUrl(item, envMap), 'URL'),
     copyCurl: (item: CollectionItem) => copyText(buildItemCurl(item, envMap), 'cURL'),
     importCurl: (parentId: string) => setCurlDialogParentId(parentId),
@@ -720,6 +823,14 @@ export function CollectionTree({
   const [treeFocused, setTreeFocused] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CollectionItem[] | null>(null)
+  // Achados de credencial literal (JWT, Bearer...) antes de um Export —
+  // avisa e deixa escolher, em vez de simplesmente incluir no arquivo
+  // (ver scanTree/secretScan.ts). `null` = nenhum export pendente.
+  const [pendingExportSecrets, setPendingExportSecrets] = useState<{
+    item: CollectionItem
+    findings: SecretFinding[]
+  } | null>(null)
+  const exportSecretsDrag = useDraggableDialog()
 
   const handleRenameHandled = useCallback(() => setRenamingId(null), [])
   const handleRowFocus = useCallback((id: string) => setFocusedId(id), [])
@@ -859,8 +970,51 @@ export function CollectionTree({
           if (count > 0) toast.success(`${count} item${count === 1 ? '' : 's'} copied`)
         } else if (mod && e.key.toLowerCase() === 'v' && !folderPickMode) {
           if (!pasteInto(node)) toast.info('Nothing to paste')
+        } else if (mod && e.key.toLowerCase() === 'd' && !folderPickMode) {
+          // Mesmo alvo único do "Duplicate" do menu "..." — duplicar nunca
+          // suportou seleção múltipla, então aqui também é só o item com foco.
+          if (node) actions.duplicate(node.id)
         } else {
-          handled = false
+          // Os atalhos que o menu "..." mostra ao lado de cada ação (uma
+          // tabela só, treeShortcuts). Sempre no item com foco.
+          const shortcut = node && !folderPickMode ? shortcutFor(e) : null
+          const isFolder = node?.type === 'folder'
+          const openMenu = (view: ActionMenuView) => {
+            setContextMenu(null)
+            setActionMenuView(view)
+            setOpenActionMenuId(node!.id)
+          }
+          switch (shortcut) {
+            case 'favorite':
+              if (actions.toggleStar) actions.toggleStar(node!.id)
+              else handled = false
+              break
+            case 'run':
+              if (isFolder && onRunItem) onRunItem(node!)
+              else handled = false
+              break
+            case 'addRequest':
+            case 'addFolder':
+              if (!isFolder) {
+                handled = false
+                break
+              }
+              if (shortcut === 'addRequest') actions.createRequest(node!.id)
+              else actions.createFolder(node!.id)
+              setExpanded(node!.id, true)
+              break
+            case 'markers':
+              openMenu('markers')
+              break
+            case 'description':
+              openMenu('description')
+              break
+            case 'menu':
+              openMenu('main')
+              break
+            default:
+              handled = false
+          }
         }
     }
 
@@ -870,7 +1024,7 @@ export function CollectionTree({
     }
   }, [
     getVisibleRows, focusedId, uniqueFilteredItems, effectiveExpandedIds, setExpanded, items,
-    folderPickMode, onPickFolder, onRequestSelect, copyItems, pasteInto,
+    folderPickMode, onPickFolder, onRequestSelect, copyItems, pasteInto, actions, onRunItem,
     // selectedIds saiu: quem o lê agora é o deleteTargets, que já o captura.
     deleteTargets,
   ])
@@ -899,6 +1053,27 @@ export function CollectionTree({
     if (item.type !== 'folder') onRequestSelect?.(item)
     requestAnimationFrame(() => scrollRef.current?.focus({ preventScroll: true }))
   }, [items, expandPath, onRequestSelect])
+
+  // Mesma ideia do openFavorite acima, só que a partir de um ID solto — é o
+  // que um achado do scanner de segredos tem em mãos (SecretFinding.requestId),
+  // não um CollectionItem já resolvido.
+  const focusItemById = useCallback((id: string) => {
+    const item = findNode(items, id)
+    if (!item) return
+    const path = findPathToItem(items, id) ?? []
+    expandPath(item.type === 'folder' ? [...path, id] : path)
+    setFocusedId(id)
+    if (item.type !== 'folder') onRequestSelect?.(item)
+    requestAnimationFrame(() => scrollRef.current?.focus({ preventScroll: true }))
+  }, [items, expandPath, onRequestSelect])
+
+  // Pedido externo de "abre onde está X" (ver comentário do prop) — roda
+  // toda vez que o nonce muda, nunca ao montar sem pedido nenhum.
+  useEffect(() => {
+    if (!focusRequest) return
+    focusItemById(focusRequest.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest?.nonce])
 
   const handleDragStart = (event: DragStartEvent) => {
     const node = findNode(uniqueFilteredItems, event.active.id as string)
@@ -1236,6 +1411,15 @@ export function CollectionTree({
                   searchTokens={searchTokens}
                   markerMap={markerMap}
                   onMarkerClick={onMarkersChange ? handleMarkerClick : undefined}
+                  markerCatalog={markerCatalog}
+                  onToggleMarker={handleToggleMarker}
+                  onCreateMarker={handleCreateMarker}
+                  onRecolorMarker={handleRecolorMarker}
+                  onManageMarkers={onMarkersChange ? () => setManagingMarkers(true) : undefined}
+                  onSaveDescription={handleSaveDescription}
+                  openActionMenuId={openActionMenuId}
+                  actionMenuView={actionMenuView}
+                  onActionMenuOpenChange={handleActionMenuOpenChange}
                   folderPickMode={folderPickMode}
                   onPickFolder={onPickFolder}
                 />
@@ -1320,6 +1504,7 @@ export function CollectionTree({
             contextMenu.item ? () => setRenamingId(contextMenu.item!.id) : undefined
           }
           onPaste={handlePaste}
+          onPasteBeside={contextMenu.item ? handlePasteBeside : undefined}
           move={contextMenu.item ? buildMoveActions(contextMenu.item.id) : undefined}
           numberableCount={contextMenu.item?.item?.length ?? 0}
           onNumberChildren={
@@ -1327,26 +1512,9 @@ export function CollectionTree({
               ? () => handleNumberChildren(contextMenu.item!.id)
               : undefined
           }
-          markers={
-            onMarkersChange
-              ? {
-                  catalog: markerCatalog,
-                  state: contextMarkerState,
-                  onToggle: handleToggleMarker,
-                  onCreate: handleCreateMarker,
-                  onRecolor: handleRecolorMarker,
-                  onManage: () => setManagingMarkers(true),
-                }
-              : undefined
-          }
           openAllCount={contextOpenAll.length}
           onOpenAll={
             onOpenAllRequests ? () => onOpenAllRequests(contextOpenAll) : undefined
-          }
-          onSaveDescription={
-            contextMenu.item
-              ? text => handleSaveDescription(contextMenu.item!.id, text)
-              : undefined
           }
           onDelete={() => deleteNodes(contextDeleteTargets)}
           deleteHasFolder={contextDeleteTargets.some(n => n.type === 'folder')}
@@ -1392,30 +1560,174 @@ export function CollectionTree({
           }
         }}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
+        {/* Mesmo visual dos outros modais de confirmação (ModalCard, ex. o
+            "Remove from GitHub?"): o AlertDialogContent puro ficou sem borda
+            quando o ring do shadcn saiu, e o rodapé/botões usavam os tokens
+            do shadcn em vez dos pm-*. Os `!` vencem as classes do Button,
+            que o asChild junta por concatenação (sem tailwind-merge). flex no
+            lugar do grid da base: num grid, o título longo esticava a coluna
+            e empurrava o botão Delete pra fora do card. */}
+        <AlertDialogContent className="flex flex-col w-[380px] max-w-[380px]! gap-0 p-0 overflow-hidden rounded-lg border border-pm-border bg-pm-surface text-pm-text shadow-2xl font-sans">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-pm-border">
+            <span className="w-[22px] h-[22px] shrink-0 rounded-md bg-rose-500/15 text-rose-400 flex items-center justify-center">
+              <Trash2 size={13} />
+            </span>
+            <AlertDialogTitle className="min-w-0 flex-1 text-[13px] font-semibold text-pm-text truncate" title={pendingDelete?.length === 1 ? pendingDelete[0]?.name : undefined}>
               {pendingDelete && pendingDelete.length > 1
                 ? `Delete ${pendingDelete.length} items?`
                 : `Delete "${pendingDelete?.[0]?.name ?? ''}"?`}
             </AlertDialogTitle>
-            <AlertDialogDescription>
+          </div>
+          <div className="px-4 py-3">
+            <AlertDialogDescription className="text-[12px] text-pm-text-muted leading-relaxed text-left">
               {pendingDelete?.some(n => n.type === 'folder')
                 ? 'Everything inside will be deleted too. This can’t be undone.'
                 : 'This can’t be undone.'}
             </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+          </div>
+          <div className="flex gap-2 px-4 py-3 border-t border-pm-border bg-pm-hover/20">
+            <AlertDialogCancel
+              variant="ghost"
+              className="flex-1 h-[32px]! rounded-md! text-xs! font-semibold cursor-pointer border! border-pm-border! bg-pm-hover! text-pm-text! hover:bg-pm-row-active! transition-colors"
+            >
+              Cancel
+            </AlertDialogCancel>
             <AlertDialogAction
+              variant="ghost"
               onClick={confirmDelete}
-              className="bg-red-600 text-white hover:bg-red-500"
+              className="flex-1 h-[32px]! rounded-md! text-xs! font-semibold cursor-pointer border-none! bg-rose-600! text-white! hover:bg-rose-500! transition-colors"
             >
               Delete
             </AlertDialogAction>
-          </AlertDialogFooter>
+          </div>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Escolhas do "Export as HTML runner". `key` remonta a janela a cada
+          pasta, pra ela abrir sempre com o environment ativo de agora. */}
+      <ExportFlowHtmlDialog
+        key={exportHtmlItem?.id ?? 'closed'}
+        item={exportHtmlItem}
+        environments={environments}
+        activeEnvId={activeEnv?.id ?? null}
+        onCancel={() => setExportHtmlItem(null)}
+        onExport={choice => { if (exportHtmlItem) void runExportFlowHtml(exportHtmlItem, choice) }}
+      />
+
+      {/* Credencial literal achada antes do Export (ver scanTree) — avisa e
+          deixa escolher, em vez de incluir no arquivo sem avisar. Dialog
+          arrastável (não AlertDialog) de propósito: clicar num achado abre o
+          item na árvore SEM fechar, pra revisar vários sem reabrir a tela
+          toda vez — e pra isso dar certo com a árvore por baixo, precisa dar
+          pra tirar o diálogo do caminho. */}
+      <Dialog
+        open={!!pendingExportSecrets}
+        modal={false}
+        onOpenChange={(open) => { if (!open) setPendingExportSecrets(null) }}
+      >
+        <DialogContent
+          showCloseButton={false}
+          showOverlay={false}
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+          {...exportSecretsDrag.contentProps}
+          className="bg-pm-bg border border-pm-border text-pm-text sm:max-w-md p-0 flex flex-col overflow-hidden rounded-lg gap-0"
+        >
+          <div
+            {...exportSecretsDrag.handleProps}
+            onDoubleClick={exportSecretsDrag.reset}
+            title="Drag to move — double-click to recenter"
+            className="h-11 shrink-0 flex items-center gap-1.5 px-4 border-b border-pm-border select-none"
+          >
+            <ShieldAlert size={14} className="text-amber-400 shrink-0" />
+            <DialogTitle className="text-[13px] font-semibold text-pm-text flex-1 truncate">
+              {pendingExportSecrets?.findings.length === 1
+                ? '1 hard-coded credential found'
+                : `${pendingExportSecrets?.findings.length ?? 0} hard-coded credentials found`}
+            </DialogTitle>
+            <button
+              onClick={() => setPendingExportSecrets(null)}
+              className="h-6 w-6 flex items-center justify-center rounded-md text-pm-text-muted hover:text-pm-text hover:bg-pm-hover transition-colors cursor-pointer shrink-0"
+            >
+              <X size={14} />
+            </button>
+          </div>
+
+          <div className="px-4 pt-3 pb-1">
+            <p className="text-[11.5px] text-pm-text-secondary leading-relaxed">
+              This export would include a token, key or password written straight into a
+              request instead of a <code className="text-[10.5px] rounded bg-pm-hover px-1 py-px">{'{{variable}}'}</code> —
+              anyone who imports the file gets the real value.
+            </p>
+          </div>
+
+          <div className="mx-4 mb-2 max-h-52 overflow-y-auto rounded-lg border border-pm-border divide-y divide-pm-border/60">
+            {pendingExportSecrets?.findings.map((f, i) => (
+              <button
+                key={`${f.requestId}-${i}`}
+                type="button"
+                onClick={() => focusItemById(f.requestId)}
+                title={`Open "${f.requestName}" in the tree`}
+                className="group flex w-full items-start gap-2 px-3 py-2 text-left cursor-pointer hover:bg-pm-hover transition-colors"
+              >
+                {f.expired === true ? (
+                  <ShieldAlert size={13} className="mt-0.5 shrink-0 text-pm-text-muted" />
+                ) : (
+                  <KeyRound size={13} className="mt-0.5 shrink-0 text-amber-400" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-[11.5px] text-pm-text truncate">{f.requestName}</div>
+                  <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] font-mono text-pm-text-secondary">
+                      {f.location.type === 'header'
+                        ? f.location.key
+                        : f.location.type === 'exampleHeader'
+                          ? `example response · ${f.location.key}`
+                          : f.location.type === 'oauth2'
+                            ? `oauth2 · ${f.location.key}`
+                            : `auth · ${f.location.field}`}
+                    </span>
+                    <span className="text-[10px] font-mono text-pm-text-muted">{f.preview}</span>
+                    {f.expired === true && (
+                      <span className="text-[9.5px] rounded-sm bg-pm-border px-1 text-pm-text-muted">
+                        expired {f.expiredDaysAgo}d ago
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <ArrowUpRight
+                  size={12}
+                  className="mt-0.5 shrink-0 text-pm-text-muted opacity-0 group-hover:opacity-100 transition-opacity"
+                />
+              </button>
+            ))}
+          </div>
+
+          <p className="px-4 pb-3 text-[10.5px] text-pm-text-muted">
+            Click one to open it in the tree — this stays open so you can check more than one.
+            To fix them first, open <strong className="text-pm-text-secondary">Settings → Security</strong> and
+            extract them into environment variables, then export again.
+          </p>
+
+          <div className="h-12 shrink-0 flex items-center justify-end gap-2 px-4 border-t border-pm-border">
+            <button
+              onClick={() => setPendingExportSecrets(null)}
+              className="h-7 px-3 rounded-md text-xs font-medium border border-pm-border text-pm-text-secondary hover:bg-pm-hover transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                if (pendingExportSecrets) actions.export(pendingExportSecrets.item)
+                setPendingExportSecrets(null)
+              }}
+              className="h-7 px-3 rounded-md text-xs font-semibold bg-amber-500 text-white hover:bg-amber-400 transition-colors cursor-pointer"
+            >
+              Export anyway
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
     </div>
   )

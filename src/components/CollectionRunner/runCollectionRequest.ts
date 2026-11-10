@@ -50,7 +50,7 @@ interface ScriptContext {
   tests?: TestResult[];
   scriptError?: string;
   logs?: { level: string; message: string }[];
-  setVariables?: { key: string; value: string }[];
+  setVariables?: { key: string; value: string; removed?: boolean }[];
 }
 
 // Uma chamada de pm.environment.set(key, value) (ou pm.globals/variables/
@@ -66,8 +66,11 @@ interface ScriptContext {
 // rodado de verdade. Registrar a chamada em si resolve isso.
 export interface VariableChange {
   key: string;
+  // No unset, o valor que a variável tinha antes de sumir.
   value: string;
   phase: 'pre-request' | 'post-response';
+  /** true = foi um pm.environment.unset, não um set. */
+  removed?: boolean;
 }
 
 export interface RunItemOutcome {

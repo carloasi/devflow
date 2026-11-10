@@ -24,6 +24,7 @@ import {
 import { DuplicateVariablePicker, DuplicateVariableEntry } from './DuplicateVariablePicker';
 import { EnvironmentValue } from '@/app/types/Environment';
 import { isMacPlatform } from '@/lib/platform';
+import { detectVariableTagTrigger } from '@/lib/variableTagTrigger';
 
 
 interface SavedPosition {
@@ -491,22 +492,20 @@ export default function HttpBodyEditor({
     if (!model || !pos) return;
 
     const lineText = model.getLineContent(pos.lineNumber);
-    const before = lineText.slice(0, pos.column - 1);
-    const openIdx = before.lastIndexOf('{{');
-    const closeIdx = before.lastIndexOf('}}');
+    const trigger = detectVariableTagTrigger(lineText, pos.column);
 
-    if (openIdx === -1 || openIdx <= closeIdx) {
+    if (!trigger) {
       // Sem "{{" aberto aqui (foi fechado, apagado, ou o cursor saiu da
       // linha) — libera pra um "{{" futuro poder disparar de novo.
       triggeredForRef.current = null;
       return;
     }
+    const { openIdx, query: initialQuery } = trigger;
 
     const already = triggeredForRef.current;
     if (already && already.line === pos.lineNumber && already.openIdx === openIdx) return;
     triggeredForRef.current = { line: pos.lineNumber, openIdx };
 
-    const initialQuery = before.slice(openIdx + 2).trim();
     replaceTargetRef.current = null;
     setSuggestionQuery(initialQuery);
     setSuggestionIndex(0);

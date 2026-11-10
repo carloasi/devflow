@@ -381,27 +381,93 @@ export function filterTreeByMarkers(
 
 // ─── Catálogo vindo do Git ───────────────────────────────────────────────
 
+// ─── Base do catálogo (última sincronização) ─────────────────────────────
+//
+// Sem ela, o merge só sabia unir: um marcador apagado aqui voltava no push
+// (o do GitHub era somado) e no pull (idem), e renomear aqui e puxar antes
+// de enviar desfazia a renomeação (no mesmo id, o do GitHub ganhava). Com o
+// catálogo da última sincronização (mesmo registro da base dos itens, ver
+// lib/syncBase, chaves `marker:<id>`) dá pra dizer quem mexeu:
+//
+//   sumiu daqui e a base tinha        → você apagou: não volta;
+//   sumiu de lá e a base tinha        → apagaram no GitHub: sai daqui também;
+//   mesmo id, mudou só de um lado     → vale o lado que mudou;
+//   mudou dos dois lados              → fica o seu (como nos environments).
+//
+// Sem base (primeira sincronização), é a união de antes.
+
+export const MARKER_BASE_PREFIX = 'marker:';
+
+/** Base do catálogo: `marker:<id>` → nome e cor naquele momento. */
+export function markerBaseHashes(catalog: Marker[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of catalog) out[`${MARKER_BASE_PREFIX}${m.id}`] = markerPrint(m);
+  return out;
+}
+
+function markerPrint(m: Marker): string {
+  return JSON.stringify([normalizeName(m.name).toLowerCase(), m.color]);
+}
+
+type MarkerBase = Record<string, string> | null | undefined;
+
+const baseOf = (base: MarkerBase, id: string) => base?.[`${MARKER_BASE_PREFIX}${id}`];
+/** A base conhece o catálogo? (sem nenhuma chave de marcador: primeira sincronização) */
+const hasMarkerBase = (base: MarkerBase) => !!base && Object.keys(base).some(k => k.startsWith(MARKER_BASE_PREFIX));
+/** O marcador mudou desde a base? (não existia nela = sim) */
+const changedSince = (base: MarkerBase, m: Marker) => baseOf(base, m.id) !== markerPrint(m);
+
+/** Mesmo id dos dois lados: vale quem mudou; os dois → o seu. */
+function pickSameId(mine: Marker, theirs: Marker, base: MarkerBase): Marker {
+  if (!hasMarkerBase(base)) return theirs;
+  return changedSince(base, mine) ? mine : theirs;
+}
+
 /**
  * Junta o catálogo local com o que veio do repositório.
  *
  * União, nunca substituição: duas pessoas criando marcadores em paralelo é o
  * caso normal, e quem puxa não pode perder os seus. O id manda — mesmo id é
- * o mesmo marcador, e o remoto ganha no nome/cor (é o que o time combinou).
- * Nome igual com ids diferentes (duas pessoas criaram "flaky" cada uma na
- * sua máquina) colapsa no remoto, e `remapped` diz quais ids locais passam a
- * apontar pro id do time — é o que a árvore precisa reescrever.
+ * o mesmo marcador; no nome/cor vale quem mudou desde a base (sem base, o
+ * remoto, que é o que o time combinou). Nome igual com ids diferentes (duas
+ * pessoas criaram "flaky" cada uma na sua máquina) colapsa no remoto, e
+ * `remapped` diz quais ids locais passam a apontar pro id do time — é o que
+ * a árvore precisa reescrever.
+ *
+ * `base`: a base da sincronização (lib/syncBase). Com ela, exclusões dos dois
+ * lados ficam — ver o bloco acima.
  */
 export function mergeCatalogs(
   local: Marker[],
-  remote: Marker[]
+  remote: Marker[],
+  base?: MarkerBase
 ): { catalog: Marker[]; remapped: Map<string, string> } {
-  const byId = new Map(remote.map(m => [m.id, m]));
-  const byName = new Map(remote.map(m => [normalizeName(m.name).toLowerCase(), m]));
+  const withBase = hasMarkerBase(base);
+  const localById = new Map(local.map(m => [m.id, m]));
+  const localNames = new Set(local.map(m => normalizeName(m.name).toLowerCase()));
+  // Do GitHub entra o que não foi apagado aqui: apagado = a base tinha, não
+  // está mais aqui (nem pelo nome), e lá ninguém mexeu desde então.
+  const kept = remote.filter(
+    m =>
+      localById.has(m.id) ||
+      localNames.has(normalizeName(m.name).toLowerCase()) ||
+      !withBase ||
+      baseOf(base, m.id) === undefined ||
+      changedSince(base, m)
+  );
+  const catalog = kept.map(m => {
+    const mine = localById.get(m.id);
+    return mine ? pickSameId(mine, m, base) : m;
+  });
+  const byId = new Map(catalog.map(m => [m.id, m]));
+  const byName = new Map(catalog.map(m => [normalizeName(m.name).toLowerCase(), m]));
   const remapped = new Map<string, string>();
-  const catalog = [...remote];
+  const remoteIds = new Set(remote.map(m => m.id));
 
   for (const mine of local) {
     if (byId.has(mine.id)) continue;
+    // Apagado no GitHub: a base tinha, lá sumiu, e aqui ninguém mexeu.
+    if (withBase && !remoteIds.has(mine.id) && baseOf(base, mine.id) !== undefined && !changedSince(base, mine)) continue;
     const twin = byName.get(normalizeName(mine.name).toLowerCase());
     if (twin) {
       remapped.set(mine.id, twin.id);
@@ -413,6 +479,44 @@ export function mergeCatalogs(
   }
 
   return { catalog, remapped };
+}
+
+/**
+ * O catálogo que o PUSH grava: o daqui, mais os marcadores do GitHub que
+ * não existem aqui (nem pelo id, nem pelo nome).
+ *
+ * O push gravava só o catálogo daqui por cima do de lá: quem enviasse por
+ * último tirava do catálogo os marcadores que outra pessoa criou no meio — e
+ * as marcas dela nos itens viravam marcas invisíveis. Mesmo id: vale quem
+ * mudou desde a base (sem base, o daqui — é quem está enviando).
+ *
+ * `base`: com ela, o que você apagou não volta (o do GitHub não é somado de
+ * novo), e o que apagaram no GitHub não é reenviado por você.
+ */
+export function catalogForPush(local: Marker[], remote: Marker[] | null, base?: MarkerBase): Marker[] {
+  if (!remote?.length) return local;
+  const withBase = hasMarkerBase(base);
+  const remoteById = new Map(remote.map(m => [m.id, m]));
+  const ids = new Set(local.map(m => m.id));
+  const names = new Set(local.map(m => normalizeName(m.name).toLowerCase()));
+  const mine = local
+    // Apagado no GitHub e intocado aqui: não reenvia.
+    .filter(m => !withBase || remoteById.has(m.id) || baseOf(base, m.id) === undefined || changedSince(base, m))
+    .map(m => {
+      const theirs = remoteById.get(m.id);
+      // Mesmo id: sem base, o daqui; com base, quem mudou (os dois → o daqui).
+      return theirs && withBase && !changedSince(base, m) ? theirs : m;
+    });
+  return [
+    ...mine,
+    ...remote.filter(
+      m =>
+        !ids.has(m.id) &&
+        !names.has(normalizeName(m.name).toLowerCase()) &&
+        // Apagado aqui (a base tinha) e intocado lá: não volta.
+        (!withBase || baseOf(base, m.id) === undefined || changedSince(base, m))
+    ),
+  ];
 }
 
 /** Reescreve na árvore os ids que o merge do catálogo colapsou. */

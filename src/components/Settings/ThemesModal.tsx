@@ -21,7 +21,7 @@ export function ThemesModal({ open, onClose }: Props) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[660px] max-w-[92vw] max-h-[86vh] overflow-y-auto rounded-xl border border-pm-border bg-pm-bg shadow-2xl shadow-black/70"
+        className="w-[660px] max-w-[92vw] max-h-[86vh] overflow-y-auto rounded-lg border border-pm-border bg-pm-bg shadow-2xl shadow-black/70"
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-pm-border">
           <h2 className="text-[15px] font-semibold text-pm-text">Themes</h2>

@@ -80,7 +80,8 @@ describe('rootState', () => {
 // enviou apaga a sua versão.
 describe('conflictingIds', () => {
   it('acusa nó de collection com push pendente', () => {
-    expect([...conflictingIds(nodes, new Set(['c1']))]).toEqual(['a1']);
+    // b1 (removed) também: sem base, nunca vai pra exclusão por padrão.
+    expect([...conflictingIds(nodes, new Set(['c1']))]).toEqual(['a1', 'b1']);
   });
 
   it('ignora added — não há versão local pra perder', () => {
@@ -92,8 +93,10 @@ describe('conflictingIds', () => {
     expect(conflictingIds(nodes, new Set(['c2'])).has('b1')).toBe(true);
   });
 
-  it('sem pendência local, nada conflita', () => {
-    expect(conflictingIds(nodes, new Set()).size).toBe(0);
+  it('sem pendência local, nada conflita — exceto o que apagaria algo daqui', () => {
+    // Sem base não dá pra saber se b1 foi apagado lá ou é novo aqui: fica
+    // em "Minha" por padrão em vez de apostar na exclusão.
+    expect([...conflictingIds(nodes, new Set())]).toEqual(['b1']);
   });
 });
 
@@ -189,6 +192,17 @@ describe('conflictingIds com base de três vias', () => {
       kind: 'request', change: 'added', fields: [],
     }];
     expect(conflictingIds(nodes, todaAcollectionPendente, base).size).toBe(0);
+  });
+
+  // A base conhece o item = ele já existiu aqui; sumiu daqui = foi apagado
+  // aqui. Aceitar o remoto desfaria a exclusão.
+  it('added que a base conhece é exclusão local — fica desmarcado', () => {
+    const nodes: DiffNode[] = [{
+      id: 'a', path: ['C', 'a'], rootId: 'c1', ancestorIds: ['c1'],
+      kind: 'request', change: 'added', remote: req('a', 'base'), fields: [],
+    }];
+    expect([...conflictingIds(nodes, new Set(), base)]).toEqual(['a']);
+    expect(defaultSelection(nodes, conflictingIds(nodes, new Set(), base)).size).toBe(0);
   });
 
   // Sem base não há como saber quem mexeu: avisar demais é melhor que calar.

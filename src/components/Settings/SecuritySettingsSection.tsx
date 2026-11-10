@@ -14,9 +14,10 @@ interface Props {
     roots: CollectionItem[],
     variables: { key: string; value: string }[]
   ) => Promise<void> | void;
+  onJumpToItem?: (requestId: string) => void;
 }
 
-export function SecuritySettingsSection({ collections, onApplySecrets }: Props = {}) {
+export function SecuritySettingsSection({ collections, onApplySecrets, onJumpToItem }: Props = {}) {
   const [verifySSL, setVerifySSL] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -73,7 +74,7 @@ export function SecuritySettingsSection({ collections, onApplySecrets }: Props =
         </div>
       )}
       {collections && onApplySecrets && (
-        <SecretScanPanel collections={collections} onApply={onApplySecrets} />
+        <SecretScanPanel collections={collections} onApply={onApplySecrets} onJumpToItem={onJumpToItem} />
       )}
 
     </div>

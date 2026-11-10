@@ -2,9 +2,11 @@
 
 import { buildJUnitXml } from '@/lib/junitReport'
 import { buildRunReport } from '@/lib/runReport'
+import { acceptTestExpectation } from '@/lib/acceptTestExpectation'
+import { toast } from 'sonner'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer} from 'lucide-react'
+import { Play, Pause, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer, RotateCw, BadgeCheck, ExternalLink, Sparkles, WandSparkles } from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CollectionItem } from '@/app/types/CollectionItem'
 import { useEnvironment } from '@/components/EnvironmentContext'
@@ -15,15 +17,29 @@ import { safeSetItem, safeRemoveItem } from '@/lib/safeStorage'
 import { useDraggableDialog } from '@/components/helper/useDraggableDialog'
 import { VariableText } from './VariableText'
 import { JsonBlock } from './JsonBlock'
+import { CodeEditor } from '@/components/CodeEditor'
 import { requestHasBody } from '@/lib/defaultHeaders'
 import { hasFailureReason, failureReason, isExpectedErrorStatus } from './runVerdict'
 import { buildEnvMap } from '@/lib/envMap';
 import { envForRow, parseDataFile, rowLabel, type DataSet } from '@/lib/runnerData'
+import { VAR_REGEX } from '@/lib/monacoVarHighlight'
 
 interface Props {
   item: CollectionItem | null
   open: boolean
   onClose: () => void
+  onUpdateRequestScript?: (requestId: string, phase: 'preRequest' | 'postResponse', value: string) => void
+  // Usado pelo popover de variável da URL (VariableText) pra trocar um token
+  // {{var}} por outro direto dali — "switch to variable list" do popover
+  // original. Mesma ideia do onUpdateRequestScript: o Runner só tem o id.
+  onUpdateRequestUrl?: (requestId: string, url: string) => void
+  // Abre um texto (o script OU a resposta desta linha, cada um com seu
+  // próprio botão) numa janela de editor separada, maior — o Runner só
+  // manda o conteúdo; quem sabe abrir janela é o AppLayout.
+  onOpenTextInNewWindow?: (content: string, title: string, lang?: 'json' | 'javascript') => void
+  // Mesma ideia, mas pro painel do Claude: manda a pergunta já pronta (sem
+  // enviar sozinho) — quem decide abrir o painel/mandar é o AppLayout.
+  onAskAiAboutScript?: (prompt: string) => void
 }
 
 const METHOD_COLORS: Record<string, string> = {
@@ -40,6 +56,8 @@ interface RowVariable {
   phase?: 'pre-request' | 'post-response';
   /** Valor que o run gravou, quando gravou. */
   runValue?: string;
+  /** true = o passo APAGOU a variável (pm.environment.unset). */
+  removed?: boolean;
 }
 
 /**
@@ -57,7 +75,7 @@ function mergeRowVariables(entry: RunEntry): RowVariable[] {
   for (const v of entry.outcome?.variablesSet ?? []) {
     if (seen.has(v.key)) continue
     seen.add(v.key)
-    out.push({ key: v.key, phase: v.phase, runValue: v.value })
+    out.push({ key: v.key, phase: v.phase, runValue: v.value, removed: v.removed })
   }
   for (const key of entry.outcome?.usedVariables ?? []) {
     if (seen.has(key)) continue
@@ -104,6 +122,34 @@ function prettyBody(body: string): string {
   }
 }
 
+// Mesma ideia do prettyBody, mas pro Payload — que tem {{variaveis}} no meio,
+// e isso não é JSON válido (nem dentro nem fora de aspas). A saída de
+// JSON.parse não aceita "{{token}}" como valor, então cada ocorrência vira
+// um número grande e só-seu antes de parsear, e volta a ser o texto original
+// depois de formatado — funciona tanto pra uso com aspas ("{{x}}" → string)
+// quanto sem ("amount": {{x}} → number), porque a substituição só troca o
+// miolo, nunca as aspas que já estavam (ou não) ao redor.
+function prettyBodyPreservingTemplates(body: string): string {
+  const trimmed = body.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return body
+
+  const tokens: string[] = []
+  const withPlaceholders = trimmed.replace(new RegExp(VAR_REGEX.source, 'g'), match => {
+    const sentinel = `90150${tokens.length}17230`
+    tokens.push(match)
+    return sentinel
+  })
+
+  try {
+    const pretty = JSON.stringify(JSON.parse(withPlaceholders), null, 2)
+    return tokens.reduce((text, token, i) => text.replace(`90150${i}17230`, token), pretty)
+  } catch {
+    // Veio algo que não é só {{vars}} quebrando o parse (JSON realmente
+    // inválido, ou corpo cortado) — mostra cru em vez de esconder.
+    return body
+  }
+}
+
 // Preferências do Runner que valem entre sessões. localStorage, e não o
 // store em arquivo: são bytes, e lê-las é síncrono na abertura do painel —
 // esperar I/O pra decidir qual environment mostrar piscaria a tela.
@@ -137,7 +183,10 @@ function loadStepDelays(collectionId: string): Record<string, number> {
   }
 }
 
-export function CollectionRunnerPanel({ item, open, onClose }: Props) {
+export function CollectionRunnerPanel({
+  item, open, onClose, onUpdateRequestScript, onUpdateRequestUrl,
+  onOpenTextInNewWindow, onAskAiAboutScript,
+}: Props) {
   const { environments, selectedEnvId, patchEnvironmentVariables } = useEnvironment()
 
   const requests = useMemo(() => (item ? flattenRequests(item.item ?? []) : []), [item])
@@ -176,6 +225,32 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
   const stopRef = useRef(false)
   // Id do envio em andamento — o Stop manda o Rust interromper ele.
   const currentRequestIdRef = useRef<string | null>(null)
+
+  // ── Pause/Resume ────────────────────────────────────────────────────────
+  //
+  // Diferente do Stop, o Pause não cancela a request em andamento — ela
+  // termina normalmente, e o laço só não começa a próxima. Tudo que o laço
+  // precisa pra continuar de onde parou (as entries da iteração atual, o
+  // environment já atualizado pelas requests anteriores, a seleção de
+  // linhas/requests congelada no momento do Run) fica neste ref: variáveis
+  // locais de handleRun somem quando a função retorna no Pause, então não
+  // dá pra confiar nelas pro Resume continuar depois.
+  const [paused, setPaused] = useState(false)
+  const pauseRef = useRef(false)
+  // Estado (não ref): o rótulo "Paused · X/Y" lê este valor durante o render,
+  // e refs não podem ser lidas aí (ver react-hooks/refs).
+  const [pausedAtIndex, setPausedAtIndex] = useState(0)
+  const runContextRef = useRef<{
+    runEntries: RunEntry[];
+    selected: CollectionItem[];
+    envId: string | null;
+    baseEnvMap: Record<string, string>;
+    rows: Record<string, string>[] | null;
+    environmentName: string | undefined;
+    runStartedAt: string;
+    envMap: Record<string, string>;
+    finalized: Map<string, RunEntry>;
+  } | null>(null)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [copiedBodyId, setCopiedBodyId] = useState<string | null>(null)
@@ -207,6 +282,16 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
   const setVarDraft = (draftKey: string, value: string | undefined) => {
     setVarDrafts(prev => ({ ...prev, [draftKey]: value }))
   }
+
+  // Qual fase (Pre-request/Post-response) a seção Scripts mostra, por linha
+  // — igual ao rascunho de variável acima, tem que ser por `entry.id`
+  // porque várias linhas podem estar expandidas ao mesmo tempo.
+  const [scriptTabByEntry, setScriptTabByEntry] = useState<Record<string, 'preRequest' | 'postResponse'>>({})
+  // Payload entra CRU por padrão (ver o comentário no bloco de Payload) e
+  // Response entra bonito por padrão (prettyBody já roda sempre) — o botão
+  // de cada um inverte só o próprio lado, por isso dois mapas separados.
+  const [payloadPrettyIds, setPayloadPrettyIds] = useState<Set<string>>(new Set())
+  const [responseRawIds, setResponseRawIds] = useState<Set<string>>(new Set())
 
   const currentEnvValue = (key: string): string | undefined =>
     environments.find(e => e.id === runEnvId)?.values.find(v => v.key === key && v.enabled)?.value
@@ -269,6 +354,9 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setRestoredAt(null)
     setRestoredTruncated(false)
     setRunMeta({})
+    setPaused(false)
+    pauseRef.current = false
+    runContextRef.current = null
   }
 
   useEffect(() => {
@@ -276,6 +364,9 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setChecked(Object.fromEntries(requests.map(r => [r.id, true])))
     setRunning(false)
     stopRef.current = false
+    setPaused(false)
+    pauseRef.current = false
+    runContextRef.current = null
 
     // Último environment escolhido AQUI, não o selecionado no app: quem roda
     // a collection costuma rodar sempre contra o mesmo ambiente, e não é
@@ -397,57 +488,78 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
     setDataError(null)
   }
 
-  const handleRun = async () => {
-    const selected = requests.filter(r => checked[r.id])
-    if (selected.length === 0) return
+  // Fecha o run: marca como não-rodando/não-pausado, grava o relatório com o
+  // que já tinha rodado (as pendentes ficam 'pending' — ver o comentário mais
+  // abaixo) e limpa o runMeta com o horário final. Chamado tanto pelo fim
+  // natural/Stop do laço em `runFrom` quanto pelo Stop enquanto PAUSADO, caso
+  // em que não há laço nenhum rodando pra chegar nesse ponto sozinho.
+  const finishRun = () => {
+    const ctx = runContextRef.current
+    if (!ctx) return
+    setRunning(false)
+    setPaused(false)
+    const runFinishedAt = new Date().toISOString()
+    setRunMeta({ startedAt: ctx.runStartedAt, finishedAt: runFinishedAt, environmentName: ctx.environmentName })
 
-    const envId = runEnvId
-    const baseEnv = environments.find(e => e.id === envId)
-    // buildEnvMap, e não um Object.fromEntries local: ele descarta as
-    // duplicatas desabilitadas (ver DuplicateVariablePicker) e, quando há mais
-    // de uma habilitada, fica com a MESMA entrada em que a escrita mexe. O
-    // Runner tem que resolver variável igual ao resto do app.
-    const baseEnvMap: Record<string, string> = buildEnvMap(baseEnv?.values)
-    let envMap: Record<string, string> = baseEnvMap
-
-    // Com tabela, a quantidade de iterações é o número de linhas: cada uma é
-    // um caso, e inventar um número à parte só criaria combinação sem
-    // sentido ("3 iterações sobre 5 linhas").
-    const rows = dataSet?.rows ?? null
-    const totalIterations = rows ? rows.length : iterations
-
-    const runEntries: RunEntry[] = []
-    for (let i = 1; i <= totalIterations; i++) {
-      const label = rows ? rowLabel(rows[i - 1], dataSet!.columns, i - 1) : undefined
-      for (const req of selected) {
-        runEntries.push({
-          id: `${req.id}-${i}`,
-          itemId: req.id,
-          iteration: i,
-          rowLabel: label,
-          name: req.name,
-          method: req.method,
-          state: 'pending',
-        })
-      }
+    // Guarda as linhas que não chegaram a rodar (Pause ou Stop no meio) com o
+    // estado 'pending' que tinham: sem isso o placar ao reabrir viraria
+    // "10/10" e o run interrompido pareceria completo.
+    if (item) {
+      saveLastRun({
+        collectionId: item.id,
+        collectionName: item.name,
+        finishedAt: runFinishedAt,
+        startedAt: ctx.runStartedAt,
+        environmentName: ctx.environmentName,
+        entries: ctx.runEntries.map(e => ctx.finalized.get(e.id) ?? e),
+      })
     }
+  }
 
-    const runStartedAt = new Date().toISOString()
-    const environmentName = baseEnv?.name
-    setEntries(runEntries)
+  // Continua o laço do run a partir de `startIdx` — usado tanto pelo Run
+  // (sempre com startIdx 0, logo depois de montar runContextRef) quanto pelo
+  // Resume (com o índice onde o Pause parou). O contexto todo vem do ref
+  // porque, no Pause, esta função RETORNA — as variáveis locais de uma
+  // chamada anterior já teriam sumido quando o Resume precisar delas.
+  const runFrom = async (startIdx: number) => {
+    const ctx = runContextRef.current
+    if (!ctx) return
+    const { runEntries, selected, envId, baseEnvMap, rows, finalized } = ctx
+    let envMap = ctx.envMap
+
     setRunning(true)
-    setRestoredAt(null)
-    setRestoredTruncated(false)
-    setRunMeta({ startedAt: runStartedAt, environmentName })
-    stopRef.current = false
+    setPaused(false)
 
-    // O estado final precisa ser montado aqui, em paralelo: as atualizações de
-    // tela usam `setEntries(prev => ...)`, cujo resultado só existe depois do
-    // próximo render — tarde demais pra gravar quando o laço termina.
-    const finalized = new Map<string, RunEntry>()
-
-    for (let idx = 0; idx < runEntries.length; idx++) {
+    for (let idx = startIdx; idx < runEntries.length; idx++) {
       if (stopRef.current) break
+
+      // Pause: a request anterior já terminou e teve seu resultado aplicado
+      // normalmente — só não deixa esta próxima começar. Guarda o ponto
+      // exato (índice + environment já atualizado) pro Resume continuar daqui.
+      if (pauseRef.current) {
+        ctx.envMap = envMap
+        setPausedAtIndex(idx)
+        setRunning(false)
+        setPaused(true)
+
+        // Grava o que já rodou até aqui (igual ao finishRun) MESMO pausado:
+        // sem isso, o get_last_run do MCP não via nada deste run enquanto
+        // pausado e voltava com o último run SALVO de outra collection —
+        // quem perguntasse "analise o teste que está na tela" recebia o
+        // resultado de um teste diferente.
+        if (item) {
+          saveLastRun({
+            collectionId: item.id,
+            collectionName: item.name,
+            finishedAt: new Date().toISOString(),
+            startedAt: ctx.runStartedAt,
+            environmentName: ctx.environmentName,
+            entries: ctx.runEntries.map(e => ctx.finalized.get(e.id) ?? e),
+          })
+        }
+        return
+      }
+
       const entry = runEntries[idx]
       setEntries(prev => prev.map(e => (e.id === entry.id ? { ...e, state: 'running' } : e)))
 
@@ -500,27 +612,149 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
       }
     }
 
-    setRunning(false)
-    const runFinishedAt = new Date().toISOString()
-    setRunMeta({ startedAt: runStartedAt, finishedAt: runFinishedAt, environmentName })
+    finishRun()
+  }
 
-    // Guarda as linhas que não chegaram a rodar (um Stop no meio) com o estado
-    // 'pending' que tinham: sem isso o placar ao reabrir viraria "10/10" e o
-    // run interrompido pareceria completo.
-    if (item) {
-      saveLastRun({
-        collectionId: item.id,
-        collectionName: item.name,
-        finishedAt: runFinishedAt,
-        startedAt: runStartedAt,
-        environmentName,
-        entries: runEntries.map(e => finalized.get(e.id) ?? e),
-      })
+  const handleRun = async () => {
+    const selected = requests.filter(r => checked[r.id])
+    if (selected.length === 0) return
+
+    const envId = runEnvId
+    const baseEnv = environments.find(e => e.id === envId)
+    // buildEnvMap, e não um Object.fromEntries local: ele descarta as
+    // duplicatas desabilitadas (ver DuplicateVariablePicker) e, quando há mais
+    // de uma habilitada, fica com a MESMA entrada em que a escrita mexe. O
+    // Runner tem que resolver variável igual ao resto do app.
+    const baseEnvMap: Record<string, string> = buildEnvMap(baseEnv?.values)
+
+    // Com tabela, a quantidade de iterações é o número de linhas: cada uma é
+    // um caso, e inventar um número à parte só criaria combinação sem
+    // sentido ("3 iterações sobre 5 linhas").
+    const rows = dataSet?.rows ?? null
+    const totalIterations = rows ? rows.length : iterations
+
+    const runEntries: RunEntry[] = []
+    for (let i = 1; i <= totalIterations; i++) {
+      const label = rows ? rowLabel(rows[i - 1], dataSet!.columns, i - 1) : undefined
+      for (const req of selected) {
+        runEntries.push({
+          id: `${req.id}-${i}`,
+          itemId: req.id,
+          iteration: i,
+          rowLabel: label,
+          name: req.name,
+          method: req.method,
+          state: 'pending',
+        })
+      }
     }
+
+    const runStartedAt = new Date().toISOString()
+    const environmentName = baseEnv?.name
+
+    runContextRef.current = {
+      runEntries,
+      selected,
+      envId,
+      baseEnvMap,
+      rows,
+      environmentName,
+      runStartedAt,
+      envMap: baseEnvMap,
+      finalized: new Map(),
+    }
+
+    setEntries(runEntries)
+    setRestoredAt(null)
+    setRestoredTruncated(false)
+    setRunMeta({ startedAt: runStartedAt, environmentName })
+    stopRef.current = false
+    pauseRef.current = false
+
+    await runFrom(0)
+  }
+
+  const handlePause = () => {
+    pauseRef.current = true
+  }
+
+  const handleResume = async () => {
+    stopRef.current = false
+    pauseRef.current = false
+    await runFrom(pausedAtIndex)
+  }
+
+  // Diferente do Resume (que só continua de onde o Pause parou), este deixa
+  // escolher QUALQUER linha já exibida — um run inteiro, um pausado ou um
+  // interrompido — e refaz dali pra frente. As linhas ANTES do ponto
+  // escolhido ficam como estavam (não são refeitas); o environment de
+  // partida é o ATUAL (buildEnvMap), não um reconstruído: é o que essas
+  // linhas mantidas já gravaram de verdade, mais qualquer ajuste manual
+  // feito nesse meio tempo pelo painel de Environment.
+  const handleRunFrom = async (entryId: string) => {
+    if (running) return
+    const startIdx = entries.findIndex(e => e.id === entryId)
+    if (startIdx === -1) return
+
+    const envId = runEnvId
+    const baseEnv = environments.find(e => e.id === envId)
+    const baseEnvMap: Record<string, string> = buildEnvMap(baseEnv?.values)
+    const environmentName = baseEnv?.name
+    const runStartedAt = new Date().toISOString()
+    const rows = dataSet?.rows ?? null
+
+    // Mantém o resultado de quem já rodou antes do ponto escolhido; dali pra
+    // frente volta a 'pending' — é o que vai ser refeito agora.
+    const runEntries: RunEntry[] = entries.map((e, idx) =>
+      idx < startIdx
+        ? e
+        : { id: e.id, itemId: e.itemId, iteration: e.iteration, rowLabel: e.rowLabel, name: e.name, method: e.method, state: 'pending' }
+    )
+
+    const finalized = new Map<string, RunEntry>()
+    for (let i = 0; i < startIdx; i++) finalized.set(runEntries[i].id, runEntries[i])
+
+    // Reentrar no meio de uma linha de dados (tabela): a primeira request
+    // dessa linha já teria aplicado a sobreposição da linha por cima do
+    // environment base — sem isso, o laço só faz essa troca na PRIMEIRA
+    // request da linha (ver runFrom), e reentrar depois dela deixaria a
+    // sobreposição de fora.
+    const startEntry = runEntries[startIdx]
+    const startEnvMap = rows ? envForRow(baseEnvMap, rows[startEntry.iteration - 1]) : baseEnvMap
+
+    runContextRef.current = {
+      runEntries,
+      selected: requests,
+      envId,
+      baseEnvMap,
+      rows,
+      environmentName,
+      runStartedAt,
+      envMap: startEnvMap,
+      finalized,
+    }
+
+    setEntries(runEntries)
+    setRestoredAt(null)
+    setRestoredTruncated(false)
+    setRunMeta({ startedAt: runStartedAt, environmentName })
+    stopRef.current = false
+    pauseRef.current = false
+
+    await runFrom(startIdx)
   }
 
   const handleStop = () => {
     stopRef.current = true
+    pauseRef.current = false
+
+    // Pausado não tem nenhum laço do runFrom rodando pra notar o stopRef e
+    // fechar o run sozinho — fecha aqui mesmo, com o que já tinha rodado.
+    if (paused) {
+      finishRun()
+      return
+    }
+
     // Interrompe também a request que está no ar (antes ela ia até o fim e o
     // resultado ainda era aplicado ao environment).
     const requestId = currentRequestIdRef.current
@@ -610,7 +844,12 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
         onPointerDownOutside={(e) => e.preventDefault()}
         onInteractOutside={(e) => e.preventDefault()}
         {...drag.contentProps}
-        className="bg-pm-bg border border-pm-border text-pm-text sm:max-w-2xl max-h-[85vh] p-0 flex flex-col overflow-hidden rounded-2xl gap-0"
+        // O DialogContent base vem com "ring-1 ring-foreground/10" do preset
+        // shadcn importado em globals.css — sem token "pm-*" próprio, esse
+        // "foreground" cai no cinza quase branco do tema shadcn padrão,
+        // sobrando como um halo claro em volta do painel escuro. ring-0
+        // cancela isso (border-pm-border já dá o contorno certo).
+        className="bg-pm-bg border border-pm-border ring-0 text-pm-text sm:max-w-2xl max-h-[85vh] p-0 flex flex-col overflow-hidden rounded-lg gap-0"
       >
         {/* Header — também a alça de arrastar: um run longo costuma precisar
             ficar visível junto da request que está sendo depurada. */}
@@ -651,7 +890,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                   value={dataSet ? dataSet.rows.length : iterations}
                   // Com tabela, quem manda é o número de linhas: cada uma é um
                   // caso, e um número à parte criaria combinação sem sentido.
-                  disabled={running || !!dataSet}
+                  disabled={running || paused || !!dataSet}
                   title={dataSet ? 'One iteration per row of the data file' : undefined}
                   onChange={e => setIterations(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
                   className="w-14 h-7 px-2 rounded-md bg-pm-surface border border-pm-border text-xs text-pm-text outline-none focus:border-[#f26b3a]/60 disabled:opacity-50"
@@ -674,7 +913,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                     </span>
                     <button
                       onClick={clearDataFile}
-                      disabled={running}
+                      disabled={running || paused}
                       title="Remove the data file"
                       className="shrink-0 text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer border-none bg-transparent disabled:opacity-40"
                     >
@@ -684,7 +923,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                 ) : (
                   <button
                     onClick={handlePickDataFile}
-                    disabled={running}
+                    disabled={running || paused}
                     title="Run the flow once per row of a CSV or JSON file — each column becomes a variable"
                     className="flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-pm-surface border border-pm-border text-[11px] text-pm-text-secondary hover:text-pm-text hover:border-[#f26b3a]/60 transition-colors cursor-pointer disabled:opacity-50"
                   >
@@ -707,7 +946,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                   min={0}
                   step={50}
                   value={delayMs}
-                  disabled={running}
+                  disabled={running || paused}
                   onChange={e => setDelayMs(Math.max(0, Number(e.target.value) || 0))}
                   className="w-16 h-7 px-2 rounded-md bg-pm-surface border border-pm-border text-xs text-pm-text outline-none focus:border-[#f26b3a]/60 disabled:opacity-50"
                 />
@@ -717,7 +956,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                 <label className="text-[11px] text-pm-text-muted">Environment</label>
                 <select
                   value={runEnvId ?? ''}
-                  disabled={running}
+                  disabled={running || paused}
                   onChange={e => setRunEnvId(e.target.value || null)}
                   className="h-7 px-2 rounded-md bg-pm-surface border border-pm-border text-xs text-pm-text outline-none focus:border-[#f26b3a]/60 disabled:opacity-50 max-w-[160px]"
                 >
@@ -731,14 +970,41 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
               </div>
 
               <div className="ml-auto flex items-center gap-2">
-                {running ? (
-                  <button
-                    onClick={handleStop}
-                    className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold bg-red-900/40 border border-red-800/60 text-red-300 hover:bg-red-900/60 transition-colors cursor-pointer"
-                  >
-                    <Square size={12} /> Stop
-                  </button>
-                ) : (
+                {running && (
+                  <>
+                    <button
+                      onClick={handlePause}
+                      title="Finish the request in flight, then hold — Resume picks up from the next one"
+                      className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold bg-pm-surface border border-pm-border text-pm-text-secondary hover:text-pm-text hover:border-[#f26b3a]/60 transition-colors cursor-pointer"
+                    >
+                      <Pause size={12} /> Pause
+                    </button>
+                    <button
+                      onClick={handleStop}
+                      className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold bg-red-900/40 border border-red-800/60 text-red-300 hover:bg-red-900/60 transition-colors cursor-pointer"
+                    >
+                      <Square size={12} /> Stop
+                    </button>
+                  </>
+                )}
+                {!running && paused && (
+                  <>
+                    <button
+                      onClick={handleResume}
+                      className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold bg-[#f26b3a] text-white hover:bg-[#f26b3a]/90 transition-colors cursor-pointer"
+                    >
+                      <Play size={12} /> Resume
+                    </button>
+                    <button
+                      onClick={handleStop}
+                      title="Give up on resuming — keep the results so far"
+                      className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold bg-red-900/40 border border-red-800/60 text-red-300 hover:bg-red-900/60 transition-colors cursor-pointer"
+                    >
+                      <Square size={12} /> Stop
+                    </button>
+                  </>
+                )}
+                {!running && !paused && (
                   <button
                     onClick={handleRun}
                     disabled={selectedCount === 0}
@@ -769,6 +1035,15 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                 >
                   <Trash2 size={11} /> Discard
                 </button>
+              </div>
+            )}
+
+            {paused && (
+              <div className="shrink-0 flex items-center gap-2 px-4 py-1.5 border-b border-pm-border bg-pm-hover/40 text-[11px] text-pm-text-muted">
+                <Pause size={11} className="shrink-0 text-[#f26b3a]" />
+                <span className="truncate">
+                  Paused · {pausedAtIndex}/{entries.length} done — Resume continues from the next request
+                </span>
               </div>
             )}
 
@@ -860,6 +1135,8 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                     const failed = hasFailureReason(entry)
                     const scriptLogs = entry.outcome?.logs ?? []
                     const variablesSet = entry.outcome?.variablesSet ?? []
+                    const variablesRemovedCount = variablesSet.filter(v => v.removed).length
+                    const variablesSetCount = variablesSet.length - variablesRemovedCount
                     // Não é só falha que pode expandir — uma request de sucesso
                     // com console.log(...) ou pm.environment.set(...) nos
                     // scripts também precisa dar pra abrir e ver o que foi
@@ -887,6 +1164,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                     // guardá-lo duplicaria o que já está na árvore, e é a
                     // árvore que a edição altera.
                     const source = requests.find(r => r.id === entry.itemId)
+                    const scriptableRequest = source?.request
                     const rawUrl = source?.request?.url ?? ''
                     const rawBody = requestHasBody(source?.request?.bodyType, source?.request?.body)
                       ? source?.request?.body ?? ''
@@ -903,7 +1181,7 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                     return (
                       <div
                         key={entry.id}
-                        className={`rounded-md border ${
+                        className={`group rounded-md border ${
                           failed ? 'bg-[#2a1414]/40 border-red-900/40' : 'bg-pm-hover/50 border-pm-border/70'
                         }`}
                       >
@@ -997,12 +1275,46 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                           )}
                           {variablesSet.length > 0 && (
                             <span
-                              title={`${variablesSet.length} variable${variablesSet.length === 1 ? '' : 's'} set by this request's scripts`}
-                              className="flex items-center gap-0.5 px-1.5 py-0 rounded text-[10px] font-bold tabular-nums bg-[#0f2e3d] text-[#63b3ed] shrink-0"
+                              title={
+                                // Apagadas contam separado: um passo de limpeza
+                                // que apaga 28 variáveis aparecia como "28" num
+                                // chip que diz "set", e era a leitura errada.
+                                [
+                                  variablesSetCount > 0 && `${variablesSetCount} set`,
+                                  variablesRemovedCount > 0 && `${variablesRemovedCount} deleted`,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ') + " by this request's scripts"
+                              }
+                              className={`flex items-center gap-0.5 px-1.5 py-0 rounded text-[10px] font-bold tabular-nums shrink-0 ${
+                                variablesRemovedCount > 0
+                                  ? 'bg-[#3d1515] text-red-300'
+                                  : 'bg-[#0f2e3d] text-[#63b3ed]'
+                              }`}
                             >
                               <Braces size={10} />
-                              {variablesSet.length}
+                              {variablesSetCount > 0 && variablesSetCount}
+                              {variablesRemovedCount > 0 && (
+                                <span className={variablesSetCount > 0 ? 'pl-1' : ''}>
+                                  −{variablesRemovedCount}
+                                </span>
+                              )}
                             </span>
+                          )}
+                          {/* Qualquer linha já exibida — não só onde o Pause
+                              parou — vira um ponto de partida: refaz dali
+                              pra frente, mantendo o resultado das anteriores.
+                              Também disponível pausado: permite retomar de
+                              uma linha diferente da que parou, não só da
+                              próxima (handleRunFrom já reseta o pause). */}
+                          {!running && (
+                            <button
+                              onClick={e => { e.stopPropagation(); handleRunFrom(entry.id) }}
+                              title={paused ? 'Resume from here — restart from this request' : 'Run from here — redo this request and everything after it'}
+                              className="shrink-0 opacity-0 group-hover:opacity-100 text-pm-text-muted hover:text-[#f26b3a] transition-opacity cursor-pointer"
+                            >
+                              <RotateCw size={12} />
+                            </button>
                           )}
                           {canExpand && (
                             <span className="shrink-0 text-pm-text-muted">
@@ -1026,9 +1338,43 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                     <div className="min-w-0">
                                       <span className={t.passed ? 'text-pm-text-secondary' : 'text-pm-text'}>{t.name}</span>
                                       {!t.passed && t.message && (
-                                        <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[10.5px] text-red-300/80">
-                                          {t.message}
-                                        </pre>
+                                        <>
+                                          <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[10.5px] text-red-300/80">
+                                            {t.message}
+                                          </pre>
+                                          {/* A API às vezes responde algo diferente do que a
+                                              asserção previa de propósito — "Order.Incompatible"
+                                              não é bug, é a API dizendo que esse método não serve
+                                              pra esse pedido. Em vez de reabrir o editor e caçar a
+                                              linha certa, isto reescreve o pm.test(...) sozinho pra
+                                              aceitar o valor que chegou (ver acceptTestExpectation). */}
+                                          {onUpdateRequestScript && (
+                                            <button
+                                              onClick={e => {
+                                                e.stopPropagation()
+                                                const scripts = scriptableRequest?.scripts
+                                                const attempt =
+                                                  (scripts?.postResponse && { phase: 'postResponse' as const, script: scripts.postResponse }) ||
+                                                  (scripts?.preRequest && { phase: 'preRequest' as const, script: scripts.preRequest })
+                                                const updated = attempt && acceptTestExpectation(attempt.script, t.name, t.message)
+                                                if (attempt && updated) {
+                                                  onUpdateRequestScript(entry.itemId, attempt.phase, updated)
+                                                  toast.success('Test updated — accepted as the expected result.', {
+                                                    description: 'Run it again to see it pass.',
+                                                  })
+                                                } else {
+                                                  toast.error('Could not update the script automatically.', {
+                                                    description: 'Edit the Post-response script below to accept this result.',
+                                                  })
+                                                }
+                                              }}
+                                              className="mt-1 inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10px] font-semibold cursor-pointer border border-[#4ff09d]/30 bg-[#4ff09d]/10 text-[#4ff09d] hover:bg-[#4ff09d]/20 hover:border-[#4ff09d]/50 transition-colors"
+                                              title="Update the test script so this exact result is treated as expected from now on"
+                                            >
+                                              <BadgeCheck size={11} /> Accept as expected
+                                            </button>
+                                          )}
+                                        </>
                                       )}
                                     </div>
                                   </div>
@@ -1077,7 +1423,17 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                 </div>
 
                                 {rawUrl ? (
-                                  <VariableText text={rawUrl} valueOf={currentEnvValue} onCommit={commitVariable} />
+                                  <VariableText
+                                    text={rawUrl}
+                                    valueOf={currentEnvValue}
+                                    onCommit={commitVariable}
+                                    activeEnvId={runEnvId}
+                                    onReplaceToken={
+                                      onUpdateRequestUrl &&
+                                      ((oldToken, newKey) =>
+                                        onUpdateRequestUrl(entry.itemId, rawUrl.replace(oldToken, `{{${newKey}}}`)))
+                                    }
+                                  />
                                 ) : (
                                   // Request apagada depois do run: sem o texto
                                   // cru sobra a URL resolvida, sem chips.
@@ -1096,16 +1452,38 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
 
                             {(rawBody?.trim() || entry.outcome?.sentBody?.trim()) && (
                               <div className="rounded-md border border-pm-border bg-pm-hover p-2 flex flex-col gap-1.5">
-                                <span className="flex items-center gap-1 text-[10px] font-semibold text-pm-text-muted uppercase tracking-wide">
-                                  <ArrowUpRight size={10} /> Payload
-                                </span>
+                                <div className="flex items-center gap-1">
+                                  <span className="flex items-center gap-1 text-[10px] font-semibold text-pm-text-muted uppercase tracking-wide">
+                                    <ArrowUpRight size={10} /> Payload
+                                  </span>
+                                  {!!rawBody?.trim() && (
+                                    <button
+                                      onClick={e => {
+                                        e.stopPropagation()
+                                        setPayloadPrettyIds(prev => {
+                                          const next = new Set(prev)
+                                          if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id)
+                                          return next
+                                        })
+                                      }}
+                                      title={payloadPrettyIds.has(entry.id) ? 'Show raw (as stored in the request)' : 'Pretty-print this JSON'}
+                                      className={`ml-auto flex items-center gap-1 text-[10px] transition-colors cursor-pointer ${
+                                        payloadPrettyIds.has(entry.id) ? 'text-[#097bed]' : 'text-pm-text-muted hover:text-pm-text'
+                                      }`}
+                                    >
+                                      <WandSparkles size={11} /> {payloadPrettyIds.has(entry.id) ? 'Pretty' : 'Prettify'}
+                                    </button>
+                                  )}
+                                </div>
                                 {rawBody?.trim() ? (
-                                  // Texto CRU, não o formatado: é o que está
-                                  // guardado na request, e reformatar aqui
-                                  // mostraria um payload diferente do que o
-                                  // editor de Body mostra.
+                                  // Cru por padrão: é o que está guardado na
+                                  // request, e reformatar sem pedir mostraria
+                                  // um payload diferente do que o editor de
+                                  // Body mostra. Bonito é opt-in, ver o botão
+                                  // acima — mantém os {{tokens}} clicáveis
+                                  // (prettyBodyPreservingTemplates só reindenta).
                                   <JsonBlock
-                                    value={rawBody}
+                                    value={payloadPrettyIds.has(entry.id) ? prettyBodyPreservingTemplates(rawBody) : rawBody}
                                     maxHeight={224}
                                     variableValue={currentEnvValue}
                                     onCommitVariable={commitVariable}
@@ -1135,6 +1513,109 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                               </details>
                             )}
 
+                            {/* Editar o script aqui dispensa abrir a aba da
+                                request — ela já está aberta justamente para
+                                comparar com o que o run fez. */}
+                            {scriptableRequest && (() => {
+                              const activePhase = scriptTabByEntry[entry.id] ?? 'preRequest'
+                              const activeScript = scriptableRequest.scripts?.[activePhase] ?? ''
+                              // Autossuficiente mesmo com o MCP desligado: em vez de
+                              // pedir pro Claude ir buscar o run, já manda o script,
+                              // o placar dos testes e um recorte da resposta direto
+                              // no texto — é tudo que já está na tela.
+                              const buildAiPrompt = () => {
+                                const label = activePhase === 'preRequest' ? 'pre-request' : 'post-response'
+                                const parts = [
+                                  `Explique o resultado deste script de ${label} da request "${entry.name}"` +
+                                    (entry.rowLabel ? ` (${entry.rowLabel})` : '') + '.',
+                                  '',
+                                  'Script:',
+                                  '```js',
+                                  activeScript || '(vazio)',
+                                  '```',
+                                ]
+                                if (entry.outcome) {
+                                  parts.push(
+                                    '',
+                                    `Resposta: HTTP ${entry.outcome.httpStatus ?? entry.outcome.errorMessage ?? '?'} em ${entry.outcome.responseTime}ms`
+                                  )
+                                }
+                                if (tests.length > 0) {
+                                  parts.push('', 'Testes:', ...tests.map(t =>
+                                    `${t.passed ? '✓' : '✗'} ${t.name}${!t.passed && t.message ? ` — ${t.message}` : ''}`
+                                  ))
+                                }
+                                if (entry.outcome?.scriptError) {
+                                  parts.push('', `Erro no script: ${entry.outcome.scriptError}`)
+                                }
+                                if (responseBody) {
+                                  parts.push('', 'Corpo da resposta (pode estar truncado):', responseBody.slice(0, 2000))
+                                }
+                                return parts.join('\n')
+                              }
+
+                              return (
+                                <details className="rounded-md border border-pm-border bg-pm-hover p-2">
+                                  <summary className="flex items-center cursor-pointer text-[10px] font-semibold text-pm-text-muted uppercase tracking-wide">
+                                    <span className="flex-1">Scripts</span>
+                                    {onOpenTextInNewWindow && (
+                                      <button
+                                        onClick={e => {
+                                          e.preventDefault()
+                                          e.stopPropagation()
+                                          const phaseLabel = activePhase === 'preRequest' ? 'Pre-request' : 'Post-response'
+                                          onOpenTextInNewWindow(activeScript, `${phaseLabel} script — ${entry.name}`, 'javascript')
+                                        }}
+                                        title="Open this script in a new window"
+                                        className="normal-case font-normal p-0.5 rounded text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
+                                      >
+                                        <ExternalLink size={11} />
+                                      </button>
+                                    )}
+                                    {onAskAiAboutScript && (
+                                      <button
+                                        onClick={e => { e.preventDefault(); e.stopPropagation(); onAskAiAboutScript(buildAiPrompt()) }}
+                                        title="Ask Claude about this script's result"
+                                        className="normal-case font-normal p-0.5 ml-0.5 rounded text-pm-text-muted hover:text-[#f26b3a] transition-colors cursor-pointer"
+                                      >
+                                        <Sparkles size={11} />
+                                      </button>
+                                    )}
+                                  </summary>
+                                  <div className="mt-1.5 flex flex-col gap-1.5" onClick={e => e.stopPropagation()}>
+                                    <div className="flex gap-1">
+                                      {(['preRequest', 'postResponse'] as const).map(phase => {
+                                        const active = activePhase === phase
+                                        return (
+                                          <button
+                                            key={phase}
+                                            onClick={() => setScriptTabByEntry(prev => ({ ...prev, [entry.id]: phase }))}
+                                            className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors cursor-pointer ${
+                                              active
+                                                ? 'bg-[#097bed]/20 text-[#097bed]'
+                                                : 'text-pm-text-muted hover:text-pm-text'
+                                            }`}
+                                          >
+                                            {phase === 'preRequest' ? 'Pre-request' : 'Post-response'}
+                                          </button>
+                                        )
+                                      })}
+                                    </div>
+                                    <div className="h-40 rounded border border-pm-border overflow-hidden">
+                                      <CodeEditor
+                                        key={`${entry.id}-${activePhase}`}
+                                        value={activeScript}
+                                        onChange={value => onUpdateRequestScript?.(entry.itemId, activePhase, value)}
+                                      />
+                                    </div>
+                                    <span className="text-[10px] text-pm-text-muted">
+                                      Saved to the request — the next Send or Run uses it.
+                                    </span>
+                                  </div>
+                                </details>
+                              )
+                            })()}
+
                             {!!responseBody?.trim() && (
                               <div className="rounded-md border border-pm-border bg-pm-hover p-2 flex flex-col gap-1">
                                 <div className="flex items-center gap-2 mb-0.5">
@@ -1147,14 +1628,46 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                     </span>
                                   )}
                                   <button
+                                    onClick={e => {
+                                      e.stopPropagation()
+                                      setResponseRawIds(prev => {
+                                        const next = new Set(prev)
+                                        if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id)
+                                        return next
+                                      })
+                                    }}
+                                    title={responseRawIds.has(entry.id) ? 'Pretty-print this JSON' : 'Show raw (exactly as received)'}
+                                    className={`ml-auto flex items-center gap-1 text-[10px] transition-colors cursor-pointer ${
+                                      responseRawIds.has(entry.id) ? 'text-pm-text-muted hover:text-pm-text' : 'text-[#097bed]'
+                                    }`}
+                                  >
+                                    <WandSparkles size={11} /> {responseRawIds.has(entry.id) ? 'Prettify' : 'Pretty'}
+                                  </button>
+                                  {onOpenTextInNewWindow && (
+                                    <button
+                                      onClick={e => {
+                                        e.stopPropagation()
+                                        const shown = responseRawIds.has(entry.id) ? responseBody : prettyBody(responseBody)
+                                        onOpenTextInNewWindow(shown, `Response — ${entry.name}`, 'json')
+                                      }}
+                                      title="Open this response in a new window"
+                                      className="flex items-center text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
+                                    >
+                                      <ExternalLink size={11} />
+                                    </button>
+                                  )}
+                                  <button
                                     onClick={e => { e.stopPropagation(); copyBody(entry) }}
-                                    className="ml-auto flex items-center gap-1 text-[10px] text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
+                                    className="flex items-center gap-1 text-[10px] text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
                                   >
                                     {copiedBodyId === entry.id ? <Check size={11} className="text-[#4ff09d]" /> : <Copy size={11} />}
                                     {copiedBodyId === entry.id ? 'Copied' : 'Copy'}
                                   </button>
                                 </div>
-                                <JsonBlock value={prettyBody(responseBody)} maxHeight={288} />
+                                <JsonBlock
+                                  value={responseRawIds.has(entry.id) ? responseBody : prettyBody(responseBody)}
+                                  maxHeight={288}
+                                />
                                 {/* Só quando é recorte de verdade, e dizendo
                                     quanto ficou de fora: o aviso fixo de "2000
                                     caracteres" aparecia até em resposta inteira. */}
@@ -1187,10 +1700,16 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                     return (
                                       <div key={i} className="flex items-start gap-1.5 text-[11px] font-mono">
                                         <span
-                                          className="text-pm-text-muted/70 shrink-0 pt-1"
-                                          title={v.phase ? 'Set by this request' : 'Read by this request'}
+                                          className={`shrink-0 pt-1 ${v.removed ? 'text-red-400' : 'text-pm-text-muted/70'}`}
+                                          title={
+                                            v.removed
+                                              ? 'Deleted by this request (pm.environment.unset)'
+                                              : v.phase
+                                                ? 'Set by this request'
+                                                : 'Read by this request'
+                                          }
                                         >
-                                          [{v.phase ? (v.phase === 'pre-request' ? 'pre' : 'post') : 'in'}]
+                                          [{v.removed ? 'del' : v.phase ? (v.phase === 'pre-request' ? 'pre' : 'post') : 'in'}]
                                         </span>
                                         <span className="text-[#63b3ed] shrink-0 pt-1">{v.key}:</span>
                                         <input
@@ -1217,16 +1736,20 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                                           onClick={e => e.stopPropagation()}
                                           spellCheck={false}
                                           title={
-                                            changed
-                                              ? `This run set: ${v.runValue}`
-                                              : 'Edit to change the environment variable, then Run again'
+                                            v.removed
+                                              ? `This request deleted it. It held: ${v.runValue}. Type a value to put it back.`
+                                              : changed
+                                                ? `This run set: ${v.runValue}`
+                                                : 'Edit to change the environment variable, then Run again'
                                           }
                                           className={`flex-1 min-w-0 rounded border bg-pm-bg px-1.5 py-0.5 font-mono text-[11px] outline-none ${
                                             savedVarKey === draftKey
                                               ? 'border-[#4ff09d]/60 text-[#4ff09d]'
-                                              : changed
-                                                ? 'border-amber-500/50 text-pm-text'
-                                                : 'border-pm-border text-pm-text-secondary focus:border-[#f26b3a]/60'
+                                              : v.removed
+                                                ? 'border-red-500/40 text-red-300/80 line-through decoration-red-400/50'
+                                                : changed
+                                                  ? 'border-amber-500/50 text-pm-text'
+                                                  : 'border-pm-border text-pm-text-secondary focus:border-[#f26b3a]/60'
                                           }`}
                                         />
                                       </div>
@@ -1277,9 +1800,23 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
               )}
             </div>
 
-            {/* Summary footer */}
+            {/* Summary footer — também alça de arrastar: se o cabeçalho ficar
+                fora de alcance (modal mais alto que a janela), esta barra,
+                na outra ponta do modal, costuma continuar visível. Os botões
+                dentro continuam clicáveis — o mesmo guard do cabeçalho exclui
+                `button/input/select/textarea/a` do início do arrasto. */}
             {entries.length > 0 && (
-              <div className="h-11 shrink-0 flex items-center justify-between px-4 border-t border-pm-border text-[11px] text-pm-text-muted">
+              <div
+                // Só onMouseDown/style — não o `ref`: ele é o mesmo objeto do
+                // cabeçalho, que precisa continuar apontando SÓ pra lá (é o
+                // que a medição "nasceu fora da tela" usa, e essa barra some
+                // quando `entries` está vazio, o cabeçalho nunca).
+                onMouseDown={drag.handleProps.onMouseDown}
+                style={drag.handleProps.style}
+                onDoubleClick={drag.reset}
+                title="Drag to move — double-click to recenter"
+                className="h-11 shrink-0 flex items-center justify-between px-4 border-t border-pm-border text-[11px] text-pm-text-muted select-none"
+              >
                 <span>
                   {summary.done}/{summary.total} requests
                   {summary.failedRequests > 0 && (
@@ -1350,7 +1887,15 @@ export function CollectionRunnerPanel({ item, open, onClose }: Props) {
                   )}
                   {!running && (
                     <button
-                      onClick={() => { setEntries([]); setRestoredAt(null); setRestoredTruncated(false); setRunMeta({}) }}
+                      onClick={() => {
+                        setEntries([])
+                        setRestoredAt(null)
+                        setRestoredTruncated(false)
+                        setRunMeta({})
+                        setPaused(false)
+                        pauseRef.current = false
+                        runContextRef.current = null
+                      }}
                       className="text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
                     >
                       Run again

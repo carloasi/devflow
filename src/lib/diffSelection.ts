@@ -1,5 +1,5 @@
 import type { DiffNode } from './collectionDiff';
-import { changedSinceBase, type NodeHashes } from './syncBase';
+import { changedInSubtree, changedSinceBase, type NodeHashes } from './syncBase';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Estado das caixinhas da tela de comparação.
@@ -71,8 +71,24 @@ export function conflictingIds(
   const out = new Set<string>();
 
   for (const node of nodes) {
-    // `added` só existe do lado remoto: não há versão local para perder.
-    if (node.change === 'added') continue;
+    // `added` só existe do lado remoto — exceto quando a base o conhece:
+    // então ele já existiu aqui e foi APAGADO aqui. Aceitar o traria de
+    // volta, desfazendo a exclusão; por isso fica desmarcado por padrão.
+    if (node.change === 'added') {
+      if (base && base[node.id] !== undefined) out.add(node.id);
+      continue;
+    }
+
+    // `removed` = só existe AQUI; aceitar é APAGAR daqui, com tudo o que está
+    // dentro. Só é seguro quando a base conhece o item E nada nele — nem
+    // abaixo dele — mudou aqui. Sem base não há como saber se foi apagado lá
+    // ou se é novo aqui: fica, em vez de apostar na exclusão.
+    if (node.change === 'removed') {
+      if (!base || changedSinceBase(base, node.id, node.local) !== false || changedInSubtree(base, node.local)) {
+        out.add(node.id);
+      }
+      continue;
+    }
 
     const changedHere = changedSinceBase(base, node.id, node.local);
 
@@ -85,7 +101,19 @@ export function conflictingIds(
     }
 
     // Mudou dos DOIS lados. Se mudou só lá, aceitar não descarta nada seu.
-    if (changedHere) out.add(node.id);
+    if (changedHere) {
+      out.add(node.id);
+      continue;
+    }
+
+    // A base guarda só o conteúdo PRÓPRIO do item, sem a ordem dos filhos:
+    // uma pasta que só mudou de ordem não diz quem reordenou. Com pendência
+    // nesta collection pode ter sido você — fica em Mine e pede decisão, em
+    // vez de trocar pela ordem do GitHub sem avisar (o push faz o merge
+    // sozinho com esta mesma regra, ver lib/sync/rebase).
+    const orderOnly =
+      node.change === 'modified' && node.fields.length > 0 && node.fields.every(f => f.field === 'order');
+    if (orderOnly && pendingCollectionIds.has(node.rootId)) out.add(node.id);
   }
 
   return out;

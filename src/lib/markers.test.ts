@@ -18,6 +18,8 @@ import {
   orphanMarkerIds,
   purgeOrphans,
   nodeMatchesMarkers,
+  catalogForPush,
+  markerBaseHashes,
   filterTreeByMarkers,
   markerNote,
   setMarkerNote,
@@ -253,6 +255,25 @@ describe('markers > filtro', () => {
   });
 });
 
+describe('markers > catálogo enviado no push', () => {
+  const mine = { id: 'm1', name: 'Flaky', color: MARKER_COLORS[0] };
+  it('leva os marcadores que outra pessoa criou lá', () => {
+    const theirs = { id: 'm9', name: 'Smoke', color: MARKER_COLORS[2] };
+    expect(catalogForPush([mine], [theirs]).map(m => m.id)).toEqual(['m1', 'm9']);
+  });
+  it('mesmo id: vale o daqui (quem envia acabou de renomear)', () => {
+    const old = { id: 'm1', name: 'Instável', color: MARKER_COLORS[5] };
+    expect(catalogForPush([mine], [old])).toEqual([mine]);
+  });
+  it('mesmo nome com outro id não duplica', () => {
+    const twin = { id: 'x', name: 'flaky', color: MARKER_COLORS[1] };
+    expect(catalogForPush([mine], [twin])).toEqual([mine]);
+  });
+  it('sem leitura do GitHub, fica o daqui', () => {
+    expect(catalogForPush([mine], null)).toEqual([mine]);
+  });
+});
+
 describe('markers > merge do catálogo do Git', () => {
   it('mantém o local que o remoto não tem', () => {
     const { catalog, remapped } = mergeCatalogs([flaky], [smoke]);
@@ -388,3 +409,43 @@ describe('markers > nota por marca', () => {
     expect(markerNote(find(out, 'r1')!, 'm1')).toBe('a do time')
   })
 })
+
+describe('catálogo com a base da última sincronização', () => {
+  const synced: Marker[] = [
+    { id: 'a', name: 'Em revisão', color: '#f2c94c' },
+    { id: 'b', name: 'Pronto', color: '#27ae60' },
+  ];
+  const base = markerBaseHashes(synced);
+  const ids = (list: Marker[]) => list.map(m => m.id).sort();
+
+  it('marcador apagado aqui não volta no push nem no pull', () => {
+    const local = synced.filter(m => m.id !== 'a');
+    expect(ids(catalogForPush(local, synced, base))).toEqual(['b']);
+    expect(ids(mergeCatalogs(local, synced, base).catalog)).toEqual(['b']);
+  });
+
+  it('marcador apagado no GitHub sai daqui também, e o push não o reenvia', () => {
+    const remote = synced.filter(m => m.id !== 'b');
+    expect(ids(mergeCatalogs(synced, remote, base).catalog)).toEqual(['a']);
+    expect(ids(catalogForPush(synced, remote, base))).toEqual(['a']);
+  });
+
+  it('renomear aqui e puxar antes de enviar mantém o nome novo', () => {
+    const local = synced.map(m => (m.id === 'a' ? { ...m, name: 'Revisão QA' } : m));
+    const merged = mergeCatalogs(local, synced, base).catalog;
+    expect(merged.find(m => m.id === 'a')?.name).toBe('Revisão QA');
+  });
+
+  it('o colega renomeou no GitHub: o push não desfaz', () => {
+    const remote = synced.map(m => (m.id === 'b' ? { ...m, color: '#2f80ed' } : m));
+    const pushed = catalogForPush(synced, remote, base);
+    expect(pushed.find(m => m.id === 'b')?.color).toBe('#2f80ed');
+  });
+
+  it('marcador criado do outro lado continua entrando', () => {
+    const remote = [...synced, { id: 'c', name: 'Bloqueado', color: '#eb5757' }];
+    expect(ids(mergeCatalogs(synced, remote, base).catalog)).toEqual(['a', 'b', 'c']);
+    const local = [...synced, { id: 'd', name: 'Urgente', color: '#eb5757' }];
+    expect(ids(catalogForPush(local, synced, base))).toEqual(['a', 'b', 'd']);
+  });
+});

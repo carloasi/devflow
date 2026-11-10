@@ -40,6 +40,13 @@ describe('isEditableField', () => {
     expect(isJsonField('auth')).toBe(true);
     expect(isJsonField('body')).toBe(false);
   });
+
+  // Editável pra dar o merge (união) ver src/components/SyncDiff — sem isso
+  // o conflito de marcador era tudo-ou-nada.
+  it('aceita markers e markerNotes', () => {
+    expect(isEditableField('markers')).toBe(true);
+    expect(isEditableField('markerNotes')).toBe(true);
+  });
 });
 
 describe('parseFieldValue', () => {
@@ -126,6 +133,30 @@ describe('applyFieldOverride', () => {
     const original = node();
     applyFieldOverride(original, 'body', 'novo');
     expect(original.request!.body).toBe('antigo');
+  });
+
+  it('grava markers', () => {
+    expect(applyFieldOverride(node(), 'markers', ['m1', 'm2']).markers).toEqual(['m1', 'm2']);
+  });
+
+  // Mesma regra do setMarkers em lib/markers.ts: campo ausente, não array
+  // vazio — senão todo nó ganharia `markers: []` no arquivo da collection.
+  it('markers vazio remove o campo em vez de gravar []', () => {
+    const result = applyFieldOverride(node({ markers: ['old'] }), 'markers', []);
+    expect(result.markers).toBeUndefined();
+  });
+
+  it('ignora entradas de markers que não são string', () => {
+    expect(applyFieldOverride(node(), 'markers', ['m1', 42, null]).markers).toEqual(['m1']);
+  });
+
+  it('grava markerNotes', () => {
+    expect(applyFieldOverride(node(), 'markerNotes', { m1: 'nota' }).markerNotes).toEqual({ m1: 'nota' });
+  });
+
+  it('markerNotes vazio remove o campo', () => {
+    const result = applyFieldOverride(node({ markerNotes: { m1: 'nota' } }), 'markerNotes', {});
+    expect(result.markerNotes).toBeUndefined();
   });
 });
 

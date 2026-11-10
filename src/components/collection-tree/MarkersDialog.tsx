@@ -245,7 +245,7 @@ function ColorPicker({ value, onPick }: { value: string; onPick: (color: string)
         <>
           {/* Captura o clique fora sem bloquear o Dialog em volta. */}
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-6 z-20 flex w-[108px] flex-wrap gap-1 rounded-lg border border-pm-border bg-pm-surface p-1.5 shadow-[0_12px_40px_rgba(0,0,0,0.55)]">
+          <div className="absolute left-0 top-6 z-20 flex w-[108px] flex-wrap gap-1 rounded-lg border border-pm-border bg-pm-surface p-1.5">
             {MARKER_COLORS.map(color => (
               <button
                 key={color}

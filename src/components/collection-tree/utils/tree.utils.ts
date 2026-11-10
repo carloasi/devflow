@@ -208,14 +208,11 @@ export function duplicateNode(
     return cloned
   }
 
-  // Só o nó duplicado ganha "(Copy)". Antes o sufixo descia pra subárvore
-  // inteira, e duplicar uma pasta de dez requests devolvia dez nomes sujos —
-  // num fluxo, onde o nome da request é o passo ("1 - Gerar token"), isso
-  // estraga justamente o que se lê pra entender a ordem.
-  const cloneNode = (node: CollectionItem): CollectionItem => ({
-    ...cloneChild(node),
-    name: `${node.name} (Copy)`,
-  })
+  // Mesmo nome do original — sem sufixo. O "(Copy)" só servia pra distinguir
+  // os dois na lista, mas num fluxo o nome da request é o passo ("1 - Gerar
+  // token"), e ver o nome marcado logo depois de duplicar é mais confuso do
+  // que ajuda: o rename (F2) é o caminho de quem quer renomear a cópia.
+  const cloneNode = (node: CollectionItem): CollectionItem => cloneChild(node)
 
   return items.flatMap((item: CollectionItem) => {
     if (item.id === id) {
@@ -520,6 +517,33 @@ export function pasteNodes(
   })
 }
 
+// Cola uma lista de nós (já clonados com novos ids) como IRMÃOS de
+// `targetId`, logo antes ou logo depois dele — em vez de sempre no fim da
+// lista do pai, como pasteNodes já fazia. Mesma técnica de splice usada por
+// moveNode (insertBesides), só que inserindo nós novos em vez de realocar um
+// nó já existente.
+export function pasteNodesBeside(
+  items: CollectionItem[],
+  targetId: string,
+  nodes: CollectionItem[],
+  position: 'before' | 'after'
+): CollectionItem[] {
+  const idx = items.findIndex((item) => item.id === targetId)
+
+  if (idx !== -1) {
+    const result = [...items]
+    const insertAt = position === 'before' ? idx : idx + 1
+    result.splice(insertAt, 0, ...nodes)
+    return result
+  }
+
+  return items.map((item) =>
+    item.item
+      ? { ...item, item: pasteNodesBeside(item.item, targetId, nodes, position) }
+      : item
+  )
+}
+
 export type DropPosition = 'before' | 'after' | 'inside'
 
 // Uma linha visível da árvore, na ordem em que é desenhada (pré-ordem).
@@ -659,6 +683,24 @@ export function moveDown(items: CollectionItem[], id: string): CollectionItem[] 
   const index = siblings.findIndex(s => s.id === id)
   if (index === -1 || index >= siblings.length - 1) return items
   return moveNode(items, id, siblings[index + 1].id, 'after')
+}
+
+// "Pular" direto pra ponta, em vez de um passo por vez — útil numa pasta com
+// dezenas de irmãos, onde "Move up" trinta vezes não é uma opção séria.
+// canMoveUp/canMoveDown servem pra habilitar os dois: a condição é a MESMA
+// ("não está já na ponta"), só o destino do pulo é diferente.
+export function moveToFirst(items: CollectionItem[], id: string): CollectionItem[] {
+  const siblings = siblingsOf(items, id)
+  const index = siblings.findIndex(s => s.id === id)
+  if (index <= 0) return items
+  return moveNode(items, id, siblings[0].id, 'before')
+}
+
+export function moveToLast(items: CollectionItem[], id: string): CollectionItem[] {
+  const siblings = siblingsOf(items, id)
+  const index = siblings.findIndex(s => s.id === id)
+  if (index === -1 || index >= siblings.length - 1) return items
+  return moveNode(items, id, siblings[siblings.length - 1].id, 'after')
 }
 
 /**
@@ -1154,6 +1196,92 @@ export function setDescription(
           return rest
         }
         return { ...item, description: clean }
+      }
+      if (item.item?.length) {
+        const children = walk(item.item)
+        if (children !== item.item) {
+          changed = true
+          return { ...item, item: children }
+        }
+      }
+      return item
+    })
+    return changed ? out : list
+  }
+
+  return walk(items)
+}
+
+/**
+ * Grava a URL de uma request, em qualquer nível da árvore.
+ *
+ * Mesma razão do setRequestScript logo abaixo: o Collection Runner só tem o
+ * id da request (não um Tab aberto) — usado pelo popover de variável da URL
+ * pra trocar um token `{{var}}` por outro direto dali ("switch to variable
+ * list"), sem abrir a request.
+ */
+export function setRequestUrl(
+  items: CollectionItem[],
+  id: string,
+  url: string
+): CollectionItem[] {
+  const walk = (list: CollectionItem[]): CollectionItem[] => {
+    let changed = false
+    const out = list.map((item) => {
+      if (item.id === id) {
+        if (!item.request || item.request.url === url) return item
+        changed = true
+        return { ...item, request: { ...item.request, url } }
+      }
+      if (item.item?.length) {
+        const children = walk(item.item)
+        if (children !== item.item) {
+          changed = true
+          return { ...item, item: children }
+        }
+      }
+      return item
+    })
+    return changed ? out : list
+  }
+
+  return walk(items)
+}
+
+/**
+ * Grava o script de uma fase (pre-request ou post-response) de uma request,
+ * em qualquer nível da árvore.
+ *
+ * Existe pra o Collection Runner poder editar o script sem abrir a aba da
+ * request — ele só tem o id, não um Tab inteiro. Mescla com o `request`
+ * existente (url, headers, auth, body…) e com a OUTRA fase do script, em
+ * vez de substituir o objeto inteiro: gravar só teria o texto da fase que
+ * mudou, e a outra sumiria.
+ */
+export function setRequestScript(
+  items: CollectionItem[],
+  id: string,
+  phase: 'preRequest' | 'postResponse',
+  value: string
+): CollectionItem[] {
+  const walk = (list: CollectionItem[]): CollectionItem[] => {
+    let changed = false
+    const out = list.map((item) => {
+      if (item.id === id) {
+        // Nó sem `request` (pasta, request mal formada) não tem onde gravar.
+        if (!item.request || item.request.scripts?.[phase] === value) return item
+        changed = true
+        return {
+          ...item,
+          request: {
+            ...item.request,
+            scripts: {
+              preRequest: item.request.scripts?.preRequest ?? '',
+              postResponse: item.request.scripts?.postResponse ?? '',
+              [phase]: value,
+            },
+          },
+        }
       }
       if (item.item?.length) {
         const children = walk(item.item)

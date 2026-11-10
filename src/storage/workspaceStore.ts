@@ -54,6 +54,37 @@ export async function createWorkspace(name: string): Promise<WorkspaceInfo | nul
 }
 
 /**
+ * Núcleo puro do rename — separado de `renameWorkspace` pra poder testar as
+ * regras (nome inválido, path já existente, `oldPath` fantasma) sem depender
+ * do LazyStore.
+ */
+export function computeRenamedWorkspaces(
+  workspaces: WorkspaceInfo[],
+  oldPath: string,
+  newName: string
+): { workspaces: WorkspaceInfo[]; renamed: WorkspaceInfo } | null {
+  const sanitized = sanitizeName(newName);
+  if (!sanitized) return null;
+
+  const newPath = sanitized;
+
+  // Sem isso, um `oldPath` que não existe mais na lista (corrida com outra
+  // aba, ou chamada com um path já renomeado) ainda devolvia um WorkspaceInfo
+  // "de sucesso" — o chamador migrava os dados pra `newPath` sem que ele
+  // jamais tivesse entrado no registro, virando um workspace fantasma: com
+  // dados no disco, mas invisível na lista.
+  if (!workspaces.some(w => w.path === oldPath)) return null;
+
+  if (newPath !== oldPath && workspaces.some(w => w.path === newPath)) {
+    return null;
+  }
+
+  const renamed: WorkspaceInfo = { name: sanitized, path: newPath };
+  const updated = workspaces.map(w => (w.path === oldPath ? renamed : w));
+  return { workspaces: updated, renamed };
+}
+
+/**
  * Renomeia um workspace local (só o registro — mover dados de
  * tabs/collections/environments é responsabilidade de quem chama,
  * já que essas chaves são namespaced pelo path).
@@ -62,21 +93,12 @@ export async function renameWorkspace(
   oldPath: string,
   newName: string
 ): Promise<WorkspaceInfo | null> {
-  const sanitized = sanitizeName(newName);
-  if (!sanitized) return null;
-
-  const newPath = sanitized;
   const workspaces = await listWorkspaces();
+  const result = computeRenamedWorkspaces(workspaces, oldPath, newName);
+  if (!result) return null;
 
-  if (newPath !== oldPath && workspaces.some(w => w.path === newPath)) {
-    return null;
-  }
-
-  const updated = workspaces.map(w =>
-    w.path === oldPath ? { name: sanitized, path: newPath } : w
-  );
-  await saveWorkspaces(updated);
-  return { name: sanitized, path: newPath };
+  await saveWorkspaces(result.workspaces);
+  return result.renamed;
 }
 
 export async function deleteWorkspace(path: string): Promise<void> {

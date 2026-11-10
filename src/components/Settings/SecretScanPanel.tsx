@@ -29,9 +29,11 @@ interface Props {
     roots: CollectionItem[],
     variables: { key: string; value: string }[]
   ) => Promise<void> | void;
+  /** Clique na linha: fecha Settings e abre o item na árvore (AppLayout). */
+  onJumpToItem?: (requestId: string) => void;
 }
 
-export function SecretScanPanel({ collections, onApply }: Props) {
+export function SecretScanPanel({ collections, onApply, onJumpToItem }: Props) {
   const [findings, setFindings] = useState<SecretFinding[] | null>(null);
   // Cópia de trabalho da árvore, tirada na varredura.
   //
@@ -155,7 +157,12 @@ export function SecretScanPanel({ collections, onApply }: Props) {
 
               <div className="mt-2 max-h-72 overflow-y-auto rounded-md border border-pm-border divide-y divide-pm-border/60">
                 {findings!.map((f, i) => (
-                  <div key={`${f.requestId}-${i}`} className="px-2.5 py-2 flex items-start gap-2">
+                  <div
+                    key={`${f.requestId}-${i}`}
+                    onClick={onJumpToItem ? () => onJumpToItem(f.requestId) : undefined}
+                    title={onJumpToItem ? `Open "${f.requestName}" in the tree` : undefined}
+                    className={`px-2.5 py-2 flex items-start gap-2 ${onJumpToItem ? 'cursor-pointer hover:bg-pm-hover transition-colors' : ''}`}
+                  >
                     {f.expired === true ? (
                       <ShieldAlert size={13} className="mt-0.5 shrink-0 text-pm-text-muted" />
                     ) : (
@@ -173,9 +180,11 @@ export function SecretScanPanel({ collections, onApply }: Props) {
                         <span className="text-[10px] font-mono text-pm-text-secondary">
                           {f.location.type === 'header'
                             ? f.location.key
-                            : f.location.type === 'oauth2'
-                              ? `oauth2 · ${f.location.key}`
-                              : `auth · ${f.location.field}`}
+                            : f.location.type === 'exampleHeader'
+                              ? `example response · ${f.location.key}`
+                              : f.location.type === 'oauth2'
+                                ? `oauth2 · ${f.location.key}`
+                                : `auth · ${f.location.field}`}
                         </span>
                         <span className="text-[10px] font-mono text-pm-text-muted">{f.preview}</span>
                         {f.expired === true && (
@@ -187,7 +196,7 @@ export function SecretScanPanel({ collections, onApply }: Props) {
                     </div>
 
                     <button
-                      onClick={() => extract(f)}
+                      onClick={e => { e.stopPropagation(); extract(f) }}
                       disabled={busy}
                       title={`Move the value into {{${f.suggestedVariable}}} and reference it here`}
                       className="shrink-0 flex items-center gap-1 h-6 px-2 rounded text-[10px] border border-pm-border text-pm-text-secondary hover:text-pm-text hover:bg-pm-hover transition-colors cursor-pointer disabled:opacity-50"

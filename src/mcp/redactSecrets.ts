@@ -1,5 +1,6 @@
 import { RequestDetails } from '@/app/types/CollectionItem';
 import { AuthorizationDetails } from '@/app/types/AuthorizationDetails';
+import { looksLikeJwt } from '@/lib/jwt';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Redação de credenciais no que o servidor MCP entrega ao modelo.
@@ -67,5 +68,66 @@ export function redactRequestDetails(request: RequestDetails | undefined): Reque
     ...request,
     headers: redactHeaders(request.headers) ?? request.headers,
     auth: redactAuth(request.auth),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Segredos no RESULTADO de uma execução (run_request, run_collection,
+// get_last_run).
+//
+// Esconder a definição da request não basta: o token que um passo OAuth2
+// obtém, ou que um post-response grava com pm.environment.set, voltava inteiro
+// em variablesSet — e aparecia de novo nos console.log dos scripts, na URL
+// resolvida (?api_key=...) e no body de resposta do login. Daí ia pro modelo
+// e pra transcrição da sessão do Claude em disco.
+//
+// A regra: uma variável é segredo quando o NOME sugere credencial (mesma regex
+// dos headers) ou quando o VALOR tem cara de JWT. Toda ocorrência desses
+// valores em texto livre vira "{{nome}}" — o agente continua vendo de onde o
+// valor sai, só não o valor.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Valores curtos ("true", "1", "pt-BR") num nome como "useAuth" não são
+// credencial, e trocá-los em todo texto destruiria o resultado.
+const MIN_SECRET_LENGTH = 6;
+// URL sem query string em variável como "authUrl" é endereço, não credencial.
+const PLAIN_URL_REGEX = /^https?:\/\/[^?#\s]*$/i;
+
+export const HIDDEN_VALUE = '[hidden — secret value, not shown on purpose]';
+
+export function isSecretVariable(key: string, value: string | undefined | null): boolean {
+  const text = String(value ?? '').trim();
+  if (text.length < MIN_SECRET_LENGTH || isVarReference(text)) return false;
+  if (looksLikeJwt(text)) return true;
+  return SECRET_KEY_REGEX.test(key) && !PLAIN_URL_REGEX.test(text);
+}
+
+export type SecretRedactor = (text: string | undefined | null) => string;
+
+/**
+ * Monta um redator a partir dos environments envolvidos na execução (antes e
+ * depois) e das variáveis que os scripts gravaram no meio do caminho.
+ */
+export function createSecretRedactor(
+  envs: Array<Record<string, string> | undefined | null>,
+  changes: Array<{ key: string; value: string }> = []
+): SecretRedactor {
+  const secrets = new Map<string, string>();
+  const add = (key: string, value: unknown) => {
+    const text = String(value ?? '');
+    if (isSecretVariable(key, text) && !secrets.has(text)) secrets.set(text, key);
+  };
+  for (const env of envs) for (const [key, value] of Object.entries(env ?? {})) add(key, value);
+  for (const change of changes) add(change.key, change.value);
+
+  // Maiores primeiro: um segredo que contém outro tem que ser trocado inteiro.
+  const ordered = [...secrets.entries()].sort((a, b) => b[0].length - a[0].length);
+  return text => {
+    let out = String(text ?? '');
+    if (!out) return out;
+    for (const [value, key] of ordered) {
+      if (out.includes(value)) out = out.split(value).join(`{{${key}}}`);
+    }
+    return out;
   };
 }

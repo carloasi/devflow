@@ -14,8 +14,14 @@
 //     "updateUrl": "https://.../releases/latest",
 //     "updateMessage": "Nova versão com melhorias de load test!",
 //     "blockedUsers": "CarlosSilva, joao.pereira",
-//     "blockedVersions": "1.1.4, 1.1.7-beta"
+//     "blockedVersions": "1.1.4, 1.1.7-beta",
+//     "releases": [
+//       { "version": "1.5.0", "mandatory": true, "notes": "...", "date": "2026-11-10", "url": "" }
+//     ]
 //   }
+//
+// `releases` vem da aba "Releases" (uma linha por versão). A decisão de
+// atualização opcional x obrigatória a partir dela fica em updateDecision.ts.
 //
 // blockedUsers / blockedVersions vêm como string separada por vírgula (uma
 // célula só na planilha) e são splitados aqui. blockedUsers casa pelo nome
@@ -29,6 +35,8 @@
 // explícito, a versão instalada ficar abaixo de minVersion, o usuário atual
 // estar em blockedUsers, ou a versão atual estar em blockedVersions, bloqueia.
 // ─────────────────────────────────────────────────────────────────────────────
+
+import { compareVersions, parseReleases, type ReleaseEntry } from './updateDecision';
 
 // TODO: cole aqui a URL do Web App depois de publicar o Apps Script
 // (Deploy > New deployment > Web app > Execute as: me > Who has access: Anyone).
@@ -44,6 +52,8 @@ export interface AppStatus {
   updateMessage?: string;
   blockedUsers?: string[];
   blockedVersions?: string[];
+  /** Aba "Releases" da planilha: uma linha por versão, com obrigatória sim/não. */
+  releases?: ReleaseEntry[];
 }
 
 // "CarlosSilva, joao.pereira" -> ["CarlosSilva", "joao.pereira"]
@@ -55,19 +65,9 @@ function parseCommaList(value: unknown): string[] {
 
 const FETCH_TIMEOUT_MS = 8000;
 
-// Compara versões no formato "1.2.10" — puramente numérico por segmento (sem
-// suporte a pre-release tags tipo "-beta"; suficiente pro caso de uso aqui).
-// Retorna >0 se a > b, <0 se a < b, 0 se iguais/inválidas.
-export function compareVersions(a: string, b: string): number {
-  const pa = String(a ?? '').trim().split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b ?? '').trim().split('.').map(n => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
+// compareVersions mora em updateDecision.ts (lógica pura, testada no vitest);
+// reexportado aqui pra quem já importava daqui.
+export { compareVersions };
 
 // Usa o comando Rust make_http_request (o mesmo usado pra todas as outras
 // requests do app) em vez de fetch() do browser — Web Apps do Apps Script
@@ -106,6 +106,7 @@ export async function fetchAppStatus(): Promise<AppStatus | null> {
       updateMessage: typeof data.updateMessage === 'string' ? data.updateMessage : undefined,
       blockedUsers: parseCommaList(data.blockedUsers),
       blockedVersions: parseCommaList(data.blockedVersions),
+      releases: parseReleases(data.releases),
     };
   } catch {
     // Rede indisponível, timeout, JSON inválido, etc — fail-open (nunca

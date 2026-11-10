@@ -1,16 +1,29 @@
 'use client';
 
 import { CollectionItem } from '@/app/types/CollectionItem';
-import { redactRequestDetails, redactHeaders } from './redactSecrets';
+import {
+  createSecretRedactor,
+  HIDDEN_VALUE,
+  isSecretVariable,
+  redactHeaders,
+  redactRequestDetails,
+  SecretRedactor,
+} from './redactSecrets';
 import { Environment } from '@/app/types/Environment';
 import { Tab } from '@/app/types/Tab';
 import { PM_API_TYPES } from '@/lib/pmApiTypes';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { buildFlowSteps } from '@/components/LoadTest/buildFlowSteps';
+import { resolveTokenSteps } from '@/components/LoadTest/resolveTokenSteps';
 import { loadLoadTestHistory } from '@/components/LoadTest/loadTestHistory';
 import { LoadTestConfig, LoadTestSnapshot } from '@/components/LoadTest/types';
-import { flattenRequests, runCollectionRequest, RunItemOutcome } from '@/components/CollectionRunner/runCollectionRequest';
+import {
+  flattenRequests,
+  runCollectionRequest,
+  RunItemOutcome,
+  VariableChange,
+} from '@/components/CollectionRunner/runCollectionRequest';
 import { findNodeById } from '@/components/collection-tree/utils/tree.utils';
 import { cloneRequestNode, copyName } from './duplicateRequest';
 import { loadLastRun, loadAllLastRuns } from '@/components/CollectionRunner/runHistory';
@@ -59,6 +72,15 @@ export interface McpContext {
   // Grava uma variável num environment (token OAuth do get_oauth2_token).
   // Só local, e sem marcar o environment pra push: token não vai pro GitHub.
   setEnvironmentVariable: (environmentName: string, key: string, value: string) => Promise<void>;
+  // Leva pro environment o que os scripts de uma execução gravaram — o mesmo
+  // que o botão Send e o Collection Runner fazem. `before` é o mapa com que a
+  // execução começou; só as keys que mudaram em relação a ele são escritas.
+  applyEnvironmentChanges: (
+    environmentId: string,
+    before: Record<string, string>,
+    after: Record<string, string>,
+    requestName: string
+  ) => Promise<void>;
 }
 
 export interface McpToolDefinition {
@@ -220,7 +242,7 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: 'run_request',
     description:
-      'Execute one saved request through DevFlow, using the app\'s own engine (variable resolution, auth, and pre/post-response scripts all run exactly as they do when the user clicks Send). Returns the HTTP status, timing, the response body, the pm.test results, console.log output and any variables the scripts set.',
+      'Execute one saved request through DevFlow, using the app\'s own engine (variable resolution, auth, and pre/post-response scripts all run exactly as they do when the user clicks Send). It runs the SAVED version of the request, not unsaved edits in an open tab. Variables the scripts set are saved to the environment, like Send does, so running step 1 and then step 2 of a flow works (savedToEnvironment lists them). Returns the HTTP status, timing, the response body, the pm.test results, console.log output and any variables the scripts set. Secret values (tokens, keys, passwords — by variable name, or anything shaped like a JWT) are never returned: wherever one appears, in the body, the logs or the URL, it shows as its "{{variable}}" name, and a secret variable that a script set comes back as hidden. That is on purpose — do not ask the user to paste it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -240,7 +262,7 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: 'run_collection',
     description:
-      'Run every request inside a folder (subfolders included), in order, carrying environment variables from one step to the next (so a login step can feed the next request). Returns the per-step result (tests, logs, variables set) and a summary. Each step gets a verdict: when the request has pm.test assertions, THE TESTS decide — a 400 that a test expects is a pass (negative test cases). Without tests, a 4xx/5xx counts as a failure. Read summary.tests and summary.failedSteps, not the HTTP statuses, to judge a test suite.',
+      'Run every request inside a folder (subfolders included), in order, carrying environment variables from one step to the next (so a login step can feed the next request). Returns the per-step result (tests, logs, variables set) and a summary. Each step gets a verdict: when the request has pm.test assertions, THE TESTS decide — a 400 that a test expects is a pass (negative test cases). Without tests, a 4xx/5xx counts as a failure. Read summary.tests and summary.failedSteps, not the HTTP statuses, to judge a test suite. Secret values are hidden the same way as in run_request (shown as "{{variable}}").',
     inputSchema: {
       type: 'object',
       properties: {
@@ -273,7 +295,7 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: 'run_load_test',
     description:
-      'Run a load test against a request or a whole folder (flow), using the same Rust engine as the Load Test panel. Blocks until the run finishes and returns the final metrics: RPS, latency percentiles, error rate, status code breakdown, script errors and threshold results.',
+      'Run a load test against a request or a whole folder (flow), using the same Rust engine as the Load Test panel. Blocks until the run finishes and returns the final metrics: RPS, latency percentiles, error rate, status code breakdown, script errors and threshold results. OAuth 2.0 token steps (no URL) are handled before the load starts: the token is obtained once (or reused while valid), stored in the environment, and shared by every virtual user — the token step itself is not put under load.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -517,13 +539,17 @@ function resolveFolder(ctx: McpContext, reference: string): CollectionItem {
   const folders: { id: string; name: string; path: string; requestCount: number }[] = [];
   collectFolders(ctx.collections, [], folders);
 
-  const normalized = wanted.toLowerCase();
+  // Final do caminho só vale em fronteira de segmento: "Flow" é a pasta
+  // "Flow", não "Booking Flow". Sem isso a referência casava com a pasta
+  // errada e o run_collection a executava sem avisar.
+  const normalized = wanted.toLowerCase().replace(/\s*\/\s*/g, ' / ');
+  const exact = folders.filter(f => f.path.toLowerCase() === normalized);
   const matches =
-    folders.filter(f => f.path.toLowerCase() === normalized).length > 0
-      ? folders.filter(f => f.path.toLowerCase() === normalized)
+    exact.length > 0
+      ? exact
       : folders.filter(
           f =>
-            f.path.toLowerCase().endsWith(normalized) ||
+            f.path.toLowerCase().endsWith(` / ${normalized}`) ||
             f.name.toLowerCase() === normalized
         );
 
@@ -772,21 +798,76 @@ function stepVerdict(outcome: RunItemOutcome): { verdict: 'passed' | 'failed'; f
   return { verdict: 'passed' };
 }
 
-function summarizeOutcome(name: string, outcome: RunItemOutcome) {
+// Variável gravada por um passo, como o agente pode vê-la: o nome sempre, o
+// valor só quando não é credencial. De um JWT sai o que o get_oauth2_token já
+// mostra (validade, usuário, audience), que é o que serve pra diagnosticar.
+function maskVariableChange(change: VariableChange, redact: SecretRedactor) {
+  if (!isSecretVariable(change.key, change.value)) {
+    return { ...change, value: redact(change.value) };
+  }
+  const info = describeToken(change.value);
+  return { ...change, value: HIDDEN_VALUE, ...(info.readable ? { token: info } : {}) };
+}
+
+// Todo texto livre que sai de uma execução passa pelo redator: um script que
+// faz console.log(pm.environment.get('token')), uma URL com ?api_key= ou o body
+// do login devolvendo o access_token entregariam o segredo do mesmo jeito.
+function summarizeOutcome(name: string, outcome: RunItemOutcome, redact: SecretRedactor) {
+  const verdict = stepVerdict(outcome);
   return {
     request: name,
-    ...stepVerdict(outcome),
+    verdict: verdict.verdict,
+    ...(verdict.failureReason ? { failureReason: redact(verdict.failureReason) } : {}),
     status: outcome.status,
     httpStatus: outcome.httpStatus,
     responseTimeMs: outcome.responseTime,
-    error: outcome.errorMessage,
-    scriptError: outcome.scriptError,
-    resolvedUrl: outcome.resolvedUrl,
-    tests: outcome.tests,
-    logs: outcome.logs,
-    variablesSet: outcome.variablesSet,
-    bodySnippet: outcome.responseBodySnippet,
+    error: outcome.errorMessage === undefined ? undefined : redact(outcome.errorMessage),
+    scriptError: outcome.scriptError === undefined ? undefined : redact(outcome.scriptError),
+    resolvedUrl: outcome.resolvedUrl === undefined ? undefined : redact(outcome.resolvedUrl),
+    tests: redactTests(outcome.tests, redact),
+    logs: (outcome.logs ?? []).map(log => ({ ...log, message: redact(log.message) })),
+    variablesSet: (outcome.variablesSet ?? []).map(change => maskVariableChange(change, redact)),
+    bodySnippet: outcome.responseBodySnippet === undefined ? undefined : redact(outcome.responseBodySnippet),
   };
+}
+
+function redactTests(tests: RunItemOutcome['tests'] | undefined, redact: SecretRedactor) {
+  return (tests ?? []).map(test => ({ ...test, name: redact(test.name), message: redact(test.message) }));
+}
+
+// Redator de uma execução: env de entrada, env de saída e tudo que os scripts
+// gravaram no caminho (inclusive o que um passo seguinte apagou).
+function redactorFor(envBefore: Record<string, string>, outcomes: RunItemOutcome[]): SecretRedactor {
+  return createSecretRedactor(
+    [envBefore, ...outcomes.map(o => o.envAfter)],
+    outcomes.flatMap(o => o.variablesSet ?? [])
+  );
+}
+
+const ENV_NOT_SAVED_NOTE =
+  'No environment is selected in DevFlow, so variables set by scripts were used only inside this call and not saved. Pass environment to keep them.';
+
+// Keys cujo valor mudou (ou que sumiram) entre dois mapas de env.
+function changedKeys(before: Record<string, string>, after: Record<string, string>): string[] {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...keys].filter(key => before[key] !== after[key]);
+}
+
+// Grava no environment o que a execução mudou. Antes o MCP descartava o
+// envAfter: o passo 1 rodado por run_request não alimentava o passo 2, e cada
+// run_request de um passo de token abria o login de novo.
+async function persistEnvironment(
+  ctx: McpContext,
+  env: Environment | undefined,
+  before: Record<string, string>,
+  after: Record<string, string>,
+  requestName: string
+): Promise<{ savedToEnvironment?: string[]; note?: string }> {
+  const keys = changedKeys(before, after);
+  if (keys.length === 0) return env ? { savedToEnvironment: [] } : {};
+  if (!env) return { note: ENV_NOT_SAVED_NOTE };
+  await ctx.applyEnvironmentChanges(env.id, before, after, requestName);
+  return { savedToEnvironment: keys };
 }
 
 function failed(outcome: RunItemOutcome): boolean {
@@ -1150,16 +1231,23 @@ export async function executeMcpTool(
         throw new Error(`Environment "${args.environment}" not found.`);
       }
 
-      const outcome = await runCollectionRequest(item, envMapOf(env));
-      const summary = summarizeOutcome(item.name, outcome);
+      const envBefore = envMapOf(env);
+      const outcome = await runCollectionRequest(item, envBefore);
+      const saved = await persistEnvironment(ctx, env, envBefore, outcome.envAfter, item.name);
+      const redact = redactorFor(envBefore, [outcome]);
+      const summary = summarizeOutcome(item.name, outcome, redact);
 
       // O snippet de 2000 chars do Runner serve pra UI; aqui o agente
       // precisa do corpo inteiro pra escrever assertion contra o shape real.
       const { bodySnippet, ...rest } = summary;
       return {
         environment: env?.name ?? null,
+        ...saved,
         ...rest,
-        ...truncate(outcome.fullResponseBody ?? bodySnippet ?? '', args.maxBodyBytes),
+        ...truncate(
+          outcome.fullResponseBody !== undefined ? redact(outcome.fullResponseBody) : bodySnippet ?? '',
+          args.maxBodyBytes
+        ),
       };
     }
 
@@ -1180,21 +1268,36 @@ export async function executeMcpTool(
 
       // O env vai sendo repassado entre as etapas — é o que permite a
       // request 1 gravar um token e a request 2 já usar {{token}}.
-      let envMap = envMapOf(env);
-      const steps: ReturnType<typeof summarizeOutcome>[] = [];
+      const envBefore = envMapOf(env);
+      let envMap = envBefore;
+      const outcomes: { name: string; outcome: RunItemOutcome }[] = [];
 
+      const savedKeys = new Set<string>();
       for (const req of requests) {
         const outcome = await runCollectionRequest(req, envMap);
+        // Passo a passo, como o Runner: se o fluxo parar no meio, o que os
+        // passos anteriores gravaram (o token, um id) já está no environment.
+        const saved = await persistEnvironment(ctx, env, envMap, outcome.envAfter, req.name);
+        saved.savedToEnvironment?.forEach(key => savedKeys.add(key));
         envMap = outcome.envAfter;
-        steps.push(summarizeOutcome(req.name, outcome));
+        outcomes.push({ name: req.name, outcome });
         if (args.stopOnFailure && failed(outcome)) break;
       }
+
+      // Resume só no fim: o token que o passo 1 obtém aparece nos logs e
+      // bodies dos passos seguintes, então o redator precisa conhecer TODOS
+      // os segredos do run antes de mascarar qualquer passo.
+      const redact = redactorFor(envBefore, outcomes.map(o => o.outcome));
+      const steps = outcomes.map(({ name, outcome }) => summarizeOutcome(name, outcome, redact));
 
       const allTests = steps.flatMap(st => st.tests ?? []);
       const failedSteps = steps.filter(st => st.verdict === 'failed');
       return {
         folder: folder.name,
         environment: env?.name ?? null,
+        ...(env
+          ? { savedToEnvironment: [...savedKeys] }
+          : { note: ENV_NOT_SAVED_NOTE }),
         completed: steps.length,
         total: requests.length,
         // Passos com veredito "failed" (ver stepVerdict) — não é a contagem
@@ -1273,18 +1376,31 @@ export async function executeMcpTool(
 
       // Request única roda como um fluxo de um passo só — mesma coisa que o
       // painel de Load Test faz.
-      const requests = item.type === 'request' ? [item] : flattenRequests(item.item ?? []);
-      if (requests.length === 0) throw new Error(`"${item.name}" has no requests to run.`);
+      const allRequests = item.type === 'request' ? [item] : flattenRequests(item.item ?? []);
+      if (allRequests.length === 0) throw new Error(`"${item.name}" has no requests to run.`);
 
-      const flow = buildFlowSteps(requests);
-      if (flow.some(step => !step.url.trim())) {
-        throw new Error('One of the requests in the flow has an empty URL.');
+      // Passo de token sai do flow: o token é obtido uma vez antes da carga
+      // (ver resolveTokenSteps) e gravado no environment, como no run_collection.
+      const envBefore = envMapOf(env);
+      const prepared = await resolveTokenSteps(allRequests, envBefore);
+      await persistEnvironment(ctx, env, envBefore, prepared.envMap, item.name);
+      if (prepared.requests.length === 0) {
+        throw new Error(`"${item.name}" only has token steps — there is no request to put under load.`);
+      }
+
+      const flow = buildFlowSteps(prepared.requests);
+      // Mesmo filtro do buildFlowSteps: gRPC e item sem request não entram.
+      const emptyUrl = prepared.requests.find(
+        r => !!r.request && r.protocol !== 'grpc' && !r.request.url?.trim()
+      );
+      if (emptyUrl) {
+        throw new Error(`"${emptyUrl.name}" has an empty URL.`);
       }
 
       const iterationsPerVu = Number(args.iterationsPerVu) || undefined;
       const config: LoadTestConfig = {
         flow,
-        environment: envMapOf(env),
+        environment: prepared.envMap,
         vus: Math.max(1, Number(args.vus) || 5),
         ...(iterationsPerVu
           ? { iterationsPerVu }
@@ -1336,6 +1452,15 @@ export async function executeMcpTool(
         item: item.name,
         environment: env?.name ?? null,
         steps: flow.length,
+        ...(prepared.tokenSteps.length > 0
+          ? {
+              tokenSteps: prepared.tokenSteps.map(({ item: step, outcome }) => ({
+                request: step.name,
+                // "Reused…" ou "New token stored in {{x}}…" — nunca o token.
+                result: outcome.responseBodySnippet ?? null,
+              })),
+            }
+          : {}),
         config: {
           vus: config.vus,
           durationSecs: config.durationSecs ?? null,
@@ -1412,6 +1537,13 @@ export async function executeMcpTool(
 
       const shown = args.onlyFailures ? failed : entries;
 
+      // O run guardado não tem o env de entrada; o environment selecionado
+      // agora é a melhor aproximação, e o que os passos gravaram vem junto.
+      const redact = redactorFor(
+        envMapOf(resolveEnvironment(ctx)),
+        entries.map(e => e.outcome!)
+      );
+
       return {
         collection: run.collectionName,
         finishedAt: run.finishedAt,
@@ -1429,13 +1561,16 @@ export async function executeMcpTool(
             iteration: entry.iteration,
             status: o.httpStatus ?? null,
             responseTimeMs: o.responseTime,
-            error: o.errorMessage ?? null,
-            scriptError: o.scriptError ?? null,
-            resolvedUrl: o.resolvedUrl ?? null,
-            tests: o.tests,
+            error: o.errorMessage != null ? redact(o.errorMessage) : null,
+            scriptError: o.scriptError != null ? redact(o.scriptError) : null,
+            resolvedUrl: o.resolvedUrl != null ? redact(o.resolvedUrl) : null,
+            tests: redactTests(o.tests, redact),
             // É o campo que resolve a pergunta "qual resposta eu devo
             // asseverar?" sem precisar reexecutar nada.
-            responseBody: o.fullResponseBody ?? o.responseBodySnippet ?? null,
+            responseBody: (() => {
+              const body = o.fullResponseBody ?? o.responseBodySnippet;
+              return body != null ? redact(body) : null;
+            })(),
           };
         }),
       };

@@ -51,7 +51,10 @@ export interface SecretFinding {
   location:
     | { type: 'auth'; field: 'token' | 'password' | 'value' }
     | { type: 'oauth2'; key: string }
-    | { type: 'header'; key: string };
+    | { type: 'header'; key: string }
+    // Header da RESPOSTA salva num Example — diferente de `header` (que é da
+    // request): mora em `item.example.headers`, não em `item.request.headers`.
+    | { type: 'exampleHeader'; key: string };
   /** O valor mascarado — o original nunca sai daqui. */
   preview: string;
   /** Só para JWT: expirou? `null` quando não dá pra ler o `exp`. */
@@ -84,6 +87,43 @@ function isLiteral(value: string | undefined): value is string {
   if (!value) return false;
   const text = value.trim();
   return text.length >= MIN_SECRET_LENGTH && !text.includes('{{');
+}
+
+/**
+ * Mesma regra do scanner (nome do campo sugere credencial, valor literal e
+ * comprido o bastante) — mas sem exigir uma `CollectionItem` inteira, pra
+ * dar pra usar linha a linha em qualquer tela que mostre headers/variáveis,
+ * como a de comparação com o GitHub (ver SyncDiff/EntryDiffTable.tsx).
+ */
+export function isLikelySecretValue(key: string | undefined, value: string | undefined): boolean {
+  return !!key && SECRET_KEY_REGEX.test(key) && isLiteral(value);
+}
+
+/**
+ * Mascara os campos sensíveis de um `auth` (bearer/basic/apikey/oauth2)
+ * antes de mostrar em texto puro — mesma ideia do header, só que pro objeto
+ * inteiro, pra telas que exibem o JSON cru em vez de campo a campo.
+ */
+export function redactAuthForDisplay(auth: unknown): unknown {
+  if (!auth || typeof auth !== 'object') return auth;
+  const copy: Record<string, unknown> = { ...(auth as Record<string, unknown>) };
+
+  for (const field of ['token', 'password', 'value'] as const) {
+    const v = copy[field];
+    if (typeof v === 'string' && isLiteral(v)) copy[field] = maskValue(v);
+  }
+
+  if (Array.isArray(copy.oauth2)) {
+    // Lista fechada, não a regra genérica por nome: `tokenName` casa com
+    // /token/ mas é rótulo, não credencial (mesmo motivo do scanRequest).
+    copy.oauth2 = (copy.oauth2 as { key: string; value: string }[]).map((entry) =>
+      entry && OAUTH2_SECRET_FIELDS.has(entry.key) && isLiteral(entry.value)
+        ? { ...entry, value: maskValue(entry.value) }
+        : entry
+    );
+  }
+
+  return copy;
 }
 
 export function maskValue(value: string): string {
@@ -198,16 +238,40 @@ function scanRequest(item: CollectionItem, path: string[]): SecretFinding[] {
   return out;
 }
 
+/**
+ * Headers da RESPOSTA salva (`item.example`), não da request.
+ *
+ * Diferente de `item.request` dentro de um example (cópia da request que o
+ * gerou, por isso ignorada acima): isto é um dado PRÓPRIO do example — uma
+ * API que ecoa o Authorization de volta na resposta vaza o segredo só aqui,
+ * nunca na request. Sem isto o export deixava passar esse caso inteiro.
+ */
+function scanExampleHeaders(item: CollectionItem, path: string[]): SecretFinding[] {
+  const out: SecretFinding[] = [];
+  for (const header of item.example?.headers ?? []) {
+    if (!SECRET_KEY_REGEX.test(header.key) || !isLiteral(header.value)) continue;
+    out.push(
+      buildFinding(item, path, 'header', { type: 'exampleHeader', key: header.key }, header.value, header.key)
+    );
+  }
+  return out;
+}
+
 export function scanTree(roots: CollectionItem[] | undefined | null): SecretFinding[] {
   const out: SecretFinding[] = [];
 
   const walk = (items: CollectionItem[], path: string[]) => {
     for (const item of items) {
       const here = [...path, item.name];
-      // Examples guardam um retrato da request que os gerou; o segredo lá é
-      // cópia do que já foi apontado na request, e listar os dois dobraria a
-      // lista sem acrescentar um lugar para corrigir.
-      if (item.type !== 'example') out.push(...scanRequest(item, here));
+      if (item.type === 'example') {
+        // O `request` dentro de um example é cópia do que já foi apontado na
+        // request de origem — listar os dois dobraria a lista sem
+        // acrescentar um lugar pra corrigir. Os headers da RESPOSTA salva
+        // são outra coisa (ver scanExampleHeaders).
+        out.push(...scanExampleHeaders(item, here));
+      } else {
+        out.push(...scanRequest(item, here));
+      }
       if (item.item?.length) walk(item.item, here);
     }
   };
@@ -250,6 +314,10 @@ export interface AppliedSecrets {
 }
 
 function readAt(item: CollectionItem, location: SecretFinding['location']): string {
+  if (location.type === 'exampleHeader') {
+    return item.example?.headers?.find(h => h.key === location.key)?.value ?? '';
+  }
+
   const req = item.request;
   if (!req) return '';
   if (location.type === 'auth') return req.auth?.[location.field] ?? '';
@@ -264,6 +332,17 @@ function writeAt(
   location: SecretFinding['location'],
   next: string
 ): CollectionItem {
+  if (location.type === 'exampleHeader') {
+    if (!item.example) return item;
+    return {
+      ...item,
+      example: {
+        ...item.example,
+        headers: item.example.headers.map(h => (h.key === location.key ? { ...h, value: next } : h)),
+      },
+    };
+  }
+
   const req = item.request;
   if (!req) return item;
 

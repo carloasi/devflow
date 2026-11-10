@@ -36,10 +36,6 @@ export interface Tab {
   scripts?: {
   preRequest: string;
     postResponse: string;
-    preRequestError?: boolean;
-    postResponseError?: boolean;
-    preRequestLog?: string;
-    postResponseLog?: string;
   };
   activeRequestTab?: RequestSubTab;
   isDirty?: boolean;

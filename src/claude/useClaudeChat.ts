@@ -125,6 +125,12 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
   const conversationIdRef = useRef<string>(`conv-${Date.now()}`);
   // Texto do assistente da vez, montado a partir dos deltas do stream.
   const streamingRef = useRef<{ id: string; text: string } | null>(null);
+  // Envio cujos eventos ainda interessam. Linhas e "done" de qualquer outro
+  // (um cancelado pelo Stop, ou o de uma conversa que o usuário trocou) são
+  // descartados: o processo antigo ainda despeja o que tinha no pipe depois do
+  // kill, e antes isso caía na conversa nova — inclusive o session_id dele,
+  // que fazia a conversa nova dar --resume na sessão errada.
+  const activeRunIdRef = useRef<string | null>(null);
   const mcpRef = useRef(mcp);
   mcpRef.current = mcp;
 
@@ -219,11 +225,16 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
     let unlistenDone: (() => void) | undefined;
     let cancelled = false;
 
-    listen<{ line: string }>('claude-chat-line', e => handleLine(e.payload.line))
+    listen<{ runId: string; line: string }>('claude-chat-line', e => {
+      if (e.payload.runId !== activeRunIdRef.current) return;
+      handleLine(e.payload.line);
+    })
       .then(fn => (cancelled ? fn() : (unlistenLine = fn)))
       .catch(err => console.error('Erro ao escutar claude-chat-line:', err));
 
-    listen<{ code: number | null; stderr: string }>('claude-chat-done', e => {
+    listen<{ runId: string; code: number | null; stderr: string }>('claude-chat-done', e => {
+      if (e.payload.runId !== activeRunIdRef.current) return;
+      activeRunIdRef.current = null;
       streamingRef.current = null;
       setRunning(false);
       const { code, stderr } = e.payload;
@@ -247,6 +258,9 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
 
     appendMessage({ id: nextId(), role: 'user', text: trimmed });
     setRunning(true);
+    const runId = nextId();
+    activeRunIdRef.current = runId;
+    streamingRef.current = null;
 
     // Passa o servidor MCP local já configurado: o Claude enxerga as
     // collections deste app sem o usuário rodar `claude mcp add`.
@@ -282,21 +296,33 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
         // Mesmo perfil do CLI usado pela autenticacao; se divergir, o envio
         // procuraria a credencial num diretorio onde ela nao esta.
         isolated: readClaudeIsolated(),
+        runId,
       });
     } catch (e: any) {
+      // Erro de um envio já abandonado não é desta conversa.
+      if (activeRunIdRef.current !== runId) return;
+      activeRunIdRef.current = null;
       appendMessage({ id: nextId(), role: 'error', text: e?.message ?? String(e) });
       setRunning(false);
     }
   }, [running, appendMessage]);
 
-  const cancel = useCallback(async () => {
+  // Larga o envio em curso: a partir daqui nada dele entra na conversa.
+  const abandonRun = useCallback(async () => {
+    if (!activeRunIdRef.current) return;
+    activeRunIdRef.current = null;
+    streamingRef.current = null;
+    setRunning(false);
     try {
       await invoke('claude_cancel');
     } catch (e) {
       console.error('Erro ao cancelar o Claude:', e);
     }
-    setRunning(false);
   }, []);
+
+  const cancel = useCallback(async () => {
+    await abandonRun();
+  }, [abandonRun]);
 
   // Persiste a conversa a cada mudança. Roda com um debounce curto porque
   // o texto chega token a token — sem isso seria uma escrita em
@@ -321,6 +347,9 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
   }, []);
 
   const reset = useCallback(() => {
+    // Trocar de conversa com o Claude ainda respondendo: o que ele mandar
+    // depois pertence à conversa antiga, não à nova.
+    void abandonRun();
     // A conversa atual já está salva pelo efeito acima; aqui só se começa
     // outra, com id e sessão novos.
     sessionIdRef.current = null;
@@ -328,27 +357,29 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
     conversationIdRef.current = `conv-${Date.now()}`;
     setMessages([]);
     setHistory(listConversations());
-  }, []);
+  }, [abandonRun]);
 
   const loadConversation = useCallback((id: string) => {
     const found = listConversations().find(c => c.id === id);
     if (!found) return;
+    void abandonRun();
     conversationIdRef.current = found.id;
     // Restaura a sessão do CLI: continuar de onde parou em vez de recomeçar.
     sessionIdRef.current = found.sessionId;
     streamingRef.current = null;
     setMessages(normalizeMessageIds(found.messages));
-  }, []);
+  }, [abandonRun]);
 
   const removeConversation = useCallback((id: string) => {
     deleteStoredConversation(id);
     setHistory(listConversations());
     if (conversationIdRef.current === id) {
+      void abandonRun();
       conversationIdRef.current = `conv-${Date.now()}`;
       sessionIdRef.current = null;
       setMessages([]);
     }
-  }, []);
+  }, [abandonRun]);
 
   return {
     messages,

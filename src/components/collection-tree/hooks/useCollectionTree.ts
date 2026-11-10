@@ -9,6 +9,7 @@ import {
   duplicateNode,
   filterTree,
   pasteNodes,
+  pasteNodesBeside,
   removeNode,
   renameNode,
   toggleStarNode,
@@ -17,6 +18,7 @@ import { save } from '@tauri-apps/plugin-dialog'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { ParsedCurlRequest } from '@/lib/curlParser'
 import { toPostmanUrl as buildPostmanUrl } from '@/lib/postmanUrl'
+import { toPostmanScript } from '@/lib/postmanScriptCompat'
 
 interface Params {
   items: CollectionItem[]
@@ -125,7 +127,7 @@ function toPostmanEvents(scripts: RequestDetails['scripts']) {
       listen: 'prerequest',
       script: {
         type: 'text/javascript',
-        exec: scripts.preRequest.split('\n'),
+        exec: toPostmanScript(scripts.preRequest).code.split(/\r?\n/),
       },
     })
   }
@@ -135,7 +137,7 @@ function toPostmanEvents(scripts: RequestDetails['scripts']) {
       listen: 'test',
       script: {
         type: 'text/javascript',
-        exec: scripts.postResponse.split('\n'),
+        exec: toPostmanScript(scripts.postResponse).code.split(/\r?\n/),
       },
     })
   }
@@ -486,6 +488,13 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
     onUpdateItems(pasteNodes(items, parentId, cloned))
   }, [items, onUpdateItems])
 
+  // Mesma clonagem do pasteItems, mas como irmão de targetId — logo antes ou
+  // logo depois dele — em vez de sempre no fim da lista do pai.
+  const pasteItemsBeside = useCallback((targetId: string, nodes: CollectionItem[], position: 'before' | 'after') => {
+    const cloned = nodes.map(cloneItemWithNewIds)
+    onUpdateItems(pasteNodesBeside(items, targetId, cloned, position))
+  }, [items, onUpdateItems])
+
   const filteredItems = useMemo(() => {
     if (!search) return items
     return filterTree(items, search)
@@ -509,6 +518,7 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
       export: exportCollection,
       createRequestFromCurl,
       pasteItems,
+      pasteItemsBeside,
     },
   }
 }

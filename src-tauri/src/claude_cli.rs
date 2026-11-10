@@ -20,13 +20,29 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-fn running_child() -> &'static Mutex<Option<Child>> {
-    static CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+// O processo em execução, junto com o id do envio que o criou.
+//
+// O id existe porque o slot é um só: sem ele, clicar Stop e mandar outra
+// mensagem logo em seguida fazia o fim do envio ANTIGO (que só termina de ler
+// o stdout depois do kill) tirar do slot o processo NOVO — o envio velho ficava
+// esperando o novo, o novo emitia "done" sem código enquanto ainda rodava, e o
+// Stop seguinte não achava nada pra matar.
+struct RunningChild {
+    run_id: String,
+    child: Child,
+}
+
+fn running_child() -> &'static Mutex<Option<RunningChild>> {
+    static CHILD: OnceLock<Mutex<Option<RunningChild>>> = OnceLock::new();
     CHILD.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeLineEvent {
+    // Envio a que a linha pertence: o frontend descarta o que vier de um envio
+    // que ele já cancelou ou abandonou.
+    run_id: String,
     // Linha crua do stream-json. O parsing fica no frontend, junto com a
     // renderização — assim adicionar suporte a um tipo de evento novo não
     // exige recompilar o Rust.
@@ -34,9 +50,71 @@ struct ClaudeLineEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeDoneEvent {
+    run_id: String,
     code: Option<i32>,
     stderr: String,
+}
+
+// Ferramentas nativas do Claude Code que o painel nunca usa. As do MCP do
+// DevFlow (mcp__devflow__*) ficam de fora desta lista e seguem liberadas.
+const PANEL_DISALLOWED_TOOLS: &str =
+    "Bash,BashOutput,KillShell,Read,Edit,MultiEdit,Write,NotebookEdit,Glob,Grep,WebFetch,WebSearch";
+
+/// Arquivo do --mcp-config de um envio. Apagado no Drop, então some em
+/// qualquer saída do claude_send — fim normal, erro ou cancelamento.
+struct TempConfigFile {
+    path: std::path::PathBuf,
+}
+
+impl TempConfigFile {
+    fn write(app: &AppHandle, run_id: &str, content: &str) -> Result<Self, String> {
+        let dir = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| format!("Could not find the app config folder: {e}"))?
+            .join("claude-panel");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+        // O run_id vem do frontend: no nome do arquivo só entra o que é
+        // seguro num caminho.
+        let safe: String = run_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(80)
+            .collect();
+        let path = dir.join(format!("mcp-{safe}.json"));
+        std::fs::write(&path, content)
+            .map_err(|e| format!("Could not write the MCP config for Claude: {e}"))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Mata o processo e, no Windows, a árvore inteira dele.
+///
+/// No fallback `cmd /C claude` (instalação via npm) o filho direto é o
+/// cmd.exe; o `claude` de verdade é um node neto. O TerminateProcess do
+/// start_kill derruba só o cmd.exe — o node seguia rodando, com o pipe do
+/// stdout aberto, e as respostas continuavam chegando depois do Stop.
+fn kill_tree(child: &mut Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .status();
+    }
+    let _ = child.start_kill();
 }
 
 /// Aponta o CLI pra um diretório de configuração próprio do DevFlow.
@@ -259,11 +337,11 @@ pub async fn claude_available(
 
 #[tauri::command]
 pub fn claude_cancel() {
-    if let Ok(mut slot) = running_child().lock() {
-        if let Some(child) = slot.as_mut() {
-            let _ = child.start_kill();
-        }
-        *slot = None;
+    // Tira do slot antes de matar: o taskkill é síncrono e não deve rodar
+    // segurando o lock.
+    let running = running_child().lock().ok().and_then(|mut slot| slot.take());
+    if let Some(mut running) = running {
+        kill_tree(&mut running.child);
     }
 }
 
@@ -288,10 +366,21 @@ pub async fn claude_send(
     binary_path: Option<String>,
     api_key: Option<String>,
     isolated: bool,
+    run_id: Option<String>,
 ) -> Result<(), String> {
     claude_cancel();
 
+    // Frontend antigo (sem runId) continua funcionando: ganha um id local.
+    let run_id = run_id.filter(|id| !id.trim().is_empty()).unwrap_or_else(|| {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        format!("local-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    });
+
     let mut cmd = build_command(binary_path);
+    // Se o envio for abandonado no meio (erro ao escrever o prompt, task
+    // derrubada), o processo não fica órfão.
+    cmd.kill_on_drop(true);
     apply_config_dir(&mut cmd, &app, isolated);
 
     // Com uma chave aqui, o CLI passa a cobrar pela API (Console) em vez de
@@ -321,12 +410,31 @@ pub async fn claude_send(
     // continua.
     cmd.arg("--permission-mode").arg("dontAsk");
 
+    // Só o MCP do DevFlow, nunca os do usuário. Sem isto, com o perfil
+    // compartilhado (isolated=false) o painel carregava também os servidores
+    // MCP globais da pessoa (~/.claude.json).
+    cmd.arg("--strict-mcp-config");
+    // Nem shell, nem arquivo, nem web. O dontAsk só nega o que não está
+    // pré-aprovado — e no perfil compartilhado valem as regras de allow globais
+    // do usuário (um "Bash(*)" no settings.json dele, por exemplo). O system
+    // prompt do painel já diz que essas ferramentas não existem aqui; isto faz
+    // valer.
+    cmd.arg("--disallowedTools").arg(PANEL_DISALLOWED_TOOLS);
+
     if let Some(tools) = allowed_tools.filter(|t| !t.trim().is_empty()) {
         cmd.arg("--allowedTools").arg(tools);
     }
-    if let Some(config) = mcp_config.filter(|c| !c.trim().is_empty()) {
-        cmd.arg("--mcp-config").arg(config);
-    }
+    // O config leva o token do MCP. Por argv ele ficava visível na lista de
+    // processos — o mesmo motivo que já fazia a API key ir por variável de
+    // ambiente. Vai num arquivo do diretório do app, apagado no fim do envio.
+    let _mcp_config_file = match mcp_config.filter(|c| !c.trim().is_empty()) {
+        Some(config) => {
+            let file = TempConfigFile::write(&app, &run_id, &config)?;
+            cmd.arg("--mcp-config").arg(&file.path);
+            Some(file)
+        }
+        None => None,
+    };
     if let Some(extra) = append_system_prompt.filter(|s| !s.trim().is_empty()) {
         cmd.arg("--append-system-prompt").arg(extra);
     }
@@ -366,7 +474,10 @@ pub async fn claude_send(
     let stderr = child.stderr.take();
 
     if let Ok(mut slot) = running_child().lock() {
-        *slot = Some(child);
+        *slot = Some(RunningChild {
+            run_id: run_id.clone(),
+            child,
+        });
     }
 
     // stderr num task à parte, pra não bloquear a leitura do stdout.
@@ -390,7 +501,13 @@ pub async fn claude_send(
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let _ = app.emit("claude-chat-line", ClaudeLineEvent { line });
+                    let _ = app.emit(
+                        "claude-chat-line",
+                        ClaudeLineEvent {
+                            run_id: run_id.clone(),
+                            line,
+                        },
+                    );
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -403,14 +520,21 @@ pub async fn claude_send(
 
     // Tira o child do mutex ANTES do await: o guard do std::sync::Mutex não
     // é Send, então segurá-lo através de um .await nem compila.
+    //
+    // Só leva o que é DESTE envio. Se o slot tem outro id, este foi cancelado
+    // e um envio novo já ocupou o lugar — aquele processo não é nosso.
     let child_opt = {
         let mut slot = running_child().lock().map_err(|e| e.to_string())?;
-        slot.take()
+        if slot.as_ref().is_some_and(|r| r.run_id == run_id) {
+            slot.take()
+        } else {
+            None
+        }
     };
 
     let status = match child_opt {
-        Some(mut child) => child.wait().await.ok(),
-        None => None, // cancelado pelo usuário
+        Some(mut running) => running.child.wait().await.ok(),
+        None => None, // cancelado pelo usuário (ou substituído por outro envio)
     };
 
     let stderr_text = stderr_task.await.unwrap_or_default();
@@ -418,6 +542,7 @@ pub async fn claude_send(
     let _ = app.emit(
         "claude-chat-done",
         ClaudeDoneEvent {
+            run_id,
             code: status.and_then(|s| s.code()),
             stderr: stderr_text,
         },

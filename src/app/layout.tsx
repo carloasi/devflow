@@ -7,6 +7,7 @@ import { ThemeProvider } from "@/components/ThemeContext";
 import { AppUpdateGate } from "@/components/AppUpdateGate";
 import { ErrorLogger } from "@/components/ErrorLogger";
 import { Toaster } from 'sonner';
+import { MergeDiffHost } from '@/components/SyncDiff/MergeDiffHost';
 
 // Roda ANTES do primeiro paint (script bloqueante no <head>) pra já aplicar
 // o data-theme certo no <html> — sem isso, a tela nasceria sempre no tema
@@ -83,7 +84,9 @@ export default function RootLayout({
                 <AppUpdateGate>
                   {children}
                 </AppUpdateGate>
-                <Toaster theme="dark" position="bottom-right" richColors />
+                <Toaster theme="dark" position="bottom-right" richColors closeButton />
+                {/* "Ver diferença" dos avisos de merge (lib/sync/mergeDiffStore). */}
+                <MergeDiffHost />
               </EnvironmentProvider>
             </ThemeProvider>
           </main>

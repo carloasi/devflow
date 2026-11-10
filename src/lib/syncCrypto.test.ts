@@ -60,6 +60,19 @@ describe('syncCrypto', () => {
       expect(cipher).not.toContain('sk-live-segredo');
     });
 
+    // Arquivos gravados por pessoas diferentes têm salts diferentes: lidos
+    // juntos (em paralelo, como no pull), cada um tem que abrir — e o
+    // arquivo gravado depois, nesta sessão, continua legível.
+    it('lê arquivos de salts diferentes intercalados, e grava em seguida', async () => {
+      const deOutro = await encryptData({ de: 'outro' }, 'minha-senha');
+      clearDerivedKeyCache(); // "outra sessão": salt novo
+      const meu = await encryptData({ de: 'mim' }, 'minha-senha');
+      const lidos = await Promise.all([deOutro, meu, deOutro, meu].map(c => decryptData(c, 'minha-senha')));
+      expect(lidos).toEqual([{ de: 'outro' }, { de: 'mim' }, { de: 'outro' }, { de: 'mim' }]);
+      const depois = await encryptData(collection, 'minha-senha');
+      expect(await decryptData(depois, 'minha-senha')).toEqual(collection);
+    });
+
     it('gera cifras diferentes para o mesmo conteúdo', async () => {
       const a = await encryptData(collection, 'minha-senha');
       const b = await encryptData(collection, 'minha-senha');

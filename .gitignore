@@ -51,3 +51,6 @@ next-env.d.ts
 # empresa (catálogo de endpoints e padrões de auth do Barramento B2B / Portal
 # de Grupos), que não tem por que viajar com o código.
 .claude/
+
+# Configuração local de ferramenta da empresa (criada sozinha ao abrir o projeto).
+.azul-engai/

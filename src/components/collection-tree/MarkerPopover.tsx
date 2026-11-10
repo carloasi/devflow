@@ -91,7 +91,7 @@ export function MarkerPopover({
       ref={ref}
       style={{ position: 'fixed', left, top, zIndex: 9999, width: WIDTH }}
       onClick={e => e.stopPropagation()}
-      className="rounded-xl border border-pm-border bg-pm-surface p-2 shadow-[0_12px_40px_rgba(0,0,0,0.55)]"
+      className="rounded-lg border border-pm-border bg-pm-surface p-2"
     >
       <div className="flex items-center gap-2 px-1 pb-1.5">
         <MarkerGlyph color={marker.color} size={13} className="shrink-0" />

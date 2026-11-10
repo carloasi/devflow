@@ -1,6 +1,7 @@
 'use client'
 
-import { Minus, Plus, Pencil } from 'lucide-react'
+import { useState } from 'react'
+import { Minus, Plus, Pencil, Eye, EyeOff } from 'lucide-react'
 import {
   applyChoice,
   countChangedEntries,
@@ -9,6 +10,8 @@ import {
   type KeyedEntry,
   type Side,
 } from '@/lib/entryDiff'
+import { isLikelySecretValue, maskValue } from '@/lib/secretScan'
+import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Headers e variáveis, entrada a entrada.
@@ -41,21 +44,44 @@ interface Props {
   onEntriesChange: (next: KeyedEntry[]) => void
 }
 
-function ValueLine({ label, entry, tone }: { label: string; entry: KeyedEntry; tone: string }) {
+function ValueLine({
+  label,
+  entry,
+  tone,
+  masked,
+  onToggleMask,
+}: {
+  label: string
+  entry: KeyedEntry
+  tone: string
+  masked: boolean
+  onToggleMask?: () => void
+}) {
+  const t = useSyncDiffStrings()
+  const text = entry.value || t.empty
   return (
     <div className="flex items-baseline gap-1.5">
       <span className="w-11 shrink-0 text-[9px] uppercase tracking-wide text-pm-text-muted/70">
         {label}
       </span>
       <span className={`font-mono text-[10.5px] break-all ${tone}`}>
-        {entry.value || '(empty)'}
+        {masked ? maskValue(text) : text}
       </span>
+      {onToggleMask && (
+        <button
+          onClick={onToggleMask}
+          title={masked ? t.showValue : t.hideValue}
+          className="shrink-0 text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
+        >
+          {masked ? <Eye size={10} /> : <EyeOff size={10} />}
+        </button>
+      )}
       {entry.enabled === false && (
         <span
-          title="Disabled on this side"
+          title={t.disabledSide}
           className="shrink-0 rounded-sm bg-pm-border px-1 text-[8.5px] uppercase text-pm-text-muted"
         >
-          off
+          {t.off}
         </span>
       )}
     </div>
@@ -63,7 +89,22 @@ function ValueLine({ label, entry, tone }: { label: string; entry: KeyedEntry; t
 }
 
 export function EntryDiffTable({ rows, entries, onEntriesChange }: Props) {
+  const t = useSyncDiffStrings()
   const changed = countChangedEntries(rows)
+
+  // Headers como Authorization/Cookie aparecem em texto puro nesta tabela
+  // sempre que há diferença — bem mais frequente que o export, onde já
+  // existe um scanner pra isso. Mascarado por padrão, com toggle por linha:
+  // quem está mesclando de propósito ainda precisa poder ver pra decidir.
+  const [revealed, setRevealed] = useState<Set<string>>(new Set())
+  const toggleRevealed = (id: string) => {
+    setRevealed(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   const choose = (row: EntryRow, side: Side) => {
     if (!entries) return
@@ -73,15 +114,21 @@ export function EntryDiffTable({ rows, entries, onEntriesChange }: Props) {
   return (
     <div className="mb-1.5">
       <div className="mb-1 text-[9.5px] uppercase tracking-wide text-pm-text-muted/70">
-        {changed} of {rows.length} {rows.length === 1 ? 'entry' : 'entries'} changed
+        {t.entriesChanged(changed, rows.length)}
       </div>
 
       <div className="max-h-56 overflow-y-auto rounded border border-pm-border bg-pm-bg">
         {rows.map(row => {
           const mark = CHANGE_MARK[row.change]
+          const sensitive =
+            isLikelySecretValue(row.key, row.local?.value) || isLikelySecretValue(row.key, row.remote?.value)
+          const isRevealed = revealed.has(row.id)
+          const masked = sensitive && !isRevealed
+
           // `same` não ganha botões: não há escolha a fazer, e oferecê-la
           // transformaria a lista num campo minado de cliques sem efeito.
           if (!mark) {
+            const text = row.remote?.value || row.local?.value || t.empty
             return (
               <div
                 key={row.id}
@@ -90,8 +137,17 @@ export function EntryDiffTable({ rows, entries, onEntriesChange }: Props) {
                 <span className="w-3 shrink-0" />
                 <span className="font-mono text-[10.5px] text-pm-text-muted shrink-0">{row.key}</span>
                 <span className="font-mono text-[10.5px] text-pm-text-muted/60 truncate">
-                  {row.remote?.value || row.local?.value || '(empty)'}
+                  {masked ? maskValue(text) : text}
                 </span>
+                {sensitive && (
+                  <button
+                    onClick={() => toggleRevealed(row.id)}
+                    title={masked ? t.showValue : t.hideValue}
+                    className="shrink-0 text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer"
+                  >
+                    {masked ? <Eye size={10} /> : <EyeOff size={10} />}
+                  </button>
+                )}
               </div>
             )
           }
@@ -108,13 +164,13 @@ export function EntryDiffTable({ rows, entries, onEntriesChange }: Props) {
 
                 <div className="flex items-center gap-0.5 shrink-0">
                   <SideButton
-                    label="Here"
+                    label={t.here}
                     active={side === 'local'}
                     disabled={!entries}
                     onClick={() => choose(row, 'local')}
                   />
                   <SideButton
-                    label="GitHub"
+                    label={t.github}
                     active={side === 'remote'}
                     disabled={!entries}
                     onClick={() => choose(row, 'remote')}
@@ -124,14 +180,26 @@ export function EntryDiffTable({ rows, entries, onEntriesChange }: Props) {
 
               <div className="flex flex-col gap-0.5 pl-[15px]">
                 {row.local ? (
-                  <ValueLine label="Here" entry={row.local} tone="text-red-300/80" />
+                  <ValueLine
+                    label={t.here}
+                    entry={row.local}
+                    tone="text-red-300/80"
+                    masked={masked}
+                    onToggleMask={sensitive ? () => toggleRevealed(row.id) : undefined}
+                  />
                 ) : (
-                  <div className="text-[10px] text-pm-text-muted/60">Not here</div>
+                  <div className="text-[10px] text-pm-text-muted/60">{t.notHere}</div>
                 )}
                 {row.remote ? (
-                  <ValueLine label="GitHub" entry={row.remote} tone="text-[#4ff09d]/80" />
+                  <ValueLine
+                    label={t.github}
+                    entry={row.remote}
+                    tone="text-[#4ff09d]/80"
+                    masked={masked}
+                    onToggleMask={sensitive ? () => toggleRevealed(row.id) : undefined}
+                  />
                 ) : (
-                  <div className="text-[10px] text-pm-text-muted/60">Gone on GitHub</div>
+                  <div className="text-[10px] text-pm-text-muted/60">{t.goneOnGithub}</div>
                 )}
               </div>
             </div>
@@ -153,11 +221,12 @@ function SideButton({
   disabled: boolean
   onClick: () => void
 }) {
+  const t = useSyncDiffStrings()
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      title={disabled ? 'Fix the JSON below to choose per entry' : `Keep the ${label} version`}
+      title={disabled ? t.fixJsonToChoose : t.keepSide(label)}
       className={`rounded px-1.5 py-0.5 text-[9.5px] border transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
         active
           ? 'border-[#63b3ed]/60 bg-[#63b3ed]/15 text-[#63b3ed]'

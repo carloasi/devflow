@@ -20,6 +20,8 @@ const PROTOCOL_VERSION = '2024-11-05';
 const ENABLED_KEY = 'devflow_mcp_enabled';
 const PORT_KEY = 'devflow_mcp_port';
 const TOKEN_KEY = 'devflow_mcp_token';
+// Bem abaixo dos 120 s de inatividade que o Rust tolera.
+const MCP_HEARTBEAT_MS = 30_000;
 
 interface McpRequestEvent {
   id: number;
@@ -168,6 +170,14 @@ export function useMcpServer(getContext: () => McpContext): UseMcpServerResult {
     listen<McpRequestEvent>('mcp-request', async event => {
       const { id, payload } = event.payload;
 
+      // Sinal de vida pro Rust enquanto a ferramenta trabalha: o prazo de lá
+      // é de inatividade, não de duração (ver FRONTEND_IDLE_TIMEOUT_SECS).
+      // Sem isso um run_collection ou um login de mais de 2 min voltava como
+      // "timed out" pro agente com o fluxo ainda rodando.
+      const heartbeat = setInterval(() => {
+        invoke('mcp_heartbeat', { id }).catch(() => {});
+      }, MCP_HEARTBEAT_MS);
+
       let response: unknown;
       try {
         const parsed = JSON.parse(payload);
@@ -189,6 +199,8 @@ export function useMcpServer(getContext: () => McpContext): UseMcpServerResult {
           id: null,
           error: { code: -32700, message: `Parse error: ${e?.message ?? String(e)}` },
         };
+      } finally {
+        clearInterval(heartbeat);
       }
 
       invoke('mcp_respond', {

@@ -52,6 +52,9 @@ function ResponseViewerContent() {
   }, []);
   const [content, setContent] = useState('');
   const [title, setTitle] = useState('Response');
+  // 'javascript' quando a janela é aberta a partir de um script (Collection
+  // Runner) — o padrão continua 'json', o caso de sempre.
+  const [lang, setLang] = useState<'json' | 'javascript'>('json');
   const [wordWrap, setWordWrap] = useState<'on' | 'off'>('on');
   const [copied, setCopied] = useState(false);
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
@@ -66,7 +69,9 @@ function ResponseViewerContent() {
   useEffect(() => {
     const key = searchParams.get('key');
     const titleParam = searchParams.get('title');
+    const langParam = searchParams.get('lang');
     if (titleParam) setTitle(titleParam);
+    if (langParam === 'javascript') setLang('javascript');
     if (key) {
       const stored = localStorage.getItem(key);
       setContent(stored ?? '');
@@ -149,25 +154,25 @@ function ResponseViewerContent() {
           </div>
         }
         rightContent={
-          <div className="flex items-center gap-1.5 text-pm-text-muted">
-            <span className="text-[10.5px] text-pm-text-muted tabular-nums mr-1">
+          <div className="flex items-center gap-1.5 text-pm-text-muted shrink-0 flex-nowrap">
+            <span className="text-[10.5px] text-pm-text-muted tabular-nums mr-1 shrink-0 whitespace-nowrap">
               {lineCount} linhas · {formatBytes(sizeBytes)}
             </span>
 
-            <div className="w-px h-4 bg-pm-hover mx-1" />
+            <div className="w-px h-4 bg-pm-hover mx-1 shrink-0" />
 
             <button onClick={handleCollapseAll} title="Recolher tudo"
-              className="p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer">
+              className="p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer shrink-0">
               <ChevronsDownUp size={14} />
             </button>
             <button onClick={handleExpandAll} title="Expandir tudo"
-              className="p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer">
+              className="p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer shrink-0">
               <ChevronsUpDown size={14} />
             </button>
             <button
               onClick={() => setWordWrap((w) => (w === 'on' ? 'off' : 'on'))}
               title="Word wrap"
-              className={`p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer ${wordWrap === 'on' ? 'text-pm-accent' : ''}`}
+              className={`p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer shrink-0 ${wordWrap === 'on' ? 'text-pm-accent' : ''}`}
             >
               <WrapText size={14} />
             </button>
@@ -175,15 +180,15 @@ function ResponseViewerContent() {
             <button
               onClick={handleToggleAlwaysOnTop}
               title={alwaysOnTop ? 'Unpin (stop staying on top)' : 'Always on top'}
-              className={`p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer ${alwaysOnTop ? 'text-pm-accent' : ''}`}
+              className={`p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer shrink-0 ${alwaysOnTop ? 'text-pm-accent' : ''}`}
             >
               {alwaysOnTop ? <PinOff size={14} /> : <Pin size={14} />}
             </button>
 
-            <div className="w-px h-4 bg-pm-hover mx-1" />
+            <div className="w-px h-4 bg-pm-hover mx-1 shrink-0" />
 
             <button onClick={handleCopy} title="Copy"
-              className="p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer">
+              className="p-1.5 rounded-md hover:bg-pm-hover hover:text-pm-text transition-colors cursor-pointer shrink-0">
               {copied ? <Check size={14} className="text-[#4ff09d]" /> : <Copy size={14} />}
             </button>
 
@@ -191,7 +196,7 @@ function ResponseViewerContent() {
               <button
                 onClick={handleOpenCompare}
                 title="Compare with another JSON"
-                className="flex items-center gap-1.5 px-2 py-1 ml-1 rounded-md border border-pm-border text-[11px] font-medium hover:bg-pm-hover hover:text-pm-text hover:border-pm-border transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2 py-1 ml-1 rounded-md border border-pm-border text-[11px] font-medium hover:bg-pm-hover hover:text-pm-text hover:border-pm-border transition-colors cursor-pointer shrink-0 whitespace-nowrap"
               >
                 <GitCompare size={13} />
                 <span>Compare</span>
@@ -200,7 +205,7 @@ function ResponseViewerContent() {
               <button
                 onClick={handleCloseCompare}
                 title="Close comparison"
-                className="flex items-center gap-1.5 px-2 py-1 ml-1 rounded-md border border-[#5c2a2a] bg-[#3d1a1a] text-[#ff7b7b] text-[11px] font-medium hover:bg-[#4a2020] transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2 py-1 ml-1 rounded-md border border-[#5c2a2a] bg-[#3d1a1a] text-[#ff7b7b] text-[11px] font-medium hover:bg-[#4a2020] transition-colors cursor-pointer shrink-0 whitespace-nowrap"
               >
                 <X size={13} />
                 <span>Close comparison</span>
@@ -215,7 +220,7 @@ function ResponseViewerContent() {
         {!compareOpen ? (
           <Editor
             height="100%"
-            defaultLanguage="json"
+            language={lang}
             theme={monacoTheme}
             beforeMount={handleBeforeMount}
             value={content}

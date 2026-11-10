@@ -94,6 +94,11 @@ interface RequestEditorProps {
   setBodyType: (type: "none" | "raw" | "graphql") => void;
   auth: AuthorizationDetails;
   setAuth: (auth: AuthorizationDetails) => void;
+  // Resultado do script desta fase no último send desta aba (ver
+  // TabRequestState) — null quando ainda não rodou ou rodou sem erro. É o
+  // que acende a bolinha vermelha de qual das duas falhou.
+  preRequestScriptError?: ScriptFailure | null;
+  postResponseScriptError?: ScriptFailure | null;
 }
 
 export function RequestEditor({
@@ -107,7 +112,9 @@ export function RequestEditor({
   setBodyType,
   auth,
   setAuth,
-  updateActiveTab
+  updateActiveTab,
+  preRequestScriptError = null,
+  postResponseScriptError = null,
 }: RequestEditorProps) {
 
   const [isFetchingToken, setIsFetchingToken] = useState(false);
@@ -372,11 +379,13 @@ export function RequestEditor({
     return auth.oauth2?.find(item => item.key === key)?.value || '';
   };
 
-  const scripts = activeTab.scripts as any;
-
+  // Vem do ÚLTIMO send desta aba (TabRequestState em AppLayout), não de
+  // Tab.scripts — aquele é o CONTEÚDO salvo do script, isto é o RESULTADO
+  // de rodá-lo, e os dois têm que poder mudar sem se confundir (um script
+  // que falha ao enviar não marca a aba como "editada").
   const scriptErrors = {
-    preRequest: scripts?.preRequestError || false,
-    postResponse: scripts?.postResponseError || false
+    preRequest: Boolean(preRequestScriptError),
+    postResponse: Boolean(postResponseScriptError),
   };
   const hasScriptError = Boolean(scriptErrors.preRequest || scriptErrors.postResponse);
 
@@ -982,6 +991,8 @@ const handleGetNewAccessToken = async () => {
                 ].map(scriptTab => {
                   const isSelected = activeScriptTab === scriptTab.id;
                   const hasError = scriptErrors[scriptTab.key as keyof typeof scriptErrors];
+                  const failure =
+                    scriptTab.key === 'preRequest' ? preRequestScriptError : postResponseScriptError;
 
                   const isActiveIndicator =
                     (scriptTab.label === 'Post-response' && hasScriptsPos) ||
@@ -1006,7 +1017,7 @@ const handleGetNewAccessToken = async () => {
                               ? 'flex h-2 w-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]'
                               : 'w-[5px] h-[5px] rounded-full bg-[#10b981]'
                           }
-                          title={hasError ? 'Script error' : undefined}
+                          title={hasError ? failure?.summary ?? 'Script error' : undefined}
                         />
                       )}
                     </button>
@@ -1026,7 +1037,7 @@ const handleGetNewAccessToken = async () => {
                         <ChevronDown size={12} />
                       </button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-64 bg-pm-surface border border-white/[0.06] rounded-xl p-1 max-h-80 overflow-y-auto">
+                    <DropdownMenuContent align="end" className="w-64 bg-pm-surface border border-pm-border rounded-lg p-1 max-h-80 overflow-y-auto">
                       {TEST_SNIPPETS.map(snippet => (
                         <DropdownMenuItem
                           key={snippet.label}
@@ -1068,21 +1079,33 @@ const handleGetNewAccessToken = async () => {
                     )}
                 </div>
 
-                {activeScriptTab === 'pre-request' ? (
-                  activeTab.scripts?.preRequestError && (
-                    <div className="h-32 border-t border-red-900/30 bg-[#1a1010] p-3 overflow-y-auto font-mono text-[11px]">
-                      <div className="text-red-500 font-bold mb-1 italic">› Pre-request Error:</div>
-                      <div className="text-pm-text-secondary">{activeTab.scripts.preRequestLog}</div>
+                {(() => {
+                  const failure =
+                    activeScriptTab === 'pre-request' ? preRequestScriptError : postResponseScriptError;
+                  if (!failure) return null;
+                  const phaseLabel = activeScriptTab === 'pre-request' ? 'Pre-request' : 'Post-response';
+                  // detail === summary quando o erro não tinha stack (ex: o
+                  // catch do invoke, ou um "throw 'texto'") — mostrar a
+                  // mesma linha duas vezes só ocuparia espaço à toa.
+                  const hasExtraDetail = failure.detail.trim() !== failure.summary.trim();
+                  return (
+                    <div className="h-32 shrink-0 border-t border-red-900/30 bg-[#1a1010] p-3 overflow-y-auto flex flex-col gap-1.5">
+                      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-red-400">
+                        <span>›</span>
+                        <span>{phaseLabel} script error</span>
+                      </div>
+                      {/* O resumo é a primeira coisa lida — "o quê" e "o
+                          quê de errado" numa frase só, sem o prefixo "❌" e
+                          sem competir com o stack trace por atenção. */}
+                      <div className="font-sans text-[12px] text-pm-text">{failure.summary}</div>
+                      {hasExtraDetail && (
+                        <pre className="whitespace-pre-wrap break-words font-mono text-[10.5px] leading-snug text-pm-text-secondary/90">
+                          {failure.detail}
+                        </pre>
+                      )}
                     </div>
-                  )
-                ) : (
-                  activeTab.scripts?.postResponseError && (
-                    <div className="h-32 border-t border-red-900/30 bg-[#1a1010] p-3 overflow-y-auto font-mono text-[11px]">
-                      <div className="text-red-500 font-bold mb-1 italic">› Post-response Error:</div>
-                      <div className="text-pm-text-secondary">{activeTab.scripts.postResponseLog}</div>
-                    </div>
-                  )
-                )}
+                  );
+                })()}
               </div>
             </div>
           </TabsContent>

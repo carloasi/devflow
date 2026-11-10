@@ -108,7 +108,6 @@ export function MethodDropdown({ activeTab, updateActiveTab }: Props) {
             border border-pm-border
             bg-pm-surface backdrop-blur-2xl
             text-pm-text-secondary
-            shadow-[0_12px_40px_rgba(0,0,0,0.55)]
             outline-none origin-top-left
             animate-in fade-in-0 zoom-in-95 duration-100
           "

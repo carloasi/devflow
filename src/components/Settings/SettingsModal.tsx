@@ -1,12 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { Bot, Bug, Database, Globe, Palette, Puzzle, Shield, X } from 'lucide-react';
+import { Bot, Bug, Database, Globe, Languages, Palette, Puzzle, Shield, X } from 'lucide-react';
 import { SecuritySettingsSection } from './SecuritySettingsSection';
 import { DataSettingsSection } from './DataSettingsSection';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import { ErrorReportSettingsSection } from './ErrorReportSettingsSection';
 import { AppearanceSettingsSection } from './AppearanceSettingsSection';
+import { LanguageSettingsSection } from './LanguageSettingsSection';
 import { NetworkSettingsSection } from './NetworkSettingsSection';
 import { McpSettingsSection } from './McpSettingsSection';
 import { ExtensionsSettingsSection } from './ExtensionsSettingsSection';
@@ -28,9 +29,12 @@ interface SettingsModalProps {
     roots: CollectionItem[],
     variables: { key: string; value: string }[]
   ) => Promise<void> | void;
+  // Clique num achado do scanner: fecha este modal e abre o item na árvore
+  // (ver handleJumpToItem em AppLayout.tsx).
+  onJumpToItem?: (requestId: string) => void;
 }
 
-type SectionId = 'appearance' | 'security' | 'network' | 'mcp' | 'extensions' | 'data' | 'report';
+type SectionId = 'appearance' | 'language' | 'security' | 'network' | 'mcp' | 'extensions' | 'data' | 'report';
 
 const LAST_SECTION_KEY = 'devflow_settings_section';
 
@@ -46,14 +50,15 @@ function loadLastSection(): SectionId {
 // um modal de 440px com as 7 seções empilhadas numa rolagem só — tudo ficava
 // espremido (botões quebrando linha, descrições apertadas ao lado dos
 // botões) e achar uma opção exigia rolar bastante.
-export function SettingsModal({ isOpen, onClose, mcp, extensionHost, collections, onApplySecrets }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose, mcp, extensionHost, collections, onApplySecrets, onJumpToItem }: SettingsModalProps) {
   const [active, setActive] = useState<SectionId>(loadLastSection);
 
   if (!isOpen) return null;
 
   const sections: Array<{ id: SectionId; label: string; icon: React.ReactNode; render: () => React.ReactNode }> = [
     { id: 'appearance', label: 'Appearance', icon: <Palette size={14} />, render: () => <AppearanceSettingsSection /> },
-    { id: 'security', label: 'Security', icon: <Shield size={14} />, render: () => <SecuritySettingsSection collections={collections} onApplySecrets={onApplySecrets} /> },
+    { id: 'language', label: 'Language', icon: <Languages size={14} />, render: () => <LanguageSettingsSection /> },
+    { id: 'security', label: 'Security', icon: <Shield size={14} />, render: () => <SecuritySettingsSection collections={collections} onApplySecrets={onApplySecrets} onJumpToItem={onJumpToItem} /> },
     { id: 'network', label: 'Network', icon: <Globe size={14} />, render: () => <NetworkSettingsSection /> },
     ...(mcp
       ? [{ id: 'mcp' as const, label: 'Claude Code (MCP)', icon: <Bot size={14} />, render: () => <McpSettingsSection mcp={mcp} /> }]
@@ -80,7 +85,7 @@ export function SettingsModal({ isOpen, onClose, mcp, extensionHost, collections
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex h-[80vh] max-h-[640px] w-[760px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-pm-border bg-pm-bg shadow-2xl shadow-black/70"
+        className="flex h-[80vh] max-h-[640px] w-[760px] max-w-[92vw] flex-col overflow-hidden rounded-lg border border-pm-border bg-pm-bg shadow-2xl shadow-black/70"
       >
         <div className="flex shrink-0 items-center justify-between px-4 py-3 border-b border-pm-border">
           <h2 className="text-[13px] font-semibold text-pm-text">Settings</h2>

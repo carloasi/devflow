@@ -75,6 +75,8 @@ interface PmRequestHeaders {
 
 interface PmRequestBody {
   raw: string;
+  /** Troca o body (igual ao Postman): string vira o raw; objeto usa o \`.raw\`. */
+  update(body: string | { mode?: 'raw'; raw: string; options?: unknown }): void;
   toString(): string;
 }
 

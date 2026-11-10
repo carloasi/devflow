@@ -20,6 +20,8 @@ const STORE_FILES = [
   'tab-sessions.json',
   'runner-history.json',
   'sync-base.json',
+  // Versão de cada arquivo remoto na última sincronização (remoteVersions.ts).
+  'sync-remote-versions.json',
 ];
 
 // Apaga TUDO que o app persiste — coleções, environments, workspaces, abas,

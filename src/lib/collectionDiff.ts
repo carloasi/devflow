@@ -183,12 +183,30 @@ export function matchChildren(
   return pairs;
 }
 
+/** Ids de toda a árvore, não só do nível atual — ver walkPairs. */
+function collectIds(items: CollectionItem[] | undefined | null, out: Set<string> = new Set()): Set<string> {
+  for (const item of items ?? []) {
+    if (item?.id) out.add(item.id);
+    if (item.item?.length) collectIds(item.item, out);
+  }
+  return out;
+}
+
 export function diffTrees(
   local: CollectionItem[] | undefined | null,
   remote: CollectionItem[] | undefined | null
 ): DiffNode[] {
   const out: DiffNode[] = [];
-  walk(local ?? [], remote ?? [], [], null, out);
+  // Ids presentes na árvore INTEIRA de cada lado, não só na pasta comparada
+  // no momento — matchChildren só casa dentro do mesmo pai, então um item
+  // movido de pasta aparece como par solto em dois lugares diferentes. Sem
+  // isso, walkPairs tratava a metade "não achei aqui" de um item MOVIDO
+  // exatamente como apagar+criar de verdade, e aceitar a sugestão "segura"
+  // (que não conta como conflito, já que o conteúdo em si não mudou)
+  // desfazia a mudança de pasta sem aviso nenhum.
+  const localIds = collectIds(local);
+  const remoteIds = collectIds(remote);
+  walk(local ?? [], remote ?? [], [], null, localIds, remoteIds, out);
   return out;
 }
 
@@ -197,9 +215,11 @@ function walk(
   remoteItems: CollectionItem[],
   parentPath: string[],
   rootId: string | null,
+  localIds: ReadonlySet<string>,
+  remoteIds: ReadonlySet<string>,
   out: DiffNode[]
 ): void {
-  walkPairs(matchChildren(localItems, remoteItems), parentPath, rootId, [], out);
+  walkPairs(matchChildren(localItems, remoteItems), parentPath, rootId, [], localIds, remoteIds, out);
 }
 
 function walkPairs(
@@ -207,6 +227,8 @@ function walkPairs(
   parentPath: string[],
   rootId: string | null,
   ancestors: string[],
+  localIds: ReadonlySet<string>,
+  remoteIds: ReadonlySet<string>,
   out: DiffNode[]
 ): void {
   for (const pair of pairs) {
@@ -218,10 +240,16 @@ function walkPairs(
     const selfId = pair.local?.id ?? pair.remote!.id;
 
     if (!pair.remote) {
+      // Existe também do lado remoto, só que embaixo de outro pai — mudou de
+      // pasta, não foi apagado. Mostrar isso aqui como "removed" convidaria a
+      // desfazer a mudança de pasta ao aceitar o lado remoto.
+      if (remoteIds.has(node.id)) continue;
       out.push({ id: node.id, path, rootId: currentRoot, ancestorIds: ancestors, kind: node.type, change: 'removed', local: pair.local, fields: [] });
       continue;
     }
     if (!pair.local) {
+      // Mesma ideia: existe localmente, só que em outra pasta.
+      if (localIds.has(node.id)) continue;
       out.push({ id: node.id, path, rootId: currentRoot, ancestorIds: ancestors, kind: node.type, change: 'added', remote: pair.remote, fields: [] });
       continue;
     }
@@ -251,7 +279,7 @@ function walkPairs(
     // Desce sempre, mesmo quando o nó em si não mudou: a alteração pode estar
     // só lá embaixo, e uma pasta idêntica com request diferente dentro é o
     // caso mais comum de todos.
-    walkPairs(childPairs, path, currentRoot, [...ancestors, selfId], out);
+    walkPairs(childPairs, path, currentRoot, [...ancestors, selfId], localIds, remoteIds, out);
   }
 }
 

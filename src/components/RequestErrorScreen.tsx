@@ -86,7 +86,7 @@ export function RequestErrorScreen({
             </button>
           </DropdownMenuTrigger>
 
-          <DropdownMenuContent align="center" className="w-80 bg-pm-surface border border-pm-border rounded-xl p-1">
+          <DropdownMenuContent align="center" className="w-80 bg-pm-surface border border-pm-border rounded-lg p-1">
             <div className="px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-pm-text-muted">
               Last {responseHistory.length} responses
             </div>

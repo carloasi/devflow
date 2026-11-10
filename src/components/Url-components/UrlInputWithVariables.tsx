@@ -50,6 +50,7 @@ export const UrlInputWithVariables: React.FC<UrlInputProps> = ({
   const {
   activeEnv,
   updateEnvironment,
+  patchEnvironmentVariables,
   getPreviousVariableValue,
   recordPreviousVariableValue,
   seedPreviousVariableValueIfMissing,
@@ -415,14 +416,21 @@ useEffect(() => {
 
     if (editingToken.type === 'env') {
       if (!activeEnv) return;
-      const exists = activeValues.some(v => v.key === editingToken.key);
-      const nextValues = exists
-        ? activeValues.map(v => (v.key === editingToken.key ? { ...v, value: newValue } : v))
-        : [
-            ...activeValues,
-            { key: editingToken.key, value: newValue, enabled: true, type: 'default' as const },
-          ];
-      updateEnvironment({ ...activeEnv, values: nextValues });
+      // patchEnvironmentVariables, e não updateEnvironment com o array
+      // remontado aqui. O jeito antigo tinha dois furos:
+      //
+      //   - `activeValues.map(v => v.key === key ? ...)` gravava em TODAS as
+      //     entradas da key, inclusive nas desabilitadas — que existem
+      //     justamente pra guardar o valor do outro ambiente;
+      //   - este commit roda 250ms depois da tecla, com o `activeValues` do
+      //     render de então. Mandar o environment inteiro a partir desse
+      //     retrato desfazia qualquer coisa gravada nesse intervalo (um
+      //     script do Runner, o painel de Environment, a outra variável da
+      //     mesma URL).
+      //
+      // previousMap vazio é de propósito: aqui a intenção é só gravar — não
+      // há key a remover, e nada a pular por "não mudou".
+      patchEnvironmentVariables(activeEnv.id, {}, { [editingToken.key]: newValue });
     } else {
       if (!onPathParamsChange) return;
       const exists = params.some(p => p.key.trim() === editingToken.key.trim());
@@ -434,7 +442,7 @@ useEffect(() => {
           ];
       onPathParamsChange(nextParams);
     }
-  }, [editingToken, activeEnv, activeValues, onPathParamsChange, params, updateEnvironment]);
+  }, [editingToken, activeEnv, onPathParamsChange, params, patchEnvironmentVariables]);
 
   // Salva conforme digita, com debounce de 250ms.
   const scheduleCommit = useCallback((newValue: string) => {

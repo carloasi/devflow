@@ -164,6 +164,39 @@ describe('reordenação', () => {
   });
 });
 
+// O bug que motivou isso: mover uma request de pasta sem editar nada virava
+// "added" numa ponta e "removed" na outra, nenhum marcado como conflito — e
+// aceitar a sugestão "segura" desfazia a mudança de pasta sem aviso.
+describe('item movido de pasta', () => {
+  it('não acusa nada quando só a pasta mudou, sem editar o conteúdo', () => {
+    const local = [folder('c', 'P', [folder('a', 'A', []), folder('b', 'B', [req('r1', 'X')])])];
+    const remote = [folder('c', 'P', [folder('a', 'A', [req('r1', 'X')]), folder('b', 'B', [])])];
+    expect(diffTrees(local, remote)).toEqual([]);
+  });
+
+  it('move entre collections raiz diferentes também não acusa nada', () => {
+    const local = [folder('c1', 'A', []), folder('c2', 'B', [req('r1', 'X')])];
+    const remote = [folder('c1', 'A', [req('r1', 'X')]), folder('c2', 'B', [])];
+    expect(diffTrees(local, remote)).toEqual([]);
+  });
+
+  it('apagar de verdade (id não existe do outro lado) continua acusando', () => {
+    const local = [folder('c', 'P', [folder('a', 'A', [])])];
+    const remote = [folder('c', 'P', [folder('a', 'A', [req('r1', 'X')])])];
+    const nodes = diffTrees(local, remote);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].change).toBe('added');
+  });
+
+  it('criar de verdade (novo id, nunca existiu lá) continua acusando', () => {
+    const local = [folder('c', 'P', [folder('a', 'A', []), folder('b', 'B', [req('novo', 'X')])])];
+    const remote = [folder('c', 'P', [folder('a', 'A', []), folder('b', 'B', [])])];
+    const nodes = diffTrees(local, remote);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].change).toBe('removed');
+  });
+});
+
 describe('matchChildren', () => {
   it('casa por id mesmo com nome diferente', () => {
     const pairs = matchChildren([req('r1', 'Antigo')], [req('r1', 'Novo')]);

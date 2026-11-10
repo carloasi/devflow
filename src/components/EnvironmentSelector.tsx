@@ -889,6 +889,7 @@ useEffect(() => {
       onClose={() => setIsSlidePanelOpen(false)}
       onSave={onSaveEnvironment}
       onPull={onPullEnvironments}
+      currentWorkspace={workspace}
     />
   )}
 </SlidePanel>

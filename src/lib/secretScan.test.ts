@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   applySecretActions,
+  isLikelySecretValue,
   jwtExpiry,
   maskValue,
+  redactAuthForDisplay,
   scanTree,
   suggestVariableName,
   summarizeFindings,
@@ -33,6 +35,65 @@ describe('maskValue', () => {
   // Valor curto não tem ponta que dê pra mostrar sem entregar quase tudo.
   it('valor curto some por inteiro', () => {
     expect(maskValue('senha123')).toBe('••••••••');
+  });
+});
+
+// Usado pela tela de comparação com o GitHub (SyncDiff/EntryDiffTable.tsx),
+// que mostra header/variável em texto puro sempre que há diferença.
+describe('isLikelySecretValue', () => {
+  it('header com nome de credencial e valor literal', () => {
+    expect(isLikelySecretValue('Authorization', 'abcdef123456')).toBe(true);
+  });
+
+  it('ignora referência a variável — já está parametrizado', () => {
+    expect(isLikelySecretValue('Authorization', '{{token}}')).toBe(false);
+  });
+
+  it('ignora valor curto demais pra ser credencial', () => {
+    expect(isLikelySecretValue('token', 'abc')).toBe(false);
+  });
+
+  it('ignora chave sem nome de credencial', () => {
+    expect(isLikelySecretValue('Content-Type', 'application/json')).toBe(false);
+  });
+
+  it('sem chave não é segredo', () => {
+    expect(isLikelySecretValue(undefined, 'abcdef123456')).toBe(false);
+  });
+});
+
+describe('redactAuthForDisplay', () => {
+  it('mascara o token do bearer', () => {
+    const out = redactAuthForDisplay({ type: 'bearer', token: 'abcdef123456' }) as Record<string, unknown>;
+    expect(out.token).toBe(maskValue('abcdef123456'));
+  });
+
+  it('mascara a senha do basic', () => {
+    const out = redactAuthForDisplay({ type: 'basic', username: 'joao', password: 'senhaforte1' }) as Record<string, unknown>;
+    expect(out.password).toBe(maskValue('senhaforte1'));
+    expect(out.username).toBe('joao');
+  });
+
+  it('não mascara referência a variável', () => {
+    const out = redactAuthForDisplay({ type: 'bearer', token: '{{token}}' }) as Record<string, unknown>;
+    expect(out.token).toBe('{{token}}');
+  });
+
+  it('mascara entradas sensíveis do oauth2, preserva o resto', () => {
+    const out = redactAuthForDisplay({
+      type: 'oauth2',
+      oauth2: [
+        { key: 'clientSecret', value: 'super-secreto-123' },
+        { key: 'tokenName', value: 'meu token' },
+      ],
+    }) as { oauth2: { key: string; value: string }[] };
+    expect(out.oauth2[0].value).toBe(maskValue('super-secreto-123'));
+    expect(out.oauth2[1].value).toBe('meu token');
+  });
+
+  it('valor não-objeto passa direto', () => {
+    expect(redactAuthForDisplay(undefined)).toBeUndefined();
+    expect(redactAuthForDisplay(null)).toBeNull();
   });
 });
 
@@ -147,6 +208,52 @@ describe('scanTree', () => {
     expect(scanTree([])).toEqual([]);
     expect(scanTree(null)).toEqual([]);
   });
+
+  // A API ecoou o Authorization de volta na resposta salva — vaza só aqui,
+  // nunca na request (que pode até estar parametrizada com {{token}}).
+  it('acha header da resposta salva num example', () => {
+    const tree: CollectionItem[] = [
+      {
+        ...req('r1', 'Login', { auth: { type: 'bearer', token: '{{token}}' } }),
+        item: [
+          {
+            id: 'e1',
+            name: 'Example',
+            type: 'example',
+            example: {
+              status: 'OK',
+              code: 200,
+              headers: [{ key: 'Authorization', value: 'Bearer abc123xyz', enabled: true }],
+              body: '{}',
+            },
+          },
+        ],
+      } as CollectionItem,
+    ];
+    const found = scanTree(tree);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      requestId: 'e1',
+      location: { type: 'exampleHeader', key: 'Authorization' },
+    });
+  });
+
+  it('header comum na resposta salva é ignorado', () => {
+    const tree: CollectionItem[] = [
+      {
+        id: 'e1',
+        name: 'Example',
+        type: 'example',
+        example: {
+          status: 'OK',
+          code: 200,
+          headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
+          body: '{}',
+        },
+      } as CollectionItem,
+    ];
+    expect(scanTree(tree)).toEqual([]);
+  });
 });
 
 describe('summarizeFindings', () => {
@@ -226,6 +333,28 @@ describe('applySecretActions', () => {
     const out = applySecretActions(tree(), []);
     expect(out.roots[0].request!.auth!.token).toBe('valor-secreto-real');
     expect(out.variables).toEqual([]);
+  });
+
+  it('extrai header de example', () => {
+    const roots: CollectionItem[] = [
+      {
+        id: 'e1',
+        name: 'Example',
+        type: 'example',
+        example: {
+          status: 'OK',
+          code: 200,
+          headers: [{ key: 'Authorization', value: 'Bearer abc123xyz', enabled: true }],
+          body: '{}',
+        },
+      } as CollectionItem,
+    ];
+    const found = scanTree(roots);
+    const out = applySecretActions(roots, [
+      { finding: found[0], action: { type: 'extract', variable: 'authHeader' } },
+    ]);
+    expect(out.roots[0].example!.headers[0].value).toBe('{{authHeader}}');
+    expect(out.variables).toEqual([{ key: 'authHeader', value: 'Bearer abc123xyz' }]);
   });
 });
 

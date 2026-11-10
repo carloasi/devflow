@@ -16,7 +16,7 @@ import type { CollectionItem } from '@/app/types/CollectionItem';
 const TEXT_FIELDS = new Set(['name', 'method', 'url', 'body', 'preRequestScript', 'postResponseScript']);
 
 /** Campos estruturados — editados como JSON e validados antes de aplicar. */
-const JSON_FIELDS = new Set(['headers', 'auth', 'example']);
+const JSON_FIELDS = new Set(['headers', 'auth', 'example', 'markers', 'markerNotes']);
 
 /**
  * `order` fica de fora de propósito: ele não é um campo guardado, é a
@@ -94,6 +94,22 @@ export function applyFieldOverride(
       return next;
     }
 
+    // Não editável na tela (não está em TEXT/JSON_FIELDS): é o merge
+    // automático por campo (lib/sync/fieldMerge) que leva o urlexport junto
+    // com a URL, aplicado DEPOIS dela.
+    case 'urlexport':
+      if (value && typeof value === 'object') {
+        next.request = { ...request, urlexport: value as NonNullable<CollectionItem['request']>['urlexport'] };
+      }
+      return next;
+
+    case 'description': {
+      const text = typeof value === 'string' ? value : '';
+      if (!text) delete next.description;
+      else next.description = text;
+      return next;
+    }
+
     case 'body':
       next.request = { ...request, body: String(value ?? '') };
       return next;
@@ -127,6 +143,33 @@ export function applyFieldOverride(
     case 'example':
       next.example = value as CollectionItem['example'];
       return next;
+
+    // Omite o campo em vez de gravar array/objeto vazio — mesma regra de
+    // lib/markers.ts (setMarkers/setMarkerNote), pra um "Keep both" que dá
+    // em lista vazia (não deveria acontecer, mas por via das dúvidas) não
+    // sujar o nó com `markers: []`.
+    case 'markers': {
+      const ids = Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+      if (ids.length === 0) {
+        delete next.markers;
+        return next;
+      }
+      next.markers = ids;
+      return next;
+    }
+
+    case 'markerNotes': {
+      const notes =
+        value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as Record<string, string>)
+          : {};
+      if (Object.keys(notes).length === 0) {
+        delete next.markerNotes;
+        return next;
+      }
+      next.markerNotes = notes;
+      return next;
+    }
 
     default:
       return node;

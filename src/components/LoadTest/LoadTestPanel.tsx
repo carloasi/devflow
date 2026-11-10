@@ -18,6 +18,7 @@ import { CollectionItem } from '@/app/types/CollectionItem'
 import { useEnvironment } from '@/components/EnvironmentContext'
 import { flattenRequests } from '@/components/CollectionRunner/runCollectionRequest'
 import { buildFlowSteps } from './buildFlowSteps'
+import { resolveTokenSteps } from './resolveTokenSteps'
 import {
   appendLoadTestHistory,
   deleteLoadTestHistoryRecord,
@@ -56,7 +57,7 @@ function formatMs(v: number): string {
 }
 
 export function LoadTestPanel({ item, open, onClose }: Props) {
-  const { environments, selectedEnvId } = useEnvironment()
+  const { environments, selectedEnvId, patchEnvironmentVariables } = useEnvironment()
 
   const [vus, setVus] = useState(10)
   const [mode, setMode] = useState<LoadTestMode>('duration')
@@ -69,6 +70,8 @@ export function LoadTestPanel({ item, open, onClose }: Props) {
   const [showThresholds, setShowThresholds] = useState(false)
 
   const [running, setRunning] = useState(false)
+  // Obtendo o token dos passos OAuth2 antes da carga (pode abrir o login).
+  const [preparing, setPreparing] = useState(false)
   const [testId, setTestId] = useState<string | null>(null)
   const [snapshots, setSnapshots] = useState<LoadTestSnapshot[]>([])
   const [summary, setSummary] = useState<LoadTestSnapshot | null>(null)
@@ -173,11 +176,40 @@ export function LoadTestPanel({ item, open, onClose }: Props) {
     // Faltava o filtro de `enabled` aqui: uma duplicata DESABILITADA entrava
     // no mapa e, por vir depois no array, sobrescrevia a habilitada — o teste
     // de carga rodava com o valor que o usuário tinha justamente arquivado.
-    const envMap: Record<string, string> = buildEnvMap(baseEnv?.values)
+    const baseEnvMap: Record<string, string> = buildEnvMap(baseEnv?.values)
 
-    const flow = buildFlowSteps(requests)
-    if (flow.some(step => !step.url.trim())) {
-      setError('One of the flow requests has an empty URL.')
+    // Passo de token (OAuth 2.0 sem URL) não vai pro motor de carga: o token
+    // é obtido uma vez aqui — reaproveitando o que ainda vale, como o Runner —
+    // e todas as VUs o usam. Antes todo fluxo MSAL era recusado com "empty
+    // URL", justamente os que mais precisam de teste de carga.
+    let prepared: Awaited<ReturnType<typeof resolveTokenSteps>>
+    setPreparing(true)
+    try {
+      prepared = await resolveTokenSteps(requests, baseEnvMap)
+    } catch (e) {
+      setError((e as Error)?.message ?? String(e))
+      return
+    } finally {
+      setPreparing(false)
+    }
+    // O token novo também vai pro environment, como no Runner: o próximo
+    // teste (ou um Send) reaproveita em vez de pedir login de novo.
+    if (baseEnv && prepared.tokenSteps.length > 0) {
+      patchEnvironmentVariables(baseEnv.id, baseEnvMap, prepared.envMap)
+    }
+    const envMap = prepared.envMap
+
+    if (prepared.requests.length === 0) {
+      setError('This flow only has token steps — there is no request to put under load.')
+      return
+    }
+
+    const flow = buildFlowSteps(prepared.requests)
+    const emptyUrl = prepared.requests.find(
+      r => !!r.request && r.protocol !== 'grpc' && !r.request.url?.trim()
+    )
+    if (emptyUrl) {
+      setError(`"${emptyUrl.name}" has an empty URL.`)
       return
     }
 
@@ -348,7 +380,7 @@ export function LoadTestPanel({ item, open, onClose }: Props) {
         onPointerDownOutside={(e) => e.preventDefault()}
         onInteractOutside={(e) => e.preventDefault()}
         {...drag.contentProps}
-        className="bg-pm-bg border border-pm-border text-pm-text sm:max-w-3xl max-h-[85vh] p-0 flex flex-col overflow-hidden rounded-2xl gap-0"
+        className="bg-pm-bg border border-pm-border text-pm-text sm:max-w-3xl max-h-[85vh] p-0 flex flex-col overflow-hidden rounded-lg gap-0"
       >
         {/* Header */}
         <div
@@ -515,10 +547,12 @@ export function LoadTestPanel({ item, open, onClose }: Props) {
                   ) : (
                     <button
                       onClick={handleStart}
-                      className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold text-white transition-colors cursor-pointer"
+                      disabled={preparing}
+                      title={preparing ? 'Getting the OAuth 2.0 token — finish the sign-in window if one opened' : undefined}
+                      className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold text-white transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                       style={{ backgroundColor: ACCENT }}
                     >
-                      <Play size={12} /> Start
+                      <Play size={12} /> {preparing ? 'Signing in…' : 'Start'}
                     </button>
                   )}
                 </div>

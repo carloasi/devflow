@@ -692,6 +692,14 @@ export default function WorkspaceSelector({
               type="button"
               className="flex items-center gap-2 w-full px-2 py-1.5 rounded-md text-[12px] text-pm-text-secondary bg-transparent border-none text-left cursor-pointer transition-colors hover:bg-pm-hover hover:text-pm-text"
               onClick={() => {
+                // O path remoto no GitHub (ver workspaceRemotePath) é
+                // derivado do NOME — renomear localmente não move a pasta
+                // de lá, então sem avisar aqui o próximo push criaria uma
+                // pasta nova e deixaria o histórico antigo pra trás, sem
+                // nenhum sinal de que isso aconteceu.
+                if (overflowMenu.synced) {
+                  showStatus('⚠ Synced with GitHub — renaming points to a different remote folder; the old one stays behind.');
+                }
                 setRenamingPath(overflowMenu.path);
                 setRenameValue(overflowMenu.name);
                 setOverflowMenu(null);

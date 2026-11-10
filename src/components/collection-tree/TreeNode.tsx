@@ -3,8 +3,9 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronRight, FileText, Folder, FolderOpen, FolderPlus, Plus, Star } from 'lucide-react'
 import { CollectionItem } from '@/app/types/CollectionItem'
+import type { Marker } from '@/lib/markers'
 import { MarkerGlyph } from './MarkerGlyph'
-import { TreeActionMenu } from './TreeActionMenu'
+import { TreeActionMenu, type ActionMenuView } from './TreeActionMenu'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { DropIndicator } from './CollectionTree'
@@ -37,6 +38,23 @@ interface Props {
   markerMap?: Map<string, { name: string; color: string }>
   // Clique num quadradinho de marcador da linha (abre o popover da marca).
   onMarkerClick?: (item: CollectionItem, markerId: string, x: number, y: number) => void
+  // Catálogo inteiro (ver lib/markers.ts) — o menu "…" precisa dele pra
+  // listar/criar marcador, não só da cor de cada um (ver markerMap acima).
+  markerCatalog?: Marker[]
+  onToggleMarker?: (itemId: string, markerId: string) => void
+  onCreateMarker?: (itemId: string, name: string, color?: string) => void
+  onRecolorMarker?: (markerId: string, color: string) => void
+  onManageMarkers?: () => void
+  // Grava a descrição do item (ver CollectionItem.description) — mesmo
+  // menu "…", que foi pra onde "Add description" e "Markers" se mudaram.
+  onSaveDescription?: (itemId: string, text: string) => void
+  // Id do item cujo menu "..." está aberto — compartilhado com o menu de
+  // clique direito (CollectionTree), pra só um menu da árvore ficar aberto
+  // por vez. Ver handleActionMenuOpenChange lá.
+  openActionMenuId?: string | null
+  // Vista em que o "..." abre quando o atalho M / Shift+M o abriu.
+  actionMenuView?: ActionMenuView
+  onActionMenuOpenChange?: (itemId: string, open: boolean) => void
   // "Modo escolher pasta" — usado pelo fluxo de Tab Group -> Flow (ver
   // AppLayout.tsx). Enquanto ativo, clicar numa pasta chama
   // onPickFolder em vez do comportamento normal (abrir request/expandir);
@@ -55,6 +73,8 @@ interface Props {
     toggleStar?: (id: string) => void
     duplicate: (id: string) => void
     export: (item: CollectionItem) => Promise<void>
+    /** Pasta → .html que roda os passos no navegador (lib/flowHtml). */
+    exportHtml?: (item: CollectionItem) => Promise<void>
     importCurl?: (parentId: string) => void
     run?: (item: CollectionItem) => void
     loadTest?: (item: CollectionItem) => void
@@ -173,6 +193,15 @@ export const TreeNode = memo(function TreeNode({
   searchTokens,
   markerMap,
   onMarkerClick,
+  markerCatalog,
+  onToggleMarker,
+  onCreateMarker,
+  onRecolorMarker,
+  onManageMarkers,
+  onSaveDescription,
+  openActionMenuId,
+  actionMenuView,
+  onActionMenuOpenChange,
   folderPickMode,
   onPickFolder,
   isPendingPush,
@@ -184,10 +213,29 @@ export const TreeNode = memo(function TreeNode({
   const open = expandedIds?.has(item.id) ?? false
   const setOpen = (next: boolean | ((prev: boolean) => boolean)) =>
     onSetExpanded(item.id, typeof next === 'function' ? next(open) : next)
+  // Clique único numa pasta abre/fecha — mas adiado, pra um duplo-clique
+  // (renomear) poder cancelar antes de rodar. Sem isso, os dois `onClick`
+  // que o duplo-clique dispara antes do `onDoubleClick` leem o MESMO `open`
+  // (closure da mesma renderização, sem repintar entre eles) e calculam o
+  // MESMO valor em vez de se cancelarem — a pasta abre sozinha ao renomear.
+  const expandClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (expandClickTimerRef.current) clearTimeout(expandClickTimerRef.current)
+    }
+  }, [])
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(item.name)
   const inputRef = useRef<HTMLInputElement>(null)
   const rowRef = useRef<HTMLDivElement>(null)
+  // true quando este clique É a origem de isActive virar true — pula o
+  // scrollIntoView suave nesse caso (ver o efeito abaixo). Sem isso, o
+  // PRIMEIRO clique de um duplo-clique já rola a árvore (o item clicado
+  // ainda não era o ativo), e esse scroll suave desloca a lista embaixo do
+  // cursor antes do segundo clique/dblclick chegar — que então acerta outra
+  // linha, numa árvore com nomes repetidos (comum: vários "01 - Token v1"
+  // em flows diferentes) editando/abrindo a linha errada.
+  const selectedBySelfClickRef = useRef(false)
 
   useEffect(() => {
     setValue(item.name)
@@ -249,6 +297,27 @@ export const TreeNode = memo(function TreeNode({
     [resolvedMarkers]
   )
 
+  // Pro menu "…" (TreeActionMenu): "quais marcadores este item já tem",
+  // pronto no formato que o seletor de marcadores espera. Só 'on' — nunca
+  // 'partial', que só existia pra uma SELEÇÃO de vários itens.
+  const itemMarkerState = useMemo(() => {
+    const state: Record<string, 'on'> = {}
+    for (const id of item.markers ?? []) state[id] = 'on'
+    return state
+  }, [item.markers])
+
+  const actionMenuMarkers = useMemo(() => {
+    if (!markerCatalog || !onToggleMarker) return undefined
+    return {
+      catalog: markerCatalog,
+      state: itemMarkerState,
+      onToggle: (markerId: string) => onToggleMarker(item.id, markerId),
+      onCreate: (name: string, color?: string) => onCreateMarker?.(item.id, name, color),
+      onRecolor: onRecolorMarker,
+      onManage: onManageMarkers,
+    }
+  }, [markerCatalog, itemMarkerState, onToggleMarker, onCreateMarker, onRecolorMarker, onManageMarkers, item.id])
+
   const method = item.protocol === 'grpc' ? GRPC_META : METHOD_META[item.method as string]
 
   // F2 pelo teclado (CollectionTree) -> entra em modo rename.
@@ -303,6 +372,11 @@ export const TreeNode = memo(function TreeNode({
 
   const startEditing = (e: React.MouseEvent) => {
     e.stopPropagation()
+    // Cancela o abrir/fechar pendente do clique único — ver expandClickTimerRef.
+    if (expandClickTimerRef.current) {
+      clearTimeout(expandClickTimerRef.current)
+      expandClickTimerRef.current = null
+    }
     setEditing(true)
   }
 
@@ -330,7 +404,20 @@ export const TreeNode = memo(function TreeNode({
   // acabado de ser revelada pela abertura automática das pastas acima.
   useEffect(() => {
     if (isActive) {
+      if (selectedBySelfClickRef.current) {
+        selectedBySelfClickRef.current = false
+        return
+      }
       rowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    } else {
+      // Clicar numa linha que JÁ era a ativa marca a flag (ver onClick
+      // abaixo), mas isActive não muda (true -> true), então o `if` acima
+      // nunca roda pra consumi-la — ficaria "true" parada até a próxima vez
+      // que este item virasse ativo de novo, aí sim suprimindo um scroll que
+      // dessa vez seria legítimo (ex: reativado pela aba ou pelos Favoritos).
+      // Zera aqui, na desativação, que sempre acontece antes de qualquer
+      // reativação futura.
+      selectedBySelfClickRef.current = false
     }
   }, [isActive])
 
@@ -518,7 +605,7 @@ export const TreeNode = memo(function TreeNode({
                 height: 18,
                 padding: '0 6px',
                 borderRadius: 4,
-                border: `1px solid ${ACCENT}`,
+                border: 'none',
                 backgroundColor: 'var(--color-pm-surface)',
                 color: 'var(--color-pm-text)',
                 fontSize: 11,
@@ -539,9 +626,14 @@ export const TreeNode = memo(function TreeNode({
                   return
                 }
                 if (!isFolder) {
+                  selectedBySelfClickRef.current = true
                   onRequestSelect?.(item)
                 } else {
-                  setOpen(v => !v)
+                  if (expandClickTimerRef.current) clearTimeout(expandClickTimerRef.current)
+                  expandClickTimerRef.current = setTimeout(() => {
+                    expandClickTimerRef.current = null
+                    setOpen(v => !v)
+                  }, 250)
                 }
               }}
               onDoubleClick={folderPickMode ? undefined : startEditing}
@@ -713,11 +805,13 @@ export const TreeNode = memo(function TreeNode({
               onAddGrpcRequest={actions.createGrpcRequest ? () => actions.createGrpcRequest!(item.id) : undefined}
               onImportCurl={actions.importCurl ? () => actions.importCurl!(item.id) : undefined}
               onExport={() => actions.export(item)}
+              onExportHtml={isFolder && actions.exportHtml ? () => void actions.exportHtml!(item) : undefined}
               onRun={actions.run ? () => actions.run!(item) : undefined}
               onLoadTest={actions.loadTest ? () => actions.loadTest!(item) : undefined}
-              // Só na raiz: o remoto guarda um arquivo por collection, então
-              // enviar uma subpasta sozinha não teria representação lá.
-              onPushCollection={isCollection && actions.pushCollection ? () => actions.pushCollection!(item) : undefined}
+              // Na raiz, envia a collection; numa subpasta ou request, envia SÓ
+              // esse item — o arquivo da collection sobe com o GitHub de agora
+              // e esse item trocado (AppLayout.handlePushItem).
+              onPushCollection={(isFolder || item.type === 'request') && actions.pushCollection ? () => actions.pushCollection!(item) : undefined}
               // Em QUALQUER pasta, não só na raiz: o remoto guarda um arquivo
               // por collection, mas a escolha do que trazer não precisa ter
               // essa granularidade — o diff é recortado pela subárvore.
@@ -728,6 +822,16 @@ export const TreeNode = memo(function TreeNode({
               onCopyUrl={actions.copyUrl ? () => actions.copyUrl!(item) : undefined}
               onCopyCurl={actions.copyCurl ? () => actions.copyCurl!(item) : undefined}
               isRoot={depth === 0}
+              markers={actionMenuMarkers}
+              onSaveDescription={
+                onSaveDescription ? (text: string) => onSaveDescription(item.id, text) : undefined
+              }
+              // undefined (em vez de false) quando ninguém está controlando
+              // isto de cima — senão o menu nasceria preso fechado, sem
+              // onOpenChange nenhum pra reabrir.
+              open={openActionMenuId === undefined ? undefined : openActionMenuId === item.id}
+              onOpenChange={next => onActionMenuOpenChange?.(item.id, next)}
+              requestedView={openActionMenuId === item.id ? actionMenuView : undefined}
             />
           </div>
           </div>
@@ -776,6 +880,15 @@ export const TreeNode = memo(function TreeNode({
               searchTokens={searchTokens}
               markerMap={markerMap}
               onMarkerClick={onMarkerClick}
+              markerCatalog={markerCatalog}
+              onToggleMarker={onToggleMarker}
+              onCreateMarker={onCreateMarker}
+              onRecolorMarker={onRecolorMarker}
+              onManageMarkers={onManageMarkers}
+              onSaveDescription={onSaveDescription}
+              openActionMenuId={openActionMenuId}
+              actionMenuView={actionMenuView}
+              onActionMenuOpenChange={onActionMenuOpenChange}
               folderPickMode={folderPickMode}
               onPickFolder={onPickFolder}
             />

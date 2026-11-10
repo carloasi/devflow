@@ -25,6 +25,8 @@ import { toast } from 'sonner'
 
 import { Environment, EnvironmentValue } from '@/app/types/Environment'
 import { useEnvironment } from '../EnvironmentContext'
+import { listWorkspaces, type WorkspaceInfo } from '@/storage/workspaceStore'
+import { loadWorkspaceLocalData, saveWorkspaceEnvironments } from '@/storage/localSyncStore'
 
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && (
@@ -98,14 +100,19 @@ const EMPTY_SELECTION = new Set<string>()
 
 // Entrada que recebe o valor quando a key já existe no destino: a ativa
 // (keys duplicadas são permitidas, só uma fica enabled), senão a primeira.
-function findTargetIndex(values: EnvironmentValue[], key: string): number {
+export function findTargetIndex(values: EnvironmentValue[], key: string): number {
   const enabled = values.findIndex(v => v.key === key && v.enabled)
   return enabled !== -1 ? enabled : values.findIndex(v => v.key === key)
 }
 
 // Copia as variáveis selecionadas pro environment de destino. Key que já
 // existe lá é sobrescrita (valor, tipo e descrição); o resto é criado.
-function copyVariablesInto(
+//
+// Exportada (e não só interna ao componente) pra dar pra testar sozinha —
+// "copia valor e descrição" é exatamente o tipo de regra que um teste de
+// UI inteiro não prova com confiança, e quebrar silenciosamente aqui perde
+// documentação de quem recebe a cópia sem nenhum aviso na tela.
+export function copyVariablesInto(
   target: Environment,
   variables: EnvironmentValue[]
 ): { values: EnvironmentValue[]; added: number; overwritten: number } {
@@ -205,9 +212,12 @@ interface QuickViewProps {
   onSave?: (env: Environment) => Promise<void> | void
   /** Abre a comparação com o GitHub. Ausente = painel sem sync. */
   onPull?: () => void
+  /** Path do workspace selecionado agora — "Copy to environment..." usa isso
+   *  como workspace de DESTINO por padrão, antes de deixar escolher outro. */
+  currentWorkspace: string
 }
 
-export function EnvironmentVariablesQuickView({ activeEnv, onClose, onSave, onPull }: QuickViewProps) {
+export function EnvironmentVariablesQuickView({ activeEnv, onClose, onSave, onPull, currentWorkspace }: QuickViewProps) {
   const {
   environments,
   updateEnvironment,
@@ -228,6 +238,43 @@ export function EnvironmentVariablesQuickView({ activeEnv, onClose, onSave, onPu
       return { envId: activeEnv.id, ids: typeof update === 'function' ? update(current) : update }
     })
   const [copyTargetId, setCopyTargetId] = useState('')
+  // Workspace de DESTINO do "Copy to environment..." — começa no atual
+  // (mesmo comportamento de sempre) mas dá pra trocar. Diferente do atual,
+  // os environments vêm do disco (`otherWorkspaceEnvironments`), não do
+  // `environments` do contexto, que é só o do workspace ativo.
+  const [targetWorkspace, setTargetWorkspace] = useState(currentWorkspace)
+  const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
+  // Guarda pra QUAL workspace os environments carregados são — não um
+  // booleano de loading à parte: "carregando" vira só comparar isso contra
+  // `targetWorkspace`, sem precisar de um segundo setState síncrono dentro
+  // do efeito (os dois setState daqui só acontecem dentro do .then/.catch,
+  // já fora do corpo síncrono do efeito).
+  const [otherWorkspaceEnvironments, setOtherWorkspaceEnvironments] = useState<{
+    workspace: string
+    envs: Environment[]
+  } | null>(null)
+
+  useEffect(() => {
+    listWorkspaces().then(setWorkspaces).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (targetWorkspace === currentWorkspace) return
+    let cancelled = false
+    loadWorkspaceLocalData(targetWorkspace)
+      .then(({ environments: envs }) => {
+        if (!cancelled) setOtherWorkspaceEnvironments({ workspace: targetWorkspace, envs: (envs as Environment[]) ?? [] })
+      })
+      .catch(() => {
+        if (!cancelled) setOtherWorkspaceEnvironments({ workspace: targetWorkspace, envs: [] })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [targetWorkspace, currentWorkspace])
+
+  const loadingOtherWorkspaceEnvs =
+    targetWorkspace !== currentWorkspace && otherWorkspaceEnvironments?.workspace !== targetWorkspace
   // Chave composta "id:índice" da entrada do histórico copiada por último —
   // até 5 entradas por variável agora, então precisa saber qual linha
   // mostrar o ícone de "copiado".
@@ -356,7 +403,17 @@ useEffect(() => {
     return [...byKey.values()]
   }, [selectedVariables])
 
-  const otherEnvironments = environments.filter(env => env.id !== activeEnv.id)
+  // No workspace atual, os candidatos são os environments já carregados em
+  // memória (menos a origem); em outro, vêm do que foi lido do disco pra ele
+  // — só quando já é a leitura DESTE workspace (`loadingOtherWorkspaceEnvs`
+  // zerado), senão mostraria por um instante a lista do workspace anterior.
+  const otherEnvironments = (
+    targetWorkspace === currentWorkspace
+      ? environments
+      : otherWorkspaceEnvironments?.workspace === targetWorkspace
+        ? otherWorkspaceEnvironments.envs
+        : []
+  ).filter(env => env.id !== activeEnv.id)
   const copyTarget = otherEnvironments.find(env => env.id === copyTargetId)
   const conflictCount = copyTarget
     ? variablesToCopy.filter(v => findTargetIndex(copyTarget.values, v.key) !== -1).length
@@ -385,16 +442,33 @@ useEffect(() => {
     })
   }
 
-  const handleCopyToEnvironment = () => {
+  const handleCopyToEnvironment = async () => {
     if (!copyTarget || variablesToCopy.length === 0) return
     const { values, added, overwritten } = copyVariablesInto(copyTarget, variablesToCopy)
-    updateEnvironment({ ...copyTarget, values })
+    const updatedTarget = { ...copyTarget, values }
+
+    if (targetWorkspace === currentWorkspace) {
+      // Workspace ativo: o environment já está em memória, o de sempre.
+      updateEnvironment(updatedTarget)
+    } else {
+      // Outro workspace: nada em memória representa ele agora — grava a
+      // lista inteira de volta no disco, só com o environment de destino
+      // trocado pelo atualizado (os outros environments daquele workspace
+      // passam direto, sem tocar).
+      const all = otherWorkspaceEnvironments?.workspace === targetWorkspace ? otherWorkspaceEnvironments.envs : []
+      const updatedAll = all.map(env => (env.id === updatedTarget.id ? updatedTarget : env))
+      await saveWorkspaceEnvironments(targetWorkspace, updatedAll)
+      setOtherWorkspaceEnvironments({ workspace: targetWorkspace, envs: updatedAll })
+    }
 
     const parts = [
       added ? `${added} added` : '',
       overwritten ? `${overwritten} overwritten` : '',
     ].filter(Boolean)
-    toast.success(`Copied to "${copyTarget.name}" — ${parts.join(', ')}.`)
+    const workspaceInfo = workspaces.find(w => w.path === targetWorkspace)
+    const destination =
+      targetWorkspace === currentWorkspace ? copyTarget.name : `${copyTarget.name} (${workspaceInfo?.name ?? targetWorkspace})`
+    toast.success(`Copied to "${destination}" — ${parts.join(', ')}.`)
     setSelectedIds(new Set())
   }
 
@@ -758,14 +832,39 @@ const handleRevertToPrevious = (
             <span className="text-[11px] font-semibold text-blue-400 shrink-0">
               {selectedVariables.length} selected
             </span>
+            {/* Workspace de destino — começa no atual (mesmo workspace desta
+                tela); trocar aqui busca os environments de outro workspace
+                direto do disco, sem mexer no que está aberto na tela. */}
+            <select
+              value={targetWorkspace}
+              onChange={e => {
+                setTargetWorkspace(e.target.value)
+                setCopyTargetId('')
+              }}
+              disabled={workspaces.length === 0}
+              title="Workspace to copy into"
+              className="w-[120px] shrink-0 h-8 rounded-lg border border-pm-border bg-pm-surface px-2 text-xs text-pm-text outline-none focus:border-blue-500/40 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {workspaces.length === 0 && <option value={currentWorkspace}>{currentWorkspace || 'This workspace'}</option>}
+              {workspaces.map(w => (
+                <option key={w.path} value={w.path}>
+                  {w.name}
+                  {w.path === currentWorkspace ? ' (current)' : ''}
+                </option>
+              ))}
+            </select>
             <select
               value={copyTargetId}
               onChange={e => setCopyTargetId(e.target.value)}
-              disabled={otherEnvironments.length === 0}
+              disabled={otherEnvironments.length === 0 || loadingOtherWorkspaceEnvs}
               className="min-w-0 flex-1 h-8 rounded-lg border border-pm-border bg-pm-surface px-2 text-xs text-pm-text outline-none focus:border-blue-500/40 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <option value="">
-                {otherEnvironments.length === 0 ? 'No other environment' : 'Copy to environment...'}
+                {loadingOtherWorkspaceEnvs
+                  ? 'Loading environments...'
+                  : otherEnvironments.length === 0
+                    ? 'No other environment'
+                    : 'Copy to environment...'}
               </option>
               {otherEnvironments.map(env => (
                 <option key={env.id} value={env.id}>

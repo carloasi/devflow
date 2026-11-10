@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DevFlow",
-  "version": "1.3.9",
+  "version": "1.5.0",
   "identifier": "com.DevFlow.dev",
   "build": {
     "frontendDist": "../out",
@@ -19,7 +19,8 @@
         "fullscreen": false,
         "hiddenTitle": false,
         "decorations": false,
-        "devtools": true
+        "devtools": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {

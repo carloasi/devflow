@@ -38,6 +38,21 @@ jobs:
           node-version: 20
           cache: npm
 
+      # A tag v1.5.0 tem que bater com o "version" do tauri.conf.json: é esse
+      # número que o app instalado informa. Se o release sair como v1.5.0 mas
+      # o app continuar dizendo 1.4.4, quem atualizar segue preso na tela de
+      # atualização obrigatória. Falha aqui, antes de gastar o build.
+      - name: Conferir versão da tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$tag" != "$app" ]; then
+            echo "::error::A tag $GITHUB_REF_NAME não bate com a versão $app do src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           # Sem os dois alvos o --target universal-apple-darwin falha.
@@ -77,3 +92,38 @@ jobs:
             src-tauri/target/release/bundle/**/*.AppImage
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
+
+  # Só na tag: junta os instaladores das três plataformas num GitHub Release
+  # (link público e fixo, sem login e sem expirar). É esse link que vai na
+  # coluna "url" da aba Releases da planilha, ou use
+  # https://github.com/<repo>/releases/latest no updateUrl. Um job só, depois
+  # da matriz, pra não ter três jobs disputando a criação do mesmo release.
+  # Pelo botão manual do Actions (workflow_dispatch) continua só gerando os
+  # artefatos, sem publicar nada.
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: devflow-*
+          merge-multiple: true
+
+      - name: Listar instaladores
+        run: find dist -type f | sort
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DevFlow ${{ github.ref_name }}
+          generate_release_notes: true
+          # v1.5.0-beta.1 sai como pre-release: não vira o "latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: dist/**/*
