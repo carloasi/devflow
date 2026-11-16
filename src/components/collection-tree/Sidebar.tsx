@@ -19,6 +19,7 @@ import { CollectionItem } from '@/app/types/CollectionItem'
 import type { Marker } from '@/lib/markers'
 import { parsePostmanCollection } from '@/utils/postmanParser'
 import { parseOpenApi, detectOpenApiVersion } from '@/lib/openapiParser'
+import { isHar, parseHar } from '@/lib/har/parseHar'
 import { parsePostmanImport } from '@/components/usePostmanImport'
 import { useEnvironment } from '@/components/EnvironmentContext'
 import { Environment } from '@/app/types/Environment'
@@ -141,6 +142,20 @@ export default function Sidebar({
   // }, [collections])
 
   /*
+   * IMPORT DE HAR (HTTP Archive — DevTools do Chrome, Fiddler, Charles...)
+   * Também decidido pelo conteúdo (`log.entries`), não pela extensão.
+   */
+  const importHar = (parsed: unknown, fileName: string) => {
+    const result = parseHar(parsed, fileName.replace(/\.(har|json)$/i, ''))
+    if (!result.collection) {
+      alert(result.warnings.join('\n') || 'Could not import this HAR file.')
+      return
+    }
+    setCollections(prev => [...prev, result.collection!])
+    if (result.warnings.length > 0) alert(result.warnings.join('\n'))
+  }
+
+  /*
    * IMPORT COLLECTION
    */
   const handleImport = (
@@ -160,6 +175,11 @@ export default function Sidebar({
         // Um arquivo de OpenAPI e uma collection do Postman são ambos .json:
         // quem decide o caminho é o conteúdo, não a extensão nem o usuário.
         const parsed = JSON.parse(text)
+
+        if (isHar(parsed)) {
+          importHar(parsed, file.name)
+          return
+        }
 
         if (detectOpenApiVersion(parsed)) {
           const fallbackName = file.name.replace(/\.(json|ya?ml)$/i, '')
@@ -196,7 +216,7 @@ export default function Sidebar({
           'Falha ao importar coleção:',
           err
         )
-        alert('Could not read this file. It must be a valid JSON (Postman collection or OpenAPI).')
+        alert('Could not read this file. It must be a valid JSON (Postman collection, OpenAPI or HAR).')
       }
     }
 
@@ -277,6 +297,11 @@ export default function Sidebar({
 
         // Mesma regra do botão "Import Collection": quem decide o caminho é
         // o conteúdo, não a extensão nem de onde o arquivo veio.
+        if (isHar(parsed)) {
+          importHar(parsed, file.name)
+          return
+        }
+
         if (detectOpenApiVersion(parsed)) {
           const fallbackName = file.name.replace(/\.(json|ya?ml)$/i, '')
           const result = parseOpenApi(parsed, fallbackName)
@@ -327,7 +352,7 @@ export default function Sidebar({
         }
       } catch (err) {
         console.log('Falha ao importar arquivo arrastado:', err)
-        alert('Could not read this file. It must be a valid JSON (Postman collection, environment, or OpenAPI).')
+        alert('Could not read this file. It must be a valid JSON (Postman collection, environment, OpenAPI or HAR).')
       }
     }
 
@@ -359,7 +384,7 @@ export default function Sidebar({
     dragCounterRef.current = 0
     setIsDraggingFile(false)
     const files = Array.from(e.dataTransfer.files ?? []).filter(f =>
-      f.name.toLowerCase().endsWith('.json')
+      /\.(json|har)$/i.test(f.name)
     )
     files.forEach(processImportFile)
   }
@@ -396,7 +421,7 @@ export default function Sidebar({
         <div className="absolute inset-1.5 z-50 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-pm-accent bg-pm-bg/95 pointer-events-none">
           <Upload size={20} className="text-pm-accent" />
           <span className="text-[12px] font-medium text-pm-text">Drop to import</span>
-          <span className="text-[10.5px] text-pm-text-muted">Collection or Environment (.json)</span>
+          <span className="text-[10.5px] text-pm-text-muted">Collection, Environment or HAR (.json, .har)</span>
         </div>
       )}
 
@@ -449,7 +474,7 @@ export default function Sidebar({
           <input
             type="file"
             ref={collectionFileInputRef}
-            accept=".json"
+            accept=".json,.har"
             onChange={handleImport}
             className="hidden"
           />
@@ -492,7 +517,7 @@ export default function Sidebar({
                 <FileJson size={13} className="text-pm-text-muted mt-0.5" />
                 <span className="flex flex-col gap-0.5">
                   <span>Import Collection</span>
-                  <span className="text-[10.5px] font-normal text-pm-text-muted">Postman, OpenAPI/Swagger</span>
+                  <span className="text-[10.5px] font-normal text-pm-text-muted">Postman, OpenAPI/Swagger, HAR</span>
                 </span>
               </DropdownMenuItem>
               <DropdownMenuItem
@@ -506,7 +531,7 @@ export default function Sidebar({
                 </span>
               </DropdownMenuItem>
               <div className="mt-1 border-t border-pm-border px-2.5 pt-1.5 pb-1 text-[10.5px] text-pm-text-muted">
-                or drag a .json file into the sidebar
+                or drag a .json or .har file into the sidebar
               </div>
             </DropdownMenuContent>
           </DropdownMenu>
