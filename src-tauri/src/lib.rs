@@ -19,8 +19,6 @@ use load_test::{start_load_test, stop_load_test, LoadTestRegistry};
 
 mod mcp_server;
 use mcp_server::{start_mcp_server, stop_mcp_server, mcp_respond, mcp_heartbeat};
-mod relay_server;
-use relay_server::{start_relay_server, stop_relay_server};
 
 mod claude_cli;
 use claude_cli::{
@@ -907,8 +905,6 @@ pub fn run() {
             stop_mcp_server,
             mcp_respond,
             mcp_heartbeat,
-            start_relay_server,
-            stop_relay_server,
             claude_available,
             claude_send,
             claude_cancel,

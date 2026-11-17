@@ -51,4 +51,16 @@ describe('buildFlowHar', () => {
     const header = buildFlowHar(flow).log.entries[0].request.headers.find(h => h.name === 'Ocp-Apim-Subscription-Key');
     expect(header?.value).toBe('');
   });
+
+  it('builds the basic auth header from the resolved username and password', () => {
+    const basic = {
+      id: 'f', name: 'F', type: 'folder',
+      item: [{ id: 'b', name: 'Basic', type: 'request', method: 'GET',
+        request: { url: 'https://a/x', urlexport: { host: [], path: [], raw: '' }, headers: [], auth: { type: 'basic', username: '{{user}}', password: '{{pass}}' } } }],
+    } as unknown as CollectionItem;
+    // "pass" é nome de credencial: secreta, só vai pro arquivo com includeSecrets.
+    const flow = buildFlowData(basic, { path: [], environments: [{ name: 'tst', envMap: { user: 'ana', pass: 'ção' } }], includeSecrets: true });
+    const header = buildFlowHar(flow).log.entries[0].request.headers.find(h => h.name === 'Authorization');
+    expect(header?.value).toBe(`Basic ${Buffer.from('ana:ção', 'utf8').toString('base64')}`);
+  });
 });

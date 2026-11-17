@@ -1,4 +1,4 @@
-import type { FlowData } from './buildFlowHtml';
+import { basicAuthorization, type FlowData } from './buildFlowHtml';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Flow → HAR (HTTP Archive 1.2): as requisições do flow, em ordem, num
@@ -107,10 +107,18 @@ export function buildFlowHar(flow: FlowData, options: { envName?: string; now?: 
   for (const step of flow.steps) {
     if (step.kind !== 'http') continue;
     const url = substitute(step.url, env);
-    const headers = Object.entries(step.headers).map(([name, value]) => ({
+    let headers = Object.entries(step.headers).map(([name, value]) => ({
       name: substitute(name, env),
       value: substitute(value, env),
     }));
+    // Auth Basic: o base64 de usuário e senha já trocados (como no envio).
+    if (step.basicAuth) {
+      headers = headers.filter(h => h.name.toLowerCase() !== 'authorization');
+      headers.push({
+        name: 'Authorization',
+        value: basicAuthorization(substitute(step.basicAuth.username, env), substitute(step.basicAuth.password, env)),
+      });
+    }
     const body = step.body ? substitute(step.body, env) : '';
     const hasBody = !!body && step.method !== 'GET' && step.method !== 'HEAD';
 

@@ -39,6 +39,12 @@ export interface FlowStep {
   postResponse: string;
   /** Só em `token`: a variável onde o token mora. */
   tokenVariable?: string;
+  /**
+   * Auth Basic, com os {{placeholders}} ainda no texto: o base64 só pode ser
+   * montado depois de trocá-los (o runner e o HAR fazem isso). Montado no
+   * export, ele codificava o literal "{{user}}:{{pass}}" e o passo dava 401.
+   */
+  basicAuth?: { username: string; password: string };
 }
 
 export interface FlowVariable {
@@ -122,9 +128,49 @@ function looksLikeUrl(value: string): boolean {
   return /^\s*https?:\/\/[^\s]+$/i.test(value);
 }
 
-const VAR_IN_TEXT = /\{\{\s*([\w.-]+)\s*\}\}/g;
-// pm.environment.get('x'), pm.variables.get("x"), postman.getEnvironmentVariable('x')…
-const VAR_IN_SCRIPT = /(?:\.get|getEnvironmentVariable|getGlobalVariable)\(\s*['"]([\w.-]+)['"]\s*\)/g;
+// Qualquer nome entre chaves — o mesmo que o envio troca ({{base url}} também).
+const VAR_IN_TEXT = /\{\{\s*([^{}]+?)\s*\}\}/g;
+// Só leituras de VARIÁVEL: pm.environment.get('x'), pm.variables.get("x"),
+// postman.getEnvironmentVariable('x')… Um `.get(` qualquer pegava também
+// pm.response.headers.get('Content-Type'), que aparecia no painel.
+const VAR_IN_SCRIPT =
+  /(?:pm\.(?:environment|variables|globals|collectionVariables|iterationData)\.get|postman\.get(?:Environment|Global)Variable)\(\s*['"]([^'"]+)['"]\s*\)/g;
+// Variáveis que um script GRAVA (pm.environment.set('x', …)): entram no
+// painel desde o início, pra quem roda o flow ver o que cada passo produz.
+const VAR_SET_IN_SCRIPT =
+  /(?:pm\.(?:environment|variables|globals|collectionVariables)\.set|postman\.set(?:Environment|Global)Variable)\(\s*['"]([^'"]+)['"]/g;
+
+/** Script sem as linhas comentadas — um `pm.environment.set` comentado não grava nada. */
+function activeScript(script: string | undefined): string {
+  return String(script ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split(/\r?\n/)
+    .filter(line => !/^\s*\/\//.test(line))
+    .join('\n');
+}
+
+/**
+ * Nome de campo de body ou de query que guarda credencial. Mais estrito que
+ * o do header (secretScan): lá "key" basta, mas num body isso pegaria
+ * journeyKey, fareKey, bookingKey — ids, não segredos.
+ */
+const PAYLOAD_SECRET_KEY =
+  /pass(?:word|wd)?$|^pwd$|senha|secret|api[-_]?key|subscription[-_]?key|credential|authorization|(?:^|[-_])token$|[a-z]token$/i;
+
+/**
+ * Nome de VARIÁVEL que é credencial pelo nome, com qualquer valor (vazio ou
+ * curto). Ancorado no fim: `password`, `b2bPassword`, `apiKey`,
+ * `bearerToken` — e não `urlAuthorization` nem `passwordResetUrl`.
+ */
+const CREDENTIAL_NAME = /(?:pass(?:word|wd)?|pwd|senha|secret|api[-_]?key|subscription[-_]?key|credentials?|token)$/i;
+
+/** "Basic <base64>" de usuário e senha já resolvidos (UTF-8, como o navegador manda). */
+export function basicAuthorization(username: string, password: string): string {
+  const bytes = new TextEncoder().encode(`${username}:${password}`);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `Basic ${btoa(binary)}`;
+}
 
 function scanInto(names: Set<string>, text: string | undefined, pattern: RegExp) {
   for (const match of String(text ?? '').matchAll(pattern)) names.add(match[1]);
@@ -134,25 +180,92 @@ function scanInto(names: Set<string>, text: string | undefined, pattern: RegExp)
  * Credencial literal num header (Authorization, chave de API…) vira uma
  * variável "secret" sem valor. `Bearer <token>` mantém o "Bearer ".
  */
-function stripLiteralSecrets(
-  headers: Record<string, string>,
-  secrets: Map<string, string>
-): Record<string, string> {
+/**
+ * Guarda `credential` como variável secreta e devolve o nome dela. O mesmo
+ * campo com valores diferentes (em passos diferentes) ganha nomes distintos,
+ * e um nome que o flow já usa como variável não é reaproveitado.
+ */
+type PlaceSecret = (label: string, credential: string) => string;
+
+function secretPlacer(secrets: Map<string, string>, used: ReadonlySet<string>): PlaceSecret {
+  return (label, credential) => {
+    const base = suggestVariableName(label);
+    let name = base;
+    for (let i = 2; secrets.has(name) ? secrets.get(name) !== credential : used.has(name); i++) name = `${base}${i}`;
+    secrets.set(name, credential);
+    return name;
+  };
+}
+
+function stripLiteralSecrets(headers: Record<string, string>, place: PlaceSecret): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
     const scheme = value.match(/^(Bearer|Basic)\s+(.+)$/i);
     const credential = scheme ? scheme[2] : value;
     if (isLikelySecretValue(key, credential) || (scheme && isLikelySecretValue('authorization', credential))) {
-      let name = suggestVariableName(key);
-      // Mesmo header com valores diferentes em passos diferentes: nomes distintos.
-      for (let i = 2; secrets.has(name) && secrets.get(name) !== credential; i++) name = `${suggestVariableName(key)}${i}`;
-      secrets.set(name, credential);
+      const name = place(key, credential);
       out[key] = scheme ? `${scheme[1]} {{${name}}}` : `{{${name}}}`;
     } else {
       out[key] = value;
     }
   }
   return out;
+}
+
+/** Valor escrito à mão (não uma {{variável}}) — vazio não é segredo. */
+const isLiteralValue = (value: string) => value.trim() !== '' && !value.includes('{{');
+
+/**
+ * `a=1&password=x` → `a=1&password={{password}}`. O valor guardado é o texto
+ * como está (ainda codificado), pra a troca reproduzir o original.
+ */
+function stripPairSecrets(text: string, place: PlaceSecret): string {
+  return text
+    .split('&')
+    .map(pair => {
+      const eq = pair.indexOf('=');
+      if (eq <= 0) return pair;
+      const key = pair.slice(0, eq);
+      const value = pair.slice(eq + 1);
+      let decodedKey = key;
+      try {
+        decodedKey = decodeURIComponent(key.replace(/\+/g, ' '));
+      } catch {
+        /* fica como está */
+      }
+      if (!PAYLOAD_SECRET_KEY.test(decodedKey) || !isLiteralValue(value)) return pair;
+      return `${key}={{${place(decodedKey, value)}}}`;
+    })
+    .join('&');
+}
+
+/**
+ * Credencial escrita no body (JSON ou form) vira variável secreta — antes só
+ * os headers passavam por isso, e um login com "password" no body saía em
+ * claro no HTML mesmo com os segredos de fora. O JSON é tratado no texto
+ * (não por parse/stringify) pra não mudar a formatação nem quebrar um body
+ * com {{variáveis}} fora de aspas. O valor guardado é o trecho escapado, que
+ * volta idêntico no lugar.
+ */
+function stripBodySecrets(body: string, place: PlaceSecret): string {
+  if (!body) return body;
+  const json = body.replace(
+    /("((?:[^"\\]|\\.)+)"\s*:\s*)"((?:[^"\\]|\\.)*)"/g,
+    (match, prefix: string, key: string, raw: string) =>
+      PAYLOAD_SECRET_KEY.test(key) && isLiteralValue(raw) ? `${prefix}"{{${place(key, raw)}}}"` : match
+  );
+  if (json !== body) return json;
+  // Form (x-www-form-urlencoded): pares chave=valor, sem espaço nem chaves.
+  return /^[^=&\s{}[\]"]+=[^&\s]*(?:&[^=&\s]+=[^&\s]*)*$/.test(body.trim()) ? stripPairSecrets(body, place) : body;
+}
+
+/** Credencial na query string (`?apikey=...`) vira variável secreta. */
+function stripQuerySecrets(url: string, place: PlaceSecret): string {
+  const at = url.indexOf('?');
+  if (at < 0) return url;
+  const hash = url.indexOf('#', at);
+  const query = hash < 0 ? url.slice(at + 1) : url.slice(at + 1, hash);
+  return url.slice(0, at + 1) + stripPairSecrets(query, place) + (hash < 0 ? '' : url.slice(hash));
 }
 
 export function buildFlowData(
@@ -172,6 +285,23 @@ export function buildFlowData(
   const includeSecrets = options.includeSecrets === true;
   const secrets = new Map<string, string>();
   const used = new Set<string>();
+  // Nomes que o flow já usa como variável: uma credencial escrita no texto
+  // não ganha o mesmo nome (senão tomaria o lugar da do environment).
+  const taken = new Set<string>();
+  for (const { item } of collectSteps(folder)) {
+    const r = item.request;
+    // O body como vai ser enviado (sem os comentários): um {{password}} só
+    // num trecho comentado não reserva o nome — a senha escrita no body
+    // ganhava "password2" à toa.
+    const sentBody = r && requestHasBody(r.bodyType, r.body) ? sanitizeJsonBodyForSend(r.body!) : '';
+    for (const text of [r?.url, sentBody, r?.auth?.username, r?.auth?.password, r?.auth?.token, r?.auth?.value,
+      ...(r?.headers ?? []).filter(h => h.enabled !== false).flatMap(h => [h.key, h.value])]) scanInto(taken, text, VAR_IN_TEXT);
+    for (const script of [r?.scripts?.preRequest, r?.scripts?.postResponse]) {
+      scanInto(taken, activeScript(script), VAR_IN_SCRIPT);
+      scanInto(taken, activeScript(script), VAR_SET_IN_SCRIPT);
+    }
+  }
+  const place = secretPlacer(secrets, taken);
 
   const steps: FlowStep[] = collectSteps(folder).map(({ item, path }) => {
     const req = item.request;
@@ -183,8 +313,10 @@ export function buildFlowData(
       preRequest: req?.scripts?.preRequest ?? '',
       postResponse: req?.scripts?.postResponse ?? '',
     };
-    scanInto(used, base.preRequest, VAR_IN_SCRIPT);
-    scanInto(used, base.postResponse, VAR_IN_SCRIPT);
+    for (const script of [base.preRequest, base.postResponse]) {
+      scanInto(used, activeScript(script), VAR_IN_SCRIPT);
+      scanInto(used, activeScript(script), VAR_SET_IN_SCRIPT);
+    }
 
     if (item.protocol === 'grpc' || !req) {
       return { ...base, kind: 'grpc' as const, method: 'gRPC', url: '', headers: {}, body: '' };
@@ -196,19 +328,32 @@ export function buildFlowData(
     }
 
     const hasBody = requestHasBody(req.bodyType, req.body);
-    // identidade no resolve: os {{placeholders}} ficam pro navegador.
+    const isBasic = req.auth?.type === 'basic';
+    // identidade no resolve: os {{placeholders}} ficam pro navegador. A
+    // Basic sai à parte (basicAuth): o base64 só existe depois da troca.
     const headers = stripLiteralSecrets(
       buildRequestHeaders({
         userHeaders: (req.headers || []).map(h => ({ key: h.key ?? '', value: h.value ?? '', enabled: h.enabled })),
         disabledDefaults: req.disabledDefaultHeaders,
         hasBody,
-        auth: req.auth,
+        auth: isBasic ? undefined : req.auth,
         resolve: value => value,
       }),
-      secrets
+      place
     );
-    const url = replaceUrlParams(req.url || '', req.urlexport?.variable || []);
-    const body = hasBody ? sanitizeJsonBodyForSend(req.body!) : '';
+    let basicAuth: FlowStep['basicAuth'];
+    if (isBasic) {
+      const password = req.auth?.password ?? '';
+      basicAuth = {
+        username: req.auth?.username ?? '',
+        // Senha escrita à mão vira variável secreta, como num header.
+        password: isLiteralValue(password) ? `{{${place('password', password)}}}` : password,
+      };
+      scanInto(used, basicAuth.username, VAR_IN_TEXT);
+      scanInto(used, basicAuth.password, VAR_IN_TEXT);
+    }
+    const url = stripQuerySecrets(replaceUrlParams(req.url || '', req.urlexport?.variable || []), place);
+    const body = hasBody ? stripBodySecrets(sanitizeJsonBodyForSend(req.body!), place) : '';
 
     scanInto(used, url, VAR_IN_TEXT);
     scanInto(used, body, VAR_IN_TEXT);
@@ -217,7 +362,10 @@ export function buildFlowData(
       scanInto(used, v, VAR_IN_TEXT);
     }
 
-    return { ...base, kind: 'http' as const, method: item.method || 'GET', url, headers, body };
+    return {
+      ...base, kind: 'http' as const, method: item.method || 'GET', url, headers, body,
+      ...(basicAuth ? { basicAuth } : {}),
+    };
   });
 
   const sources = options.environments.length > 0
@@ -229,11 +377,17 @@ export function buildFlowData(
   // casava — a URL base saía vazia e o passo ia pra "/api/v1/token". Valor
   // que é uma URL não é credencial. Secreta em QUALQUER environment = secreta
   // em todos, pra o campo se comportar igual ao trocar de environment.
+  // Nome de credencial clara (password, senha, apiKey, bearerToken…) é
+  // secreta mesmo vazia ou curta — antes uma senha de 6 dígitos, ou ainda
+  // sem valor, aparecia como campo comum e saía em claro no arquivo.
+  // Uma URL em qualquer environment decide: não é credencial — senão um
+  // urlAuthorization vazio num environment esvaziava a URL de todos.
   const secretKeys = new Set(
-    keys.filter(key => sources.some(src => {
-      const value = src.envMap[key] ?? '';
-      return isLikelySecretValue(key, value) && !looksLikeUrl(value);
-    }))
+    keys.filter(key => {
+      const values = sources.map(src => src.envMap[key] ?? '');
+      if (values.some(looksLikeUrl)) return false;
+      return CREDENTIAL_NAME.test(key) || values.some(value => isLikelySecretValue(key, value));
+    })
   );
 
   const environments: FlowEnvironment[] = sources.map(src => ({
@@ -288,8 +442,21 @@ body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-u
 h1 { font-size:20px; margin:0; } h2 { font-size:14px; margin:0; }
 .muted { color:var(--muted); } .small { font-size:12px; }
 .desc { color:#c9ccd1; white-space:pre-wrap; margin:8px 0 0; }
-header.top { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; position:sticky; top:0; background:var(--bg); padding:12px 0; z-index:2; border-bottom:1px solid var(--line); }
-.actions { display:flex; gap:8px; align-items:center; flex-shrink:0; }
+header.top { display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px 16px; align-items:flex-start; position:sticky; top:0; background:var(--bg); padding:12px 0; z-index:2; border-bottom:1px solid var(--line); }
+.actions { display:flex; gap:8px; align-items:center; flex-shrink:0; flex-wrap:wrap; }
+.env-banner { flex-basis:100%; display:flex; align-items:center; gap:10px; flex-wrap:wrap; border-radius:8px; padding:9px 14px; border:1px solid var(--line); background:#2a2d33; }
+.env-banner-kind { font:800 11px system-ui,sans-serif; letter-spacing:.08em; padding:3px 8px; border-radius:4px; background:#3a3d44; color:#e6e6e6; }
+.env-banner-name { font:700 15px ui-monospace,Consolas,monospace; }
+.env-banner-note { font-size:12px; opacity:.85; }
+.env-banner.env-prod { background:#3a1414; border-color:#b91c1c; color:#fecaca; }
+.env-banner.env-prod .env-banner-kind { background:#dc2626; color:#fff; }
+.env-banner.env-staging { background:#3a2a12; border-color:#b45309; color:#fde68a; }
+.env-banner.env-staging .env-banner-kind { background:#d97706; color:#fff; }
+.env-banner.env-test { background:#12301f; border-color:#15803d; color:#bbf7d0; }
+.env-banner.env-test .env-banner-kind { background:#16a34a; color:#fff; }
+select.env-prod { border-color:#dc2626; color:#fecaca; }
+select.env-staging { border-color:#d97706; color:#fde68a; }
+select.env-test { border-color:#16a34a; color:#bbf7d0; }
 .progress { margin:10px 0 16px; font-size:12px; }
 button { font:600 12px system-ui,sans-serif; border-radius:6px; padding:7px 12px; cursor:pointer; border:1px solid var(--line); background:#2a2d33; color:var(--text); }
 button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -298,7 +465,7 @@ button.tiny { padding:3px 8px; font-size:11px; }
 button:disabled { opacity:.45; cursor:not-allowed; }
 a.button-link { font:600 12px system-ui,sans-serif; color:#93c5fd; text-decoration:none; border:1px solid #1e3a8a; border-radius:6px; padding:6px 10px; }
 a.button-link:hover { background:#16263a; }
-.toggle { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+.toggle { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:4px; white-space:nowrap; }
 .env-picker { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
 select { background:#141518; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:600 12px system-ui,sans-serif; cursor:pointer; max-width:220px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:8px; margin-bottom:10px; }
@@ -310,8 +477,6 @@ select { background:#141518; color:var(--text); border:1px solid var(--line); bo
 .vars.collapsed .card-head { border-bottom:0; }
 .vars.collapsed .vars-body, .vars.collapsed .vars-note { display:none; }
 .vars .alert { margin:10px 14px; }
-.relay-row { display:flex; gap:8px; align-items:center; padding:12px 14px; flex-wrap:wrap; }
-.relay-row input { flex:1; min-width:260px; }
 .vars table { width:100%; border-collapse:collapse; }
 .vars td { padding:5px 14px; border-bottom:1px solid #26292e; vertical-align:middle; }
 .vars td.key { font:12px ui-monospace,Consolas,monospace; width:30%; white-space:nowrap; }
@@ -337,10 +502,17 @@ code, pre { font:12px/1.45 ui-monospace,Consolas,monospace; }
 code { word-break:break-all; }
 pre { background:#141518; border:1px solid #26292e; border-radius:6px; padding:10px; overflow:auto; max-height:420px; white-space:pre-wrap; word-break:break-word; margin:6px 0; }
 details { margin:6px 0; } summary { cursor:pointer; color:#c9ccd1; font-size:12px; }
+textarea.body-edit { display:block; width:100%; box-sizing:border-box; resize:vertical; background:#141518; color:var(--text); border:1px solid #26292e; border-radius:6px; padding:10px; margin:6px 0 0; font:12px/1.45 ui-monospace,Consolas,monospace; tab-size:2; }
+textarea.body-edit:focus { outline:none; border-color:#3b82f6; }
+.badge.edited { background:#16263a; color:#93c5fd; }
+.row.body-actions { align-items:center; justify-content:space-between; margin:6px 0 0; }
 .row { display:flex; gap:8px; margin:12px 0 4px; flex-wrap:wrap; }
 .alert { border-radius:6px; padding:8px 10px; margin:10px 0 4px; font-size:12px; white-space:pre-wrap; }
 .alert.error { background:#3a1616; border:1px solid #7f1d1d; } .alert.warn { background:#3a2a12; border:1px solid #92400e; }
 .alert.info { background:#16263a; border:1px solid #1e3a8a; }
+.alert.friendly { font-size:13px; line-height:1.5; }
+.alert .api-said { margin-top:6px; font:12px ui-monospace,Consolas,monospace; opacity:.85; }
+details.technical summary { color:var(--muted); }
 .tests { margin:8px 0; font-size:12px; } .test.pass { color:#6ee7a1; } .test.fail { color:#fca5a5; }
 `;
 

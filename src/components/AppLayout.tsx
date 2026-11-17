@@ -5514,12 +5514,6 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
   const mcp = useMcpServer(getMcpContext);
 
-  // Relay do HTML runner (Settings → Network): se ficou ligado, sobe junto
-  // com o app — a página do flow conta com ele aberto.
-  useEffect(() => {
-    void import('@/lib/relayServer').then(m => m.ensureRelayStarted());
-  }, []);
-
   // Extensões: mesmo contexto de execução do MCP — a API que a extensão usa
   // e a que o Claude usa são a mesma, definida uma vez só (ver mcpTools.ts).
   const extensionHost = useExtensionHost(getMcpContext, message => {
