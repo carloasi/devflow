@@ -33,9 +33,13 @@ export function parsePostmanCollection(
       .replace(/\.postman_collection\.json$/i, '')
       .replace(/\.json$/i, '');
 
+    // O nome é o da collection (info.name), não o do arquivo: um download
+    // chamado "export (3).json" virava a collection "export (3)". O nome do
+    // arquivo só vale quando o JSON não traz nome (lista solta de itens).
     const rootCollectionFolder: CollectionItem = {
       id: crypto.randomUUID(),
-      name: cleanFolderName,
+      name: result.collectionName ?? cleanFolderName,
+      ...(result.collectionDescription ? { description: result.collectionDescription } : {}),
       type: 'folder',
       // Ids novos em tudo (pastas, requests e examples): os do Postman se
       // repetiriam se a mesma collection fosse importada de novo, e aí abrir

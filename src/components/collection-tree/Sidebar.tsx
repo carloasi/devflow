@@ -21,7 +21,7 @@ import type { Marker } from '@/lib/markers'
 import { parsePostmanCollection } from '@/utils/postmanParser'
 import { parseOpenApi, detectOpenApiVersion } from '@/lib/openapiParser'
 import { isHar, parseHar } from '@/lib/har/parseHar'
-import { parsePostmanImport } from '@/components/usePostmanImport'
+import { parsePostmanImport, type ImportResult } from '@/components/usePostmanImport'
 import { useEnvironment } from '@/components/EnvironmentContext'
 import { Environment } from '@/app/types/Environment'
 import {
@@ -217,6 +217,7 @@ export default function Sidebar({
           )
 
         setCollections(updatedCollections)
+        if (updatedCollections !== collections) afterPostmanImport(parsePostmanImport(parsed), file.name)
       } catch (err) {
         console.log(
           'Falha ao importar coleção:',
@@ -229,6 +230,35 @@ export default function Sidebar({
     reader.readAsText(file)
 
     e.target.value = ''
+  }
+
+  /*
+   * Depois de importar uma collection do Postman: as variáveis da collection
+   * (o DevFlow não tem esse nível) viram um environment, pra {{baseUrl}} e
+   * companhia continuarem resolvendo; e os avisos do que não deu pra trazer
+   * como estava aparecem — antes só apareciam quando NADA era importado.
+   */
+  const afterPostmanImport = (result: ImportResult, fileName: string) => {
+    const notes = [...result.warnings]
+    const variables = result.collectionVariables ?? []
+    if (variables.length > 0) {
+      const name = `${result.collectionName ?? fileName.replace(/\.json$/i, '')} variables`
+      importEnvironment({
+        id: crypto.randomUUID(),
+        name,
+        values: variables.map(v => ({
+          id: crypto.randomUUID(),
+          key: v.key,
+          value: v.value,
+          type: v.type,
+          enabled: v.enabled,
+        })),
+      })
+      notes.unshift(
+        `The collection's ${variables.length} variable(s) became the environment "${name}", now selected.`
+      )
+    }
+    if (notes.length > 0) alert(notes.join('\n'))
   }
 
   /*
@@ -259,7 +289,9 @@ export default function Sidebar({
 
         result.environments.forEach(env => {
           const importedEnv: Environment = {
-            id: env.id,
+            // Id novo: importar o mesmo arquivo duas vezes criava dois
+            // environments com o MESMO id — editar ou apagar um mexia no outro.
+            id: crypto.randomUUID(),
             name: env.name,
             values: env.values.map(v => ({
               id: crypto.randomUUID(),
@@ -332,13 +364,16 @@ export default function Sidebar({
 
         if (result.collections && result.collections.length > 0) {
           setCollections(prev => parsePostmanCollection(text, file.name, prev))
+          afterPostmanImport(result, file.name)
           importedSomething = true
         }
 
         if (result.environments && result.environments.length > 0) {
           result.environments.forEach(env => {
             importEnvironment({
-              id: env.id,
+              // Id novo: importar o mesmo arquivo duas vezes criava dois
+            // environments com o MESMO id — editar ou apagar um mexia no outro.
+            id: crypto.randomUUID(),
               name: env.name,
               values: env.values.map(v => ({
                 id: crypto.randomUUID(),

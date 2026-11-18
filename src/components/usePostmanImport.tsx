@@ -44,6 +44,13 @@ export interface ImportResult {
   environments: EnvironmentItem[] | null;
   summary:      string;
   warnings:     string[];
+  // Collection do Postman (formato com `info`): nome, descrição e as
+  // variáveis dela. O DevFlow não tem variável de collection — quem importa
+  // decide o que fazer (o botão de Import cria um environment com elas).
+  // Antes iam pro lixo e todo {{baseUrl}} parava de resolver.
+  collectionName?:        string;
+  collectionDescription?: string;
+  collectionVariables?:   EnvVariable[];
 }
 
 // ─── Tipo local para o campo request (evita depender de RequestDetails) ───────
@@ -98,9 +105,25 @@ function normalizeUrl(urlField: unknown): string {
   if (typeof urlField === 'string') return urlField;
   const u = urlField as Record<string, unknown>;
   if (typeof u['raw'] === 'string') return u['raw'];
-  const host = Array.isArray(u['host']) ? (u['host'] as string[]).join('.') : '';
-  const path = Array.isArray(u['path']) ? '/' + (u['path'] as string[]).join('/') : '';
-  return host ? `https://${host}${path}` : path;
+  // Sem `raw`, monta pelas partes. Antes saía sempre https://host/path:
+  // protocolo, porta e query sumiam ("http://localhost:8080/x?a=1" virava
+  // "https://localhost/x"), e um host {{baseUrl}} ganhava https:// na frente.
+  const host = Array.isArray(u['host']) ? (u['host'] as string[]).join('.') : String(u['host'] ?? '');
+  const path = Array.isArray(u['path'])
+    ? '/' + (u['path'] as string[]).join('/')
+    : typeof u['path'] === 'string' ? '/' + String(u['path']).replace(/^\//, '') : '';
+  const port = u['port'] !== undefined && u['port'] !== '' ? `:${u['port']}` : '';
+  const query = Array.isArray(u['query'])
+    ? (u['query'] as any[])
+        .filter(q => q && q.disabled !== true && q.key)
+        .map(q => (q.value === undefined || q.value === null ? String(q.key) : `${q.key}=${q.value}`))
+        .join('&')
+    : '';
+  const protocol = typeof u['protocol'] === 'string' && u['protocol']
+    ? `${u['protocol']}://`
+    : host.startsWith('{{') ? '' : 'https://';
+  const base = host ? `${protocol}${host}${port}${path}` : path;
+  return query ? `${base}?${query}` : base;
 }
 
 function normalizeHeaders(
@@ -159,7 +182,11 @@ const OAUTH2_KEY_ALIASES: Record<string, string> = {
   addTokenTo: 'addTokenTo',
 };
 
-function normalizeAuth(authField: unknown): NormalizedRequest['auth'] {
+// Tipos de auth do Postman que o DevFlow tem; os outros (digest, awsv4,
+// ntlm...) entram sem auth, com aviso.
+const SUPPORTED_AUTH = new Set(['none', 'bearer', 'basic', 'oauth2', 'apikey']);
+
+function normalizeAuth(authField: unknown, notes?: string[]): NormalizedRequest['auth'] {
   if (!authField || typeof authField !== 'object') return { type: 'none' };
   const a    = authField as Record<string, unknown>;
   // O Postman usa 'noauth'; o app usa 'none' — sem essa normalização o valor
@@ -214,10 +241,14 @@ function normalizeAuth(authField: unknown): NormalizedRequest['auth'] {
     };
   }
 
+  if (!SUPPORTED_AUTH.has(type)) notes?.push(`uses "${type}" auth, which DevFlow doesn't support — imported without auth`);
   return { type: 'none' };
 }
 
-function normalizeBody(bodyField: unknown): { body: string; bodyType: 'none' | 'raw' | 'graphql' } {
+function normalizeBody(
+  bodyField: unknown,
+  notes?: string[]
+): { body: string; bodyType: 'none' | 'raw' | 'graphql'; contentType?: string } {
   if (!bodyField || typeof bodyField !== 'object') return { body: '', bodyType: 'none' };
   const b    = bodyField as Record<string, unknown>;
   const mode = String(b['mode'] ?? 'none');
@@ -239,7 +270,22 @@ function normalizeBody(bodyField: unknown): { body: string; bodyType: 'none' | '
     return { body: JSON.stringify({ query, variables }), bodyType: 'graphql' };
   }
 
+  // Formulário urlencoded vira o texto que ele de fato envia (a=1&b=2), com
+  // o Content-Type dele. Antes virava o JSON da lista de campos — que ia
+  // como corpo da request, e a API recebia um array em vez do formulário.
+  if (mode === 'urlencoded' && Array.isArray(b['urlencoded'])) {
+    const body = (b['urlencoded'] as any[])
+      .filter(f => f && f.disabled !== true && f.key)
+      .map(f => `${encodeURIComponent(String(f.key))}=${encodeURIComponent(String(f.value ?? ''))}`)
+      .join('&');
+    return { body, bodyType: body ? 'raw' : 'none', contentType: 'application/x-www-form-urlencoded' };
+  }
+
   if (mode === 'formdata' || mode === 'urlencoded') {
+    // form-data (multipart, com arquivo) o DevFlow não envia: fica o JSON
+    // dos campos pra não perder a informação, e o aviso diz que precisa
+    // ser refeito.
+    if (mode === 'formdata') notes?.push(`has a form-data body, which DevFlow doesn't send — kept as text, redo it as raw`);
     const fields = b[mode];
     try {
       return { body: JSON.stringify(fields, null, 2), bodyType: 'raw' };
@@ -282,11 +328,21 @@ function normalizeRequestObject(
   fallbackEvents?: unknown,
   // Auth da pasta/collection mais próxima — usada quando a request não tem
   // a sua (no Postman, "Inherit auth from parent" = sem campo auth).
-  inheritedAuth?: unknown
+  inheritedAuth?: unknown,
+  // O que não deu pra trazer como está (vira aviso no import).
+  notes?: string[]
 ): NormalizedRequest {
   const rawUrl             = req['url']
   const url                = normalizeUrl(rawUrl)
-  const { body, bodyType } = normalizeBody(req['body'])
+  const { body, bodyType, contentType } = normalizeBody(req['body'], notes)
+  const headers = normalizeHeaders(req['header'] ?? req['headers'])
+  if (contentType && !headers.some(h => h.key.toLowerCase() === 'content-type')) {
+    headers.push({ key: 'Content-Type', value: contentType, enabled: true })
+  }
+  const authSource = ownAuth(req['auth']) ?? inheritedAuth
+  const apikey = (authSource as any)?.type === 'apikey' ? (authSource as any).apikey : undefined
+  const apikeyIn = Array.isArray(apikey) ? apikey.find((i: any) => i?.key === 'in')?.value : undefined
+  if (apikeyIn === 'query') notes?.push('sends its API key in the query string; DevFlow sends API keys as a header')
   const scripts             = normalizeScripts(eventField ?? req['event'], fallbackEvents)
 
   return {
@@ -297,16 +353,26 @@ function normalizeRequestObject(
       path:     Array.isArray((rawUrl as any)?.path) ? (rawUrl as any).path : [],
       variable: normalizePathParams(rawUrl),
     },
-    headers:  normalizeHeaders(req['header'] ?? req['headers']),
+    headers,
     body,
     bodyType,
-    auth:     normalizeAuth(ownAuth(req['auth']) ?? inheritedAuth),
+    auth:     normalizeAuth(authSource, notes),
     scripts,
   }
 }
 
 // Auth definida no próprio nível, ou undefined se ele herda do pai.
 // "noauth" é explícito (sem auth, sem herdar); "inherit" e ausência herdam.
+/** Lista de `event` do Postman com algum script de verdade. */
+function hasScripts(eventField: unknown): boolean {
+  if (!Array.isArray(eventField)) return false;
+  return eventField.some((evt: any) => {
+    const exec = evt?.script?.exec;
+    const text = Array.isArray(exec) ? exec.join('\n') : String(exec ?? '');
+    return text.trim() !== '';
+  });
+}
+
 function ownAuth(authField: unknown): unknown {
   if (!authField || typeof authField !== 'object') return undefined;
   const type = String((authField as Record<string, unknown>)['type'] ?? '').toLowerCase();
@@ -379,6 +445,8 @@ function convertPostmanItem(raw: any, warnings: string[], inheritedAuth?: unknow
     const clean = value.trim();
     return clean || undefined;
   };
+  // Postman v2.0 aceita "request": "https://..." (só a URL, GET).
+  if (typeof raw.request === 'string') raw = { ...raw, request: { method: 'GET', url: raw.request } };
   const rawRequest = (raw.request ?? {}) as Record<string, unknown>;
   const description = text(raw.description) ?? text(rawRequest.description);
 
@@ -405,6 +473,9 @@ function convertPostmanItem(raw: any, warnings: string[], inheritedAuth?: unknow
 
   if (isFolder) {
     const folderAuth = ownAuth(raw.auth) ?? inheritedAuth;
+    if (hasScripts(raw.event)) {
+      warnings.push(`Folder "${raw.name ?? '?'}" has scripts; DevFlow only runs request scripts — they were left out.`);
+    }
     return {
       id:      raw.id   ?? uid(),
       name:    raw.name ?? 'Unnamed Folder',
@@ -421,7 +492,9 @@ function convertPostmanItem(raw: any, warnings: string[], inheritedAuth?: unknow
   const req              = (raw.request ?? {}) as Record<string, unknown>;
   // Auth efetiva da request: a própria, senão a da pasta/collection.
   const effectiveAuth     = ownAuth(req['auth']) ?? inheritedAuth;
-  const normalizedRequest = normalizeRequestObject(req, raw.event, raw.events, effectiveAuth);
+  const notes: string[]   = [];
+  const normalizedRequest = normalizeRequestObject(req, raw.event, raw.events, effectiveAuth, notes);
+  for (const note of notes) warnings.push(`"${raw.name ?? '?'}" ${note}.`);
   const method            = normalizeMethod(req);
 
   if (!normalizedRequest.url) warnings.push(`Item "${raw.name ?? '?'}" has no URL defined.`);
@@ -528,11 +601,33 @@ export function parsePostmanImport(raw: unknown): ImportResult {
       }
 
       const items = Array.isArray(col['item']) ? (col['item'] as any[]) : [];
+      if (hasScripts(col['event'])) {
+        warnings.push('The collection has collection-level scripts; DevFlow only runs request scripts — they were left out.');
+      }
+      const collectionVariables: EnvVariable[] = Array.isArray(col['variable'])
+        ? (col['variable'] as any[])
+            .filter(v => v && (v.key ?? v.id))
+            .map(v => ({
+              key:     String(v.key ?? v.id),
+              value:   typeof v.value === 'string' ? v.value : JSON.stringify(v.value ?? ''),
+              enabled: v.disabled !== true,
+              type:    v.type === 'secret' ? 'secret' as const : 'default' as const,
+            }))
+        : [];
+      const infoName = typeof info['name'] === 'string' && info['name'].trim() ? info['name'].trim() : undefined;
+      const infoDescription = typeof info['description'] === 'string' && info['description'].trim()
+        ? info['description'].trim()
+        : undefined;
       // Auth definida na collection vale pra toda request que herda.
       const collectionAuth = ownAuth(col['auth']);
       collections = items.map(item => convertPostmanItem(item, warnings, collectionAuth));
       summary     = `Collection "${String(info['name'] ?? 'unnamed')}" — ${collections.length} item(s).`;
-      return { collections, environments: null, summary, warnings };
+      return {
+        collections, environments: null, summary, warnings,
+        ...(infoName ? { collectionName: infoName } : {}),
+        ...(infoDescription ? { collectionDescription: infoDescription } : {}),
+        ...(collectionVariables.length ? { collectionVariables } : {}),
+      };
     }
 
     // ── 3. Postman Environment Export { name, values } ────────────────────────
