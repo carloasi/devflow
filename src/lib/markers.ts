@@ -398,10 +398,49 @@ export function filterTreeByMarkers(
 
 export const MARKER_BASE_PREFIX = 'marker:';
 
+/**
+ * Chave que diz "a base conhece o catálogo", mesmo vazio. Sem ela, um
+ * catálogo sincronizado sem nenhum marcador (todos apagados) parecia
+ * "primeira sincronização" — e o merge voltava a ser a união, trazendo de
+ * volta o que tinha sido apagado.
+ */
+const CATALOG_KEY = `${MARKER_BASE_PREFIX}~catalog`;
+
 /** Base do catálogo: `marker:<id>` → nome e cor naquele momento. */
 export function markerBaseHashes(catalog: Marker[]): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = { [CATALOG_KEY]: '1' };
   for (const m of catalog) out[`${MARKER_BASE_PREFIX}${m.id}`] = markerPrint(m);
+  return out;
+}
+
+/**
+ * A base do catálogo depois de um PUSH. Não é o catálogo enviado: ele traz
+ * do GitHub o que ainda não chegou aqui (marcador novo do colega, nome que
+ * ele mudou), e gravá-lo como base fazia o pull seguinte ler isso como
+ * "apagado aqui" / "mudado aqui" — o marcador do colega nunca chegava, e o
+ * push seguinte o apagava ou desfazia a mudança dele.
+ *
+ * Base = o que está IGUAL nos dois lados agora. Onde ainda diferem, fica a
+ * entrada antiga da base (o pull seguinte decide com ela, como antes do push).
+ */
+export function markerBaseAfterPush(
+  local: Marker[],
+  sent: Marker[],
+  previous: MarkerBase
+): Record<string, string> {
+  const out: Record<string, string> = { [CATALOG_KEY]: '1' };
+  const localById = new Map(local.map(m => [m.id, m]));
+  const sentById = new Map(sent.map(m => [m.id, m]));
+  for (const id of new Set([...localById.keys(), ...sentById.keys()])) {
+    const here = localById.get(id);
+    const there = sentById.get(id);
+    if (here && there && markerPrint(here) === markerPrint(there)) {
+      out[`${MARKER_BASE_PREFIX}${id}`] = markerPrint(there);
+      continue;
+    }
+    const before = baseOf(previous, id);
+    if (before !== undefined) out[`${MARKER_BASE_PREFIX}${id}`] = before;
+  }
   return out;
 }
 
@@ -481,6 +520,51 @@ export function mergeCatalogs(
   return { catalog, remapped };
 }
 
+export interface MarkerChanges {
+  /** Nomes dos marcadores que chegariam (criados lá). */
+  added: string[];
+  /** Mudaram de nome ou cor lá, ou o seu passa a ser o do time (mesmo nome). */
+  changed: string[];
+  /** Apagados lá e intocados aqui: sairiam daqui. */
+  removed: string[];
+}
+
+/**
+ * O que receber o catálogo do GitHub mudaria AQUI — o mesmo mergeCatalogs
+ * do pull, só que sem aplicar. É o que a Central de Sincronização mostra em
+ * "Recebidos": sem isto, um colega que só criou ou recoloriu um marcador não
+ * aparecia em lugar nenhum, e não havia botão pra trazer a mudança.
+ *
+ * `remote` null = não há catálogo lá: nada a receber.
+ */
+export function markerChangesFromRemote(local: Marker[], remote: Marker[] | null, base?: MarkerBase): MarkerChanges {
+  const out: MarkerChanges = { added: [], changed: [], removed: [] };
+  if (!remote) return out;
+  const { catalog, remapped } = mergeCatalogs(local, remote, base);
+  const localById = new Map(local.map(m => [m.id, m]));
+  const catalogIds = new Set(catalog.map(m => m.id));
+  const remapTargets = new Set(remapped.values());
+
+  for (const m of catalog) {
+    const mine = localById.get(m.id);
+    if (mine) {
+      if (markerPrint(mine) !== markerPrint(m)) out.changed.push(m.name);
+    } else if (remapTargets.has(m.id)) {
+      out.changed.push(m.name);
+    } else {
+      out.added.push(m.name);
+    }
+  }
+  for (const mine of local) {
+    if (!catalogIds.has(mine.id) && !remapped.has(mine.id)) out.removed.push(mine.name);
+  }
+  return out;
+}
+
+export function markerChangeCount(changes: MarkerChanges): number {
+  return changes.added.length + changes.changed.length + changes.removed.length;
+}
+
 /**
  * O catálogo que o PUSH grava: o daqui, mais os marcadores do GitHub que
  * não existem aqui (nem pelo id, nem pelo nome).
@@ -494,7 +578,9 @@ export function mergeCatalogs(
  * novo), e o que apagaram no GitHub não é reenviado por você.
  */
 export function catalogForPush(local: Marker[], remote: Marker[] | null, base?: MarkerBase): Marker[] {
-  if (!remote?.length) return local;
+  // Só sem arquivo lá: catálogo VAZIO lá (apagaram todos) segue a base —
+  // com o atalho, o push devolvia todos os que o colega tinha apagado.
+  if (!remote) return local;
   const withBase = hasMarkerBase(base);
   const remoteById = new Map(remote.map(m => [m.id, m]));
   const ids = new Set(local.map(m => m.id));

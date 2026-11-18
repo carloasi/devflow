@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  ArrowDownToLine,
   ArrowUpToLine,
   Check,
   ChevronLeft,
@@ -24,7 +23,8 @@ import {
   Terminal,
   Trash2,
   X,
-  Radio, RefreshCw, FileCode2 } from 'lucide-react'
+  Radio, FileCode2, ArrowDownUp } from 'lucide-react'
+import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 
 import {
   DropdownMenu,
@@ -59,14 +59,11 @@ interface Props {
   onExportHtml?: () => void
   onRun?: () => void
   onLoadTest?: () => void
-  // Envia só esta collection pro GitHub. Só vem preenchido na raiz: é a
-  // granularidade em que o remoto guarda um arquivo por collection.
+  // Envia SÓ esta subpasta ou request pro GitHub (a collection inteira é
+  // pela Central de Sincronização).
   onPushCollection?: () => void
-  // Baixa o que mudou no GitHub só desta collection, abrindo a tela de
-  // comparação para escolher o que aceitar.
-  onPullCollection?: () => void
-  // Só responde "tem algo novo?" — sem abrir a tela de revisão.
-  onCheckUpdates?: () => void
+  // Abre a Central de Sincronização filtrada na collection deste item.
+  onOpenSync?: () => void
   onAddExample?: () => void
   onToggleStar?: () => void
   onCopyUrl?: () => void
@@ -123,8 +120,7 @@ export function TreeActionMenu({
   onRun,
   onLoadTest,
   onPushCollection,
-  onPullCollection,
-  onCheckUpdates,
+  onOpenSync,
   onAddExample,
   onToggleStar,
   onCopyUrl,
@@ -136,6 +132,7 @@ export function TreeActionMenu({
   onOpenChange,
   requestedView,
 }: Props) {
+  const syncText = useSyncDiffStrings()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   // Mesmo truque do menu de clique direito: troca de conteúdo no lugar em
   // vez de submenu (um submenu do Radix dentro de outro populariza um
@@ -492,26 +489,19 @@ export function TreeActionMenu({
         {item.type === 'folder' && (
           <>
             {/* GitHub */}
-            {(onPushCollection || onPullCollection || onCheckUpdates) && (
+            {(onPushCollection || onOpenSync) && (
               <>
+                {/* Receber/enviar/conflitos: a Central, já filtrada. */}
+                {onOpenSync && (
+                  <DropdownMenuItem onClick={onOpenSync} className={itemClass} title={syncText.scOpenItemTitle}>
+                    <ArrowDownUp size={14} className={iconClass} />
+                    {syncText.scOpenItem}
+                  </DropdownMenuItem>
+                )}
                 {onPushCollection && (
                   <DropdownMenuItem onClick={onPushCollection} className={itemClass}>
                     <ArrowUpToLine size={14} className={iconClass} />
-                    {/* Numa subpasta, só ela sobe — as outras mudanças da
-                        collection continuam esperando. */}
-                    {isRoot ? 'Push to GitHub' : 'Push only this folder'}
-                  </DropdownMenuItem>
-                )}
-                {onPullCollection && (
-                  <DropdownMenuItem onClick={onPullCollection} className={itemClass}>
-                    <ArrowDownToLine size={14} className={iconClass} />
-                    Pull from GitHub
-                  </DropdownMenuItem>
-                )}
-                {onCheckUpdates && (
-                  <DropdownMenuItem onClick={onCheckUpdates} className={itemClass}>
-                    <RefreshCw size={14} className={iconClass} />
-                    Check for updates
+                    {syncText.scSendOnlyFolder}
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuSeparator className={separatorClass} />
@@ -571,7 +561,7 @@ export function TreeActionMenu({
             {onPushCollection && (
               <DropdownMenuItem onClick={onPushCollection} className={itemClass}>
                 <ArrowUpToLine size={14} className={iconClass} />
-                Push only this request
+                {syncText.scSendOnlyRequest}
               </DropdownMenuItem>
             )}
             {onCopyUrl && (

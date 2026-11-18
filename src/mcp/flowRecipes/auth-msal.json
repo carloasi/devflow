@@ -1,0 +1,56 @@
+{
+  "_comment": "Auth 1 (MSAL -> AD). Ordem: (1) o passo 01 em 'duplicate' (chame duplicate_request: copia a request 'Portal De Grupos - APIs / Gerar token MSAL' com a configuracao OAuth2 e os segredos; e um PASSO DE TOKEN, sem URL, e e assim mesmo); (2) os passos em 'requests', na ordem, com create_request. Na execucao (run_collection, run_request, run_load_test) o passo 01 obtem o {{msal}} sozinho: reaproveita o token valido ou abre o login no DevFlow (peca ao usuario para concluir). get_oauth2_token so para ver validade/escopos ou forcar um novo (forceNew). O passo 02 (token AD) e POST /api/v1/token/groups: o nome atual da rota (antes /api/v1/token/ad). Por padrao os passos NAO validam o retorno da API (sem pm.test); o post-response so grava variaveis. Substitua <FOLDER_ID> pelo folderId do flow criado (no create_flow, o duplicateFrom aceita o caminho em 'path'; sem ele, troque <ID_GERAR_TOKEN_MSAL> pelo id: list_requests com search 'Gerar token MSAL'). Os passos de negocio comecam em 04.",
+  "duplicate": {
+    "tool": "duplicate_request",
+    "requestId": "<ID_GERAR_TOKEN_MSAL>",
+    "folderId": "<FOLDER_ID>",
+    "name": "01 - Gerar token MSAL",
+    "path": "Portal De Grupos - APIs / Gerar token MSAL"
+  },
+  "requests": [
+    {
+      "folderId": "<FOLDER_ID>",
+      "name": "02 - Token Groups v1 (AzulCorp)",
+      "method": "POST",
+      "url": "{{urlAuthorization}}/api/v1/token/groups",
+      "headers": [
+        {
+          "key": "Ocp-Apim-Subscription-Key",
+          "value": "{{apiKey}}"
+        }
+      ],
+      "auth": {
+        "type": "bearer",
+        "token": "{{msal}}"
+      },
+      "bodyType": "none",
+      "body": "",
+      "preRequestScript": "",
+      "postResponseScript": "var jsonData = pm.response.json();\npm.environment.set(\"bearerToken\", jsonData.data.token);"
+    },
+    {
+      "folderId": "<FOLDER_ID>",
+      "name": "03 - Authenticate Groups v1 (AzulCorp)",
+      "method": "POST",
+      "url": "{{urlUser}}/api/v1/authenticate/groups",
+      "headers": [
+        {
+          "key": "Ocp-Apim-Subscription-Key",
+          "value": "{{apiKey}}"
+        },
+        {
+          "key": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "auth": {
+        "type": "bearer",
+        "token": "{{bearerToken}}"
+      },
+      "bodyType": "raw",
+      "body": "{}",
+      "preRequestScript": "",
+      "postResponseScript": ""
+    }
+  ]
+}

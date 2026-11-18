@@ -1,0 +1,137 @@
+{
+  "id": "b2b-reserva-hold",
+  "title": "Reserva em hold (Barramento B2B)",
+  "context": "b2b",
+  "workspace": "Barramento B2B - Dev",
+  "environment": "5by5",
+  "parentFolder": "Sprints / Sprint 121 / User Story 1345299: [Sales.B2B.Api] Migrar os Métodos de Change e Cancel para V4",
+  "folderName": "Flow NN - Reserva em hold",
+  "ask": [
+    {
+      "id": "route",
+      "question": "Qual rota (origem e destino)? Precisa ter voo no ambiente de dev na data da busca.",
+      "options": [
+        "VCP → SDU (Recomendado)",
+        "outra (digite)"
+      ]
+    },
+    {
+      "id": "pax",
+      "question": "Quantos passageiros adultos?",
+      "options": [
+        "1 (Recomendado)",
+        "2",
+        "outro (digite)"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "name": "Token v1",
+      "tool": "create_request",
+      "copyFrom": "0cd95190-444d-47ea-9194-7dee99209573",
+      "source": "POST Barramento B2B - Dev / Authentication / v1 / Token v1",
+      "auth": {
+        "type": "bearer",
+        "token": "{{tokenB2b}}"
+      },
+      "consumes": [
+        "urlAuthorization",
+        "apiKey",
+        "tokenB2b"
+      ],
+      "produces": [
+        "bearerToken"
+      ],
+      "postResponseScript": "var jsonData = pm.response.json();\npm.environment.set(\"bearerToken\", jsonData.data.token);",
+      "status": "confirmado",
+      "notes": "POST {{urlAuthorization}}/api/v1/token, header Ocp-Apim-Subscription-Key: {{apiKey}}, SEMPRE auth bearer {{tokenB2b}} (a origem tem um token literal: a receita troca). copyFrom pela id: na mesma pasta há Token v1 GET e DELETE com o mesmo nome. data.token confirmado no run de 13/11/2026."
+    },
+    {
+      "name": "Authenticate v1",
+      "tool": "create_request",
+      "copyFrom": "eb465345-14f8-41ff-b6f7-2ced2dbb7071",
+      "source": "POST Barramento B2B - Dev / User / v1 / Authenticate v1",
+      "url": "{{urlUser}}/api/v1/authenticate",
+      "body": "{\n  \"username\": \"{{b2bUsername}}\",\n  \"password\": \"{{b2bPassword}}\"\n}",
+      "consumes": [
+        "urlUser",
+        "bearerToken",
+        "b2bUsername",
+        "b2bPassword"
+      ],
+      "produces": [
+        "currencyCode"
+      ],
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"currencyCode\", response.data.sessionContext.pointOfSale.currencyCode);",
+      "status": "confirmado",
+      "notes": "copyFrom pela id (na pasta há Authenticate v1 DELETE). A origem tem logins comentados e {{username}}/{{password}} no body e \"{{ urlUser }}\" com espaços na URL: a receita usa o body com {{b2bUsername}}/{{b2bPassword}} e a URL limpa, como no Flow 01. Headers: os da origem (apiKey, Subscription-Email/Id, True-Client-IP). Grava só currencyCode (data.sessionContext.pointOfSale.currencyCode, visto no run de 13/11/2026); o 2FA não consome nada dela."
+    },
+    {
+      "name": "2FA",
+      "tool": "create_request",
+      "copyFrom": "55cc9e3c-1cb9-4f10-9d8b-daaf0150a3aa",
+      "source": "PUT Barramento B2B - Dev / User / v1 / 2FA (interno) v1 (AzulCorp)",
+      "consumes": [
+        "urlUser",
+        "bearerToken"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "PUT {{urlUser}}/api/v1/user/2FA, sem body. copyFrom pela id (há o GET com o mesmo nome). Sem scripts: no Flow 01 o post-response só tem pm.test, e flow não valida retorno por padrão. Visto nos runs: em 13/11/2026 (env-tst) respondeu 404 e o AirSearch seguinte passou; em 05/11/2026 respondeu 2xx mas o AirSearch deu 401 \"User not authorized by 2-factor authentication\" — se acontecer, é o usuário de {{b2bUsername}} que exige 2FA, não o flow."
+    },
+    {
+      "name": "AirSearch v3",
+      "tool": "create_request",
+      "copyFrom": "eb293af8-94b3-40d0-bc20-61d8e0078680",
+      "source": "POST Barramento B2B - Dev / Shopping / V3 / AirSearch V3",
+      "body": "{\n  \"passengers\": [\n    {\n      \"type\": \"ADT\",\n      \"count\": <<pax.number>>\n    }\n  ],\n  \"journeys\": [\n    {\n      \"origin\": \"<<route.origin>>\",\n      \"destination\": \"<<route.destination>>\",\n      \"departure\": \"{{flowDeparture}}\"\n    }\n  ],\n  \"criteria\": {\n    \"baggageAllowance\": \"All\",\n    \"directFlightsOnly\": false\n  }\n}",
+      "consumes": [
+        "urlShopping",
+        "bearerToken",
+        "flowDeparture"
+      ],
+      "produces": [
+        "journeyKeyIda",
+        "fareKeyIda"
+      ],
+      "preRequestScript": "// Data de partida calculada na hora (nunca fixa). O DevFlow resolve os {{...}} do body\n// DEPOIS do pre-request, então {{flowDeparture}} já vale nesta mesma request.\nvar moment = require(\"moment\");\npm.environment.set(\"flowDeparture\", moment().add(90, \"days\").format(\"YYYY-MM-DD\"));\n// Começa vazio: sem voo nesta busca, o Order não usa o voo de outra execução.\npm.environment.set(\"journeyKeyIda\", \"\");\npm.environment.set(\"fareKeyIda\", \"\");",
+      "postResponseScript": "// 1º voo da ida com tarifa; usa a 1ª tarifa dele (regra do Flow 01).\n// Caminhos confirmados no run de 13/11/2026: data.airResult.offers[] → offersAvailableByMarket[] → value[] (voo: key, fares[].key).\nvar response = pm.response.json();\nvar offers = (response.data && response.data.airResult && response.data.airResult.offers) || [];\nvar markets = offers.length ? (offers[0].offersAvailableByMarket || []) : [];\nvar journey = null;\nfor (var m = 0; m < markets.length && !journey; m++) {\n  var values = markets[m].value || [];\n  for (var v = 0; v < values.length; v++) {\n    if (values[v].fares && values[v].fares.length) { journey = values[v]; break; }\n  }\n}\nif (journey) {\n  pm.environment.set(\"journeyKeyIda\", journey.key);\n  pm.environment.set(\"fareKeyIda\", journey.fares[0].key);\n} else {\n  console.log(\"Nenhum voo com tarifa nesta busca.\");\n}",
+      "status": "confirmado",
+      "notes": "Body da receita: rota e passageiros das respostas (<<route.origin>>, <<route.destination>>, <<pax.number>>) e partida {{flowDeparture}} (D+90, do pre-request) — o mesmo formato do body da origem, que tem SDU→REC e data fixa. Produz journeyKeyIda/fareKeyIda, os nomes que o body do Order (origem) usa. Caminhos do JSON vistos no run de 13/11/2026 do flow \"Flows - DevFlow AI / Reserva 24h - Hold - VCP-SDU - 1A\"."
+    },
+    {
+      "name": "Order v2",
+      "tool": "create_request",
+      "copyFrom": "940e3223-3eaf-4c63-9469-95a77b99d6eb",
+      "source": "POST Barramento B2B - Dev / Order / v2 / Order v2",
+      "consumes": [
+        "urlOrder",
+        "bearerToken",
+        "journeyKeyIda",
+        "fareKeyIda"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "Hold: Order v2 (POST {{urlOrder}}/api/v2/order). copyFrom pela id (há o GET Order v2). O Flow 01 não tem Order v2: a origem é a da collection. Body da origem: {{journeyKeyIda}}/{{fareKeyIda}}, 1 passageiro ADT sintético sem documento (travelDocuments vazio), comentários // que saem no envio; com pax > 1, acrescente passageiros sintéticos (override \"body\"). Sem scripts: o Checkout v1 seguinte fecha a order da sessão e não consome nada deste passo (o script da origem grava orderTotalAmount, que só o Payments usaria). Nenhum run deste passo guardado."
+    },
+    {
+      "name": "Checkout v1",
+      "tool": "create_request",
+      "copyFrom": "749f1045-05d2-4cac-baff-c662350dbb2a",
+      "source": "POST Barramento B2B - Dev / Order / v1 / Checkout v1",
+      "consumes": [
+        "urlOrder",
+        "bearerToken"
+      ],
+      "produces": [
+        "recordLocator"
+      ],
+      "preRequestScript": "// Zera o que este passo produz: se ele falhar, o seguinte não usa o valor de outra execução.\n[\"recordLocator\"].forEach(function (name) { pm.environment.set(name, \"\"); });",
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"recordLocator\", response.data.recordLocator);",
+      "status": "confirmado",
+      "notes": "POST {{urlOrder}}/api/v1/checkout, body {\"notifyContacts\": \"Customer\"}; fica em Order / v1 (não há pasta Checkout). Fecha a order da SESSÃO (a do Order anterior): não lê {{recordLocator}}, só produz (data.recordLocator — script da origem e do Flow 01). Por isso o reset do recordLocator é aqui. \"Conforme a order\": hold → depois do Order v2; paga → depois do Payments v1."
+    }
+  ],
+  "notes": "Origens e scripts confirmados em 14/11/2026 (Flow 01 de referência, scripts das próprias origens e runs de 05 e 13/11/2026); execução de ponta a ponta ainda não vista."
+}

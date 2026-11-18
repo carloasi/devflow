@@ -10,12 +10,12 @@ import {
   Trash2,
   Ban,
   Plus,
-  Save,
-  Loader2,
+  ArrowUp,
   Copy,
   Pencil,
   GripVertical,
 } from 'lucide-react'
+import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 
 import { Environment, EnvironmentValue } from '@/app/types/Environment'
 import {
@@ -175,16 +175,17 @@ function SortableEnvRow({
 }
 
 interface EnvironmentSelectorProps {
-  onSaveEnvironment?: (env: Environment) => Promise<void> | void // ✅ novo
-  // Abre a comparação com o GitHub (mesma tela do pull de collection).
-  onPullEnvironments?: () => void
+  // Enviar/receber o environment: abre a Central de Sincronização filtrada
+  // nele (era "Save to GitHub" + "Pull", cada um com o próprio fluxo).
+  onOpenSync?: (env: Environment) => void
   // Path do workspace ativo — usado só pra isolar por workspace a última
   // env selecionada (senão trocar de workspace e voltar restaura a env
   // errada, já que antes essa chave era global pro app inteiro).
   workspace?: string
 }
 
-export default function EnvironmentSelector({ onSaveEnvironment, onPullEnvironments, workspace = '' }: EnvironmentSelectorProps) {
+export default function EnvironmentSelector({ onOpenSync, workspace = '' }: EnvironmentSelectorProps) {
+  const syncText = useSyncDiffStrings()
   const {
     environments,
     selectedEnvId,
@@ -205,7 +206,6 @@ export default function EnvironmentSelector({ onSaveEnvironment, onPullEnvironme
   const panelEnv = environments.find(env => env.id === panelEnvId) ?? activeEnv
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [colorPickerForId, setColorPickerForId] = useState<string | null>(null)
-  const [isSavingEnv, setIsSavingEnv] = useState(false)
   // Renomear direto na lista (double-click no nome) — mesmo padrão de
   // "double-click to rename" já usado na árvore de collections (TreeNode.tsx).
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -416,20 +416,6 @@ useEffect(() => {
     importEnvironment(newEnv)
   }
 
-  // Sobe as alterações do ambiente ativo pro GitHub (mesmo mecanismo do
-  // botão Save dentro do painel de variáveis — ver onSaveEnvironment prop),
-  // só que direto na barra, sem precisar abrir o painel.
-  const handleSaveEnvironment = async () => {
-    if (!activeEnv || !onSaveEnvironment || isSavingEnv) return
-    setIsSavingEnv(true)
-    try {
-      await onSaveEnvironment(activeEnv)
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setIsSavingEnv(false)
-    }
-  }
 
   return (
     <div className="flex items-center gap-2">
@@ -486,7 +472,7 @@ useEffect(() => {
               tem alteração não sincronizada com o GitHub (isDirty). Ambientes
               "apenas local" nunca mostram esse botão, já que não há nada
               pra sincronizar. */}
-          {activeEnv?.isDirty && onSaveEnvironment && (
+          {activeEnv?.isDirty && onOpenSync && (
             <>
               <div
                 className="w-px h-4 shrink-0 bg-pm-border"
@@ -498,15 +484,15 @@ useEffect(() => {
               />
               <button
                 type="button"
-                onClick={handleSaveEnvironment}
-                disabled={isSavingEnv}
-                title="Save environment changes to GitHub"
+                onClick={() => onOpenSync(activeEnv)}
+                title={syncText.scEnvOpenTitle}
+                aria-label={syncText.scEnvOpenTitle}
                 className={`h-full pl-1.5 pr-2 rounded-r-lg flex items-center justify-center hover:bg-emerald-500/10 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
                   activeEnv.color === undefined ? 'text-emerald-400 hover:text-emerald-300' : ''
                 }`}
                 style={activeEnv.color !== undefined ? { color: `hsl(${activeEnv.color},35%,60%)` } : undefined}
               >
-                {isSavingEnv ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                <ArrowUp size={12} />
               </button>
             </>
           )}
@@ -887,8 +873,7 @@ useEffect(() => {
     <EnvironmentVariablesQuickView
       activeEnv={panelEnv}
       onClose={() => setIsSlidePanelOpen(false)}
-      onSave={onSaveEnvironment}
-      onPull={onPullEnvironments}
+      onOpenSync={onOpenSync ? () => onOpenSync(panelEnv) : undefined}
       currentWorkspace={workspace}
     />
   )}

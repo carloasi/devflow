@@ -40,12 +40,20 @@ export async function loadConflictHistory(): Promise<ConflictDecision[]> {
   }
 }
 
-export async function recordConflictDecisions(added: ConflictDecision[]): Promise<void> {
-  if (added.length === 0) return;
-  try {
-    await store.set(KEY, appendDecisions(await loadConflictHistory(), added));
-  } catch (e) {
-    // Perder o histórico não pode atrapalhar a sincronização.
-    console.log('Could not record the conflict history:', e);
-  }
+// Uma gravação por vez: ler-somar-gravar em paralelo (duas revisões
+// seguidas, o relatório do push logo depois) fazia a segunda partir do
+// histórico de antes da primeira — e as decisões da primeira sumiam.
+let writing: Promise<void> = Promise.resolve();
+
+export function recordConflictDecisions(added: ConflictDecision[]): Promise<void> {
+  if (added.length === 0) return writing;
+  writing = writing.then(async () => {
+    try {
+      await store.set(KEY, appendDecisions(await loadConflictHistory(), added));
+    } catch (e) {
+      // Perder o histórico não pode atrapalhar a sincronização.
+      console.log('Could not record the conflict history:', e);
+    }
+  });
+  return writing;
 }

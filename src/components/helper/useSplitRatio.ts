@@ -73,7 +73,14 @@ export interface SplitRatio {
   dragging: boolean
 }
 
-export function useSplitRatio(storageKey: string, fallback = 0.5): SplitRatio {
+export function useSplitRatio(
+  storageKey: string,
+  fallback = 0.5,
+  /** Mínimo de cada lado, em px (padrão: o da revisão, MIN_LEFT/MIN_RIGHT). */
+  limits: { minLeft?: number; minRight?: number } = {}
+): SplitRatio {
+  const minLeft = limits.minLeft ?? MIN_LEFT
+  const minRight = limits.minRight ?? MIN_RIGHT
   const [ratio, setRatio] = useState(() => load(storageKey, fallback))
   const [dragging, setDragging] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -88,8 +95,8 @@ export function useSplitRatio(storageKey: string, fallback = 0.5): SplitRatio {
   /** Fração para o pixel `x` na tela, com os limites do contêiner atual. */
   const ratioAt = useCallback((x: number) => {
     const rect = containerRef.current?.getBoundingClientRect()
-    return rect ? splitRatioAt(x, rect.left, rect.width) : null
-  }, [])
+    return rect ? splitRatioAt(x, rect.left, rect.width, minLeft, minRight) : null
+  }, [minLeft, minRight])
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return
@@ -143,8 +150,8 @@ export function useSplitRatio(storageKey: string, fallback = 0.5): SplitRatio {
     if (x === null) return
     e.preventDefault()
     e.stopPropagation()
-    set(splitRatioAt(x, rect.left, rect.width), true)
-  }, [set])
+    set(splitRatioAt(x, rect.left, rect.width, minLeft, minRight), true)
+  }, [set, minLeft, minRight])
 
   return {
     ratio,

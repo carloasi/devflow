@@ -8,6 +8,7 @@ import { closeMergeDiff, useMergeDiff, type MergeDiffRequest } from '@/lib/sync/
 import { defaultPicks, mergeChunks, type ChunkPick } from '@/lib/sync/mergeChunks'
 import type { RemoteChangeItem, RemoteFieldPreview } from '@/lib/sync/remoteChangeAlert'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
+import { useSplitRatio } from '@/components/helper/useSplitRatio'
 
 // ─────────────────────────────────────────────────────────────────────────
 // "Ver diferença" dos avisos de merge, no formato de três painéis do Visual
@@ -30,6 +31,7 @@ const BADGE: Record<string, string> = {
 }
 
 function FieldDiff({ field }: { field: RemoteFieldPreview }) {
+  const t = useSyncDiffStrings()
   const twoWay = field.base === undefined || field.base === null
   const chunks = useMemo(
     () => mergeChunks(twoWay ? null : field.base!, field.before, field.after),
@@ -40,7 +42,10 @@ function FieldDiff({ field }: { field: RemoteFieldPreview }) {
   if (!chunks) return null
   return (
     <div>
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-pm-text-muted">{field.field}</div>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-pm-text-muted">
+        {/* "content" é a request inteira (item novo ou apagado na Central). */}
+        {field.field === 'content' ? t.scContent : field.field}
+      </div>
       <ThreeWayMergeView
         chunks={chunks}
         picks={picks ?? defaultPicks(chunks)}
@@ -57,13 +62,86 @@ function FieldDiff({ field }: { field: RemoteFieldPreview }) {
   )
 }
 
+/**
+ * A lista de itens e a diferença do escolhido, em três painéis — o miolo da
+ * janela de diferença. Exportado pra a Central de Sincronização mostrar o
+ * mesmo DENTRO dela, em vez de abrir outra janela por cima.
+ */
+export function MergeDiffPanel({
+  items,
+  focusId,
+  onSelect,
+}: {
+  items: RemoteChangeItem[]
+  focusId?: string
+  /** Avisa qual item está aberto (a Central o leva pra janela separada). */
+  onSelect?: (id: string) => void
+}) {
+  const t = useSyncDiffStrings()
+  const [selectedId, setSelected] = useState<string | null>(
+    () => focusId ?? items.find(i => i.fields.length > 0)?.id ?? items[0]?.id ?? null
+  )
+  const setSelectedId = (id: string) => {
+    setSelected(id)
+    onSelect?.(id)
+  }
+  const selected: RemoteChangeItem | undefined = items.find(i => i.id === selectedId)
+  // Largura da lista de itens (arrastando a divisória), guardada entre aberturas.
+  const split = useSplitRatio('devflow_merge_diff_items', 0.24, { minLeft: 160, minRight: 360 })
+
+  return (
+      <div ref={split.containerRef} className={`flex-1 min-h-0 flex ${split.dragging ? 'select-none' : ''}`}>
+        {/* Itens */}
+        <div className="shrink-0 overflow-y-auto p-1.5" style={{ width: `${split.ratio * 100}%` }}>
+          <div className="px-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-pm-text-muted">
+            {t.mdItems(items.length)}
+          </div>
+          {items.map(item => {
+            const kind = item.conflict ? 'conflict' : item.change
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSelectedId(item.id)}
+                title={item.path.join(' / ')}
+                className={`w-full flex items-center gap-1.5 rounded-md px-1.5 py-1 text-left cursor-pointer ${
+                  selectedId === item.id ? 'bg-pm-row-active' : 'hover:bg-pm-hover'
+                }`}
+              >
+                <span className={`shrink-0 rounded px-1 text-[9px] font-semibold uppercase tracking-wide ${BADGE[kind]}`}>
+                  {t.rcBadge[kind]}
+                </span>
+                <span className="min-w-0 truncate text-[11.5px] text-pm-text">{item.path[item.path.length - 1]}</span>
+              </button>
+            )
+          })}
+        </div>
+        {/* Divisória: arrasta (ou setas do teclado); duplo clique volta ao padrão. */}
+        <div
+          {...split.handleProps}
+          title={t.scItemsResize}
+          className={`w-1 shrink-0 cursor-col-resize border-l border-pm-border outline-none hover:bg-[#007acc]/40 focus-visible:bg-[#007acc]/40 ${split.dragging ? 'bg-[#007acc]/50' : ''}`}
+        />
+
+        {/* Diferença do item, campo a campo */}
+        <div className="flex-1 min-w-0 overflow-y-auto p-3">
+          {selected ? (
+            <div className="flex flex-col gap-3">
+              <div className="text-[12px] font-semibold text-pm-text">{selected.path.join(' / ')}</div>
+              {selected.fields.length === 0 ? (
+                <p className="text-[11px] text-pm-text-muted">{t.mdNoFields}</p>
+              ) : (
+                selected.fields.map(field => <FieldDiff key={`${selected.id}:${field.field}`} field={field} />)
+              )}
+            </div>
+          ) : null}
+        </div>
+      </div>
+  )
+}
+
 function MergeDiffBody({ request }: { request: MergeDiffRequest }) {
   const t = useSyncDiffStrings()
-  const [selectedId, setSelectedId] = useState<string | null>(
-    () => request.focusId ?? request.items.find(i => i.fields.length > 0)?.id ?? request.items[0]?.id ?? null
-  )
-  const selected: RemoteChangeItem | undefined = request.items.find(i => i.id === selectedId)
-
   return (
     <>
       <div className="h-11 shrink-0 flex items-center gap-2 px-4 border-b border-pm-border">
@@ -85,47 +163,7 @@ function MergeDiffBody({ request }: { request: MergeDiffRequest }) {
         {t.mdSimulation}
       </div>
 
-      <div className="flex-1 min-h-0 flex">
-        {/* Itens */}
-        <div className="w-[240px] shrink-0 overflow-y-auto border-r border-pm-border p-1.5">
-          <div className="px-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-pm-text-muted">
-            {t.mdItems(request.items.length)}
-          </div>
-          {request.items.map(item => {
-            const kind = item.conflict ? 'conflict' : item.change
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setSelectedId(item.id)}
-                title={item.path.join(' / ')}
-                className={`w-full flex items-center gap-1.5 rounded-md px-1.5 py-1 text-left cursor-pointer ${
-                  selectedId === item.id ? 'bg-pm-row-active' : 'hover:bg-pm-hover'
-                }`}
-              >
-                <span className={`shrink-0 rounded px-1 text-[9px] font-semibold uppercase tracking-wide ${BADGE[kind]}`}>
-                  {t.rcBadge[kind]}
-                </span>
-                <span className="min-w-0 truncate text-[11.5px] text-pm-text">{item.path[item.path.length - 1]}</span>
-              </button>
-            )
-          })}
-        </div>
-
-        {/* Diferença do item, campo a campo */}
-        <div className="flex-1 min-w-0 overflow-y-auto p-3">
-          {selected ? (
-            <div className="flex flex-col gap-3">
-              <div className="text-[12px] font-semibold text-pm-text">{selected.path.join(' / ')}</div>
-              {selected.fields.length === 0 ? (
-                <p className="text-[11px] text-pm-text-muted">{t.mdNoFields}</p>
-              ) : (
-                selected.fields.map(field => <FieldDiff key={`${selected.id}:${field.field}`} field={field} />)
-              )}
-            </div>
-          ) : null}
-        </div>
-      </div>
+      <MergeDiffPanel items={request.items} focusId={request.focusId} />
 
       <div className="shrink-0 flex items-center justify-end gap-2 px-4 py-2.5 border-t border-pm-border">
         <button

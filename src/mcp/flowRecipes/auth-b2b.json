@@ -1,0 +1,85 @@
+{
+  "_comment": "Auth 2 (token gerado no Barramento B2B). Token v1 B2B -> Authenticate v1 B2B -> Authenticate Groups (com o bearer do B2B). REGRA: todo Token v1 do flow B2B leva o header Authorization (auth bearer) com a variavel {{tokenB2b}}. As variaveis tokenB2b, b2bUsername e b2bPassword so o usuario cria e mantem, no app (nunca ler o valor; conferir so por nome). Por padrao os passos NAO validam o retorno da API (sem pm.test); o post-response so grava variaveis. Substitua <FOLDER_ID> pelo folderId do flow criado. Os passos de negocio comecam em 04.",
+  "requests": [
+    {
+      "folderId": "<FOLDER_ID>",
+      "name": "01 - Token v1 (B2B)",
+      "method": "POST",
+      "url": "{{urlAuthorization}}/api/v1/token",
+      "headers": [
+        {
+          "key": "Ocp-Apim-Subscription-Key",
+          "value": "{{apiKey}}"
+        }
+      ],
+      "auth": {
+        "type": "bearer",
+        "token": "{{tokenB2b}}"
+      },
+      "bodyType": "none",
+      "body": "",
+      "preRequestScript": "",
+      "postResponseScript": "var jsonData = pm.response.json();\npm.environment.set(\"bearerToken\", jsonData.data.token);"
+    },
+    {
+      "folderId": "<FOLDER_ID>",
+      "name": "02 - Authenticate v1 (B2B)",
+      "method": "POST",
+      "url": "{{urlUser}}/api/v1/authenticate",
+      "headers": [
+        {
+          "key": "Ocp-Apim-Subscription-Key",
+          "value": "{{apiKey}}"
+        },
+        {
+          "key": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "key": "Subscription-Email",
+          "value": "email@test7"
+        },
+        {
+          "key": "Subscription-Id",
+          "value": "12344555567"
+        },
+        {
+          "key": "True-Client-IP",
+          "value": "192.168.2.1"
+        }
+      ],
+      "auth": {
+        "type": "bearer",
+        "token": "{{bearerToken}}"
+      },
+      "bodyType": "raw",
+      "body": "{\n  \"username\": \"{{b2bUsername}}\",\n  \"password\": \"{{b2bPassword}}\"\n}",
+      "preRequestScript": "",
+      "postResponseScript": ""
+    },
+    {
+      "folderId": "<FOLDER_ID>",
+      "name": "03 - Authenticate Groups v1 (AzulCorp)",
+      "method": "POST",
+      "url": "{{urlUser}}/api/v1/authenticate/groups",
+      "headers": [
+        {
+          "key": "Ocp-Apim-Subscription-Key",
+          "value": "{{apiKey}}"
+        },
+        {
+          "key": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "auth": {
+        "type": "bearer",
+        "token": "{{bearerToken}}"
+      },
+      "bodyType": "raw",
+      "body": "{}",
+      "preRequestScript": "",
+      "postResponseScript": ""
+    }
+  ]
+}

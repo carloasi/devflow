@@ -1,5 +1,6 @@
 'use client';
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -48,7 +49,7 @@ export function NetworkSettingsSection() {
   const isNoTimeout = timeoutMs === 0;
 
   if (loading) {
-    return <div className="text-sm text-pm-text-muted py-3">Loading...</div>;
+    return <div className="flex items-center gap-2 text-sm text-pm-text-muted py-3"><DevFlowSpinner size={16} /> Loading...</div>;
   }
 
   return (

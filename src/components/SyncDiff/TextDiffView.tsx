@@ -15,6 +15,12 @@ interface Props {
   afterLabel: string
   emptyText: string
   collapsedText: (count: number) => string
+  /**
+   * O item inteiro é novo ou apagado (um lado vazio = não existe): mostra só
+   * o lado que existe, sem a linha "−"/"+" vazia nem o rótulo do outro. Fora
+   * disso, vazio é um valor (variável esvaziada) e os dois lados aparecem.
+   */
+  hideEmptySide?: boolean
 }
 
 function LineText({ line }: { line: DiffLine }) {
@@ -37,8 +43,15 @@ function LineText({ line }: { line: DiffLine }) {
   )
 }
 
-export function TextDiffView({ before, after, beforeLabel, afterLabel, emptyText, collapsedText }: Props) {
-  const rows = useMemo(() => collapseUnchanged(diffLines(before, after)), [before, after])
+export function TextDiffView({ before, after, beforeLabel, afterLabel, emptyText, collapsedText, hideEmptySide }: Props) {
+  const hideBefore = !!hideEmptySide && before === ''
+  const hideAfter = !!hideEmptySide && after === ''
+  const rows = useMemo(() => {
+    const lines = diffLines(before, after).filter(
+      line => !(hideBefore && line.type === 'del') && !(hideAfter && line.type === 'add')
+    )
+    return collapseUnchanged(lines)
+  }, [before, after, hideBefore, hideAfter])
 
   if (before === after) {
     return <p className="text-[10px] italic text-pm-text-muted/70">{emptyText}</p>
@@ -47,8 +60,8 @@ export function TextDiffView({ before, after, beforeLabel, afterLabel, emptyText
   return (
     <div>
       <div className="mb-0.5 flex items-center gap-3 text-[9px] uppercase tracking-wide text-pm-text-muted/70">
-        <span className="text-rose-300/80">− {beforeLabel}</span>
-        <span className="text-emerald-300/80">+ {afterLabel}</span>
+        {!hideBefore && <span className="text-rose-300/80">− {beforeLabel}</span>}
+        {!hideAfter && <span className="text-emerald-300/80">+ {afterLabel}</span>}
       </div>
       <div className="max-h-56 overflow-auto rounded border border-pm-border bg-pm-bg font-mono text-[10.5px] leading-[1.45]">
         {rows.map((row, i) =>

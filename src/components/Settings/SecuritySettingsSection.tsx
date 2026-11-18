@@ -1,5 +1,6 @@
 'use client';
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { SettingsToggle } from './SettingsToggle';
@@ -46,7 +47,7 @@ export function SecuritySettingsSection({ collections, onApplySecrets, onJumpToI
   };
 
   if (loading) {
-    return <div className="text-sm text-pm-text-muted py-3">Loading...</div>;
+    return <div className="flex items-center gap-2 text-sm text-pm-text-muted py-3"><DevFlowSpinner size={16} /> Loading...</div>;
   }
 
   return (

@@ -44,6 +44,8 @@ export interface RemoteChangeItem {
   /** Mudou aqui também, no mesmo campo: vai pedir decisão. */
   conflict: boolean;
   fields: RemoteFieldPreview[];
+  /** Collection raiz do item, quando se sabe (Central: agrupar e filtrar). */
+  rootId?: string;
 }
 
 export interface RemoteChangePreview {
@@ -113,16 +115,20 @@ export function detailItems(
   options: { conflict?: boolean; baseItemOf?: BaseItemOf } = {}
 ): RemoteChangeItem[] {
   const byId = new Map(nodes.map(n => [n.id, n]));
-  return details.map(detail => ({
-    id: detail.id,
-    path: detail.path,
-    change: detail.change,
-    conflict: !!options.conflict,
-    fields:
-      detail.change === 'changed' || options.conflict
-        ? fieldsOf(byId.get(detail.id), options.conflict ? [] : detail.fields, options.baseItemOf)
-        : [],
-  }));
+  return details.map(detail => {
+    const rootId = byId.get(detail.id)?.rootId;
+    return {
+      id: detail.id,
+      path: detail.path,
+      change: detail.change,
+      conflict: !!options.conflict,
+      fields:
+        detail.change === 'changed' || options.conflict
+          ? fieldsOf(byId.get(detail.id), options.conflict ? [] : detail.fields, options.baseItemOf)
+          : [],
+      ...(rootId ? { rootId } : {}),
+    };
+  });
 }
 
 const shortPath = (path: string[]) => path.slice(-2).join(' / ');
@@ -153,6 +159,7 @@ export function buildRemoteChangePreview(
       change: detail.change,
       conflict,
       fields: detail.change === 'changed' || conflict ? fieldsOf(node, conflict ? [] : detail.fields, baseItemOf) : [],
+      ...(node?.rootId ? { rootId: node.rootId } : {}),
     });
   };
   for (const detail of result.conflictDetails) add(detail, true);

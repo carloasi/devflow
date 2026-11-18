@@ -1,0 +1,222 @@
+{
+  "id": "b2b-reserva-partida-24h",
+  "title": "Reserva com partida em menos de 24 horas",
+  "context": "b2b",
+  "workspace": "Barramento B2B - Dev",
+  "environment": "5by5",
+  "parentFolder": "Sprints / Sprint 121 / User Story 1345299: [Sales.B2B.Api] Migrar os Métodos de Change e Cancel para V4",
+  "folderName": "Flow NN - Reserva partida < 24h",
+  "ask": [
+    {
+      "id": "payment",
+      "question": "A reserva fica em hold (sem pagar) ou é paga?",
+      "options": [
+        "hold (Recomendado)",
+        "paga"
+      ]
+    },
+    {
+      "id": "route",
+      "question": "Qual rota (origem e destino)? Precisa ter voo no ambiente de dev na data da busca.",
+      "options": [
+        "VCP → SDU (Recomendado)",
+        "outra (digite)"
+      ]
+    },
+    {
+      "id": "pax",
+      "question": "Quantos passageiros adultos?",
+      "options": [
+        "1 (Recomendado)",
+        "2",
+        "outro (digite)"
+      ]
+    },
+    {
+      "id": "minHours",
+      "question": "Antecedência mínima antes da partida (voo saindo em minutos costuma ser recusado pelo prazo de emissão)?",
+      "options": [
+        "2 horas (Recomendado)",
+        "1 hora",
+        "outra (digite)"
+      ]
+    }
+  ],
+  "params": {
+    "MIN_HOURS": 2,
+    "MAX_HOURS": 24
+  },
+  "steps": [
+    {
+      "name": "Token v1",
+      "tool": "create_request",
+      "copyFrom": "0cd95190-444d-47ea-9194-7dee99209573",
+      "source": "POST Barramento B2B - Dev / Authentication / v1 / Token v1",
+      "auth": {
+        "type": "bearer",
+        "token": "{{tokenB2b}}"
+      },
+      "consumes": [
+        "urlAuthorization",
+        "apiKey",
+        "tokenB2b"
+      ],
+      "produces": [
+        "bearerToken"
+      ],
+      "postResponseScript": "var jsonData = pm.response.json();\npm.environment.set(\"bearerToken\", jsonData.data.token);",
+      "status": "confirmado",
+      "notes": "POST {{urlAuthorization}}/api/v1/token, header Ocp-Apim-Subscription-Key: {{apiKey}}, SEMPRE auth bearer {{tokenB2b}} (a origem tem um token literal: a receita troca). copyFrom pela id: na mesma pasta há Token v1 GET e DELETE com o mesmo nome. data.token confirmado no run de 13/11/2026."
+    },
+    {
+      "name": "Authenticate v1",
+      "tool": "create_request",
+      "copyFrom": "eb465345-14f8-41ff-b6f7-2ced2dbb7071",
+      "source": "POST Barramento B2B - Dev / User / v1 / Authenticate v1",
+      "url": "{{urlUser}}/api/v1/authenticate",
+      "body": "{\n  \"username\": \"{{b2bUsername}}\",\n  \"password\": \"{{b2bPassword}}\"\n}",
+      "consumes": [
+        "urlUser",
+        "bearerToken",
+        "b2bUsername",
+        "b2bPassword"
+      ],
+      "produces": [
+        "currencyCode"
+      ],
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"currencyCode\", response.data.sessionContext.pointOfSale.currencyCode);",
+      "status": "confirmado",
+      "notes": "copyFrom pela id (na pasta há Authenticate v1 DELETE). A origem tem logins comentados e {{username}}/{{password}} no body e \"{{ urlUser }}\" com espaços na URL: a receita usa o body com {{b2bUsername}}/{{b2bPassword}} e a URL limpa, como no Flow 01. Headers: os da origem (apiKey, Subscription-Email/Id, True-Client-IP). Grava só currencyCode (data.sessionContext.pointOfSale.currencyCode, visto no run de 13/11/2026); o 2FA não consome nada dela."
+    },
+    {
+      "name": "2FA",
+      "tool": "create_request",
+      "copyFrom": "55cc9e3c-1cb9-4f10-9d8b-daaf0150a3aa",
+      "source": "PUT Barramento B2B - Dev / User / v1 / 2FA (interno) v1 (AzulCorp)",
+      "consumes": [
+        "urlUser",
+        "bearerToken"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "PUT {{urlUser}}/api/v1/user/2FA, sem body. copyFrom pela id (há o GET com o mesmo nome). Sem scripts: no Flow 01 o post-response só tem pm.test, e flow não valida retorno por padrão. Visto nos runs: em 13/11/2026 (env-tst) respondeu 404 e o AirSearch seguinte passou; em 05/11/2026 respondeu 2xx mas o AirSearch deu 401 \"User not authorized by 2-factor authentication\" — se acontecer, é o usuário de {{b2bUsername}} que exige 2FA, não o flow."
+    },
+    {
+      "name": "AirSearch v3 (hoje)",
+      "tool": "create_request",
+      "copyFrom": "eb293af8-94b3-40d0-bc20-61d8e0078680",
+      "source": "POST Barramento B2B - Dev / Shopping / V3 / AirSearch V3",
+      "body": "{\n  \"passengers\": [\n    {\n      \"type\": \"ADT\",\n      \"count\": <<pax.number>>\n    }\n  ],\n  \"journeys\": [\n    {\n      \"origin\": \"<<route.origin>>\",\n      \"destination\": \"<<route.destination>>\",\n      \"departure\": \"{{flowSearchDate}}\"\n    }\n  ],\n  \"criteria\": {\n    \"baggageAllowance\": \"All\",\n    \"directFlightsOnly\": false\n  }\n}",
+      "consumes": [
+        "urlShopping",
+        "bearerToken",
+        "flowSearchDate"
+      ],
+      "produces": [
+        "journeyKeyIda",
+        "fareKeyIda",
+        "flowDepartureAt"
+      ],
+      "preRequestScript": "// PRE-REQUEST do AirSearch na receita \"partida em menos de N horas\".\n// Dois passos usam este script: o de HOJE (DAY_OFFSET = 0) e o de AMANHÃ (DAY_OFFSET = 1),\n// porque a janela de 24h atravessa a meia-noite e o runtime não tem pm.setNextRequest.\n// O body da busca usa {{flowSearchDate}} como data de partida (resolvido depois deste script).\nvar DAY_OFFSET = 0;\nvar moment = require(\"moment\");\npm.environment.set(\"flowSearchDate\", moment().add(DAY_OFFSET, \"days\").format(\"YYYY-MM-DD\"));\n// Só no passo de HOJE: começa vazio — nunca reaproveite o voo de outra execução.\nif (DAY_OFFSET === 0) {\n  pm.environment.set(\"journeyKeyIda\", \"\");\n  pm.environment.set(\"fareKeyIda\", \"\");\n  pm.environment.set(\"flowDepartureAt\", \"\");\n}",
+      "postResponseScript": "// POST-RESPONSE do AirSearch na receita \"partida em menos de N horas\" (o mesmo nos dois\n// passos, hoje e amanhã). Escolhe o 1º voo com tarifa cuja partida está entre\n// agora + MIN_HOURS e agora + MAX_HOURS. O passo de amanhã só grava se o de hoje não achou.\n(function () {\n  // === Caminhos da resposta (confirmados no run de 13/11/2026 — catálogo B2B, AirSearch v3) ===\n  // data.airResult.offers[] → offersAvailableByMarket[] → value[] = os voos.\n  var OFFERS_PATH = \"data.airResult.offers\";\n  var MARKETS_FIELD = \"offersAvailableByMarket\";\n  var JOURNEYS_FIELD = \"value\";\n  var DEPARTURE_PATH = \"designator.departure\";  // ex. \"2026-11-14T06:00:00\": hora local, sem fuso\n  var JOURNEY_KEY_FIELD = \"key\";\n  var FARES_FIELD = \"fares\";\n  var FARE_KEY_FIELD = \"key\";\n  // === Janela (da resposta do usuário; padrão 2h a 24h) ===\n  var MIN_HOURS = <<minHours.number>>;\n  var MAX_HOURS = 24;\n\n  var moment = require(\"moment\");\n  if (pm.environment.get(\"journeyKeyIda\")) return;  // o passo de hoje já achou\n\n  function get(obj, path) {\n    return path.split(\".\").reduce(function (acc, key) { return acc == null ? undefined : acc[key]; }, obj);\n  }\n  var offers = get(pm.response.json(), OFFERS_PATH) || [];\n  var now = moment();\n  for (var o = 0; o < offers.length; o++) {\n    var markets = offers[o][MARKETS_FIELD] || [];\n    for (var m = 0; m < markets.length; m++) {\n      var journeys = markets[m][JOURNEYS_FIELD] || [];\n      for (var i = 0; i < journeys.length; i++) {\n        var journey = journeys[i];\n        var fare = (journey[FARES_FIELD] || [])[0];\n        var raw = get(journey, DEPARTURE_PATH);\n        if (!fare || !raw) continue;\n        var departure = moment(raw);\n        var hours = departure.diff(now, \"hours\", true);\n        if (hours >= MIN_HOURS && hours < MAX_HOURS) {\n          pm.environment.set(\"journeyKeyIda\", journey[JOURNEY_KEY_FIELD]);\n          pm.environment.set(\"fareKeyIda\", fare[FARE_KEY_FIELD]);\n          pm.environment.set(\"flowDepartureAt\", departure.format());\n          return;\n        }\n      }\n    }\n  }\n  console.log(\"Nenhum voo com partida entre \" + MIN_HOURS + \"h e \" + MAX_HOURS + \"h nesta busca.\");\n})();",
+      "status": "confirmado",
+      "notes": "Body da receita: rota e passageiros das respostas e partida {{flowSearchDate}} (hoje, do pre-request). Caminhos do JSON confirmados no run de 13/11/2026: a partida de cada voo é designator.departure (NÃO existe departureDateTime — era por isso que o flow \"Reserva 24h - Hold - VCP-SDU - 1A\" não achou o voo das 21:20 e o Order deu \"JourneyKey is required\"). A hora vem sem fuso (hora local do aeroporto) e o moment lê no fuso da máquina: para rota fora do horário de Brasília, a janela fica deslocada pela diferença. MIN_HOURS vem da resposta \"antecedência mínima\" (<<minHours.number>>). O mesmo post-response nos dois passos."
+    },
+    {
+      "name": "AirSearch v3 (amanhã)",
+      "tool": "create_request",
+      "copyFrom": "eb293af8-94b3-40d0-bc20-61d8e0078680",
+      "source": "POST Barramento B2B - Dev / Shopping / V3 / AirSearch V3",
+      "body": "{\n  \"passengers\": [\n    {\n      \"type\": \"ADT\",\n      \"count\": <<pax.number>>\n    }\n  ],\n  \"journeys\": [\n    {\n      \"origin\": \"<<route.origin>>\",\n      \"destination\": \"<<route.destination>>\",\n      \"departure\": \"{{flowSearchDate}}\"\n    }\n  ],\n  \"criteria\": {\n    \"baggageAllowance\": \"All\",\n    \"directFlightsOnly\": false\n  }\n}",
+      "consumes": [
+        "urlShopping",
+        "bearerToken",
+        "flowSearchDate"
+      ],
+      "produces": [
+        "journeyKeyIda",
+        "fareKeyIda",
+        "flowDepartureAt"
+      ],
+      "preRequestScript": "// PRE-REQUEST do AirSearch na receita \"partida em menos de N horas\".\n// Dois passos usam este script: o de HOJE (DAY_OFFSET = 0) e o de AMANHÃ (DAY_OFFSET = 1),\n// porque a janela de 24h atravessa a meia-noite e o runtime não tem pm.setNextRequest.\n// O body da busca usa {{flowSearchDate}} como data de partida (resolvido depois deste script).\nvar DAY_OFFSET = 1;\nvar moment = require(\"moment\");\npm.environment.set(\"flowSearchDate\", moment().add(DAY_OFFSET, \"days\").format(\"YYYY-MM-DD\"));\n// Só no passo de HOJE: começa vazio — nunca reaproveite o voo de outra execução.\nif (DAY_OFFSET === 0) {\n  pm.environment.set(\"journeyKeyIda\", \"\");\n  pm.environment.set(\"fareKeyIda\", \"\");\n  pm.environment.set(\"flowDepartureAt\", \"\");\n}",
+      "postResponseScript": "// POST-RESPONSE do AirSearch na receita \"partida em menos de N horas\" (o mesmo nos dois\n// passos, hoje e amanhã). Escolhe o 1º voo com tarifa cuja partida está entre\n// agora + MIN_HOURS e agora + MAX_HOURS. O passo de amanhã só grava se o de hoje não achou.\n(function () {\n  // === Caminhos da resposta (confirmados no run de 13/11/2026 — catálogo B2B, AirSearch v3) ===\n  // data.airResult.offers[] → offersAvailableByMarket[] → value[] = os voos.\n  var OFFERS_PATH = \"data.airResult.offers\";\n  var MARKETS_FIELD = \"offersAvailableByMarket\";\n  var JOURNEYS_FIELD = \"value\";\n  var DEPARTURE_PATH = \"designator.departure\";  // ex. \"2026-11-14T06:00:00\": hora local, sem fuso\n  var JOURNEY_KEY_FIELD = \"key\";\n  var FARES_FIELD = \"fares\";\n  var FARE_KEY_FIELD = \"key\";\n  // === Janela (da resposta do usuário; padrão 2h a 24h) ===\n  var MIN_HOURS = <<minHours.number>>;\n  var MAX_HOURS = 24;\n\n  var moment = require(\"moment\");\n  if (pm.environment.get(\"journeyKeyIda\")) return;  // o passo de hoje já achou\n\n  function get(obj, path) {\n    return path.split(\".\").reduce(function (acc, key) { return acc == null ? undefined : acc[key]; }, obj);\n  }\n  var offers = get(pm.response.json(), OFFERS_PATH) || [];\n  var now = moment();\n  for (var o = 0; o < offers.length; o++) {\n    var markets = offers[o][MARKETS_FIELD] || [];\n    for (var m = 0; m < markets.length; m++) {\n      var journeys = markets[m][JOURNEYS_FIELD] || [];\n      for (var i = 0; i < journeys.length; i++) {\n        var journey = journeys[i];\n        var fare = (journey[FARES_FIELD] || [])[0];\n        var raw = get(journey, DEPARTURE_PATH);\n        if (!fare || !raw) continue;\n        var departure = moment(raw);\n        var hours = departure.diff(now, \"hours\", true);\n        if (hours >= MIN_HOURS && hours < MAX_HOURS) {\n          pm.environment.set(\"journeyKeyIda\", journey[JOURNEY_KEY_FIELD]);\n          pm.environment.set(\"fareKeyIda\", fare[FARE_KEY_FIELD]);\n          pm.environment.set(\"flowDepartureAt\", departure.format());\n          return;\n        }\n      }\n    }\n  }\n  console.log(\"Nenhum voo com partida entre \" + MIN_HOURS + \"h e \" + MAX_HOURS + \"h nesta busca.\");\n})();",
+      "status": "confirmado",
+      "notes": "Body da receita: rota e passageiros das respostas e partida {{flowSearchDate}} (amanhã, do pre-request). Caminhos do JSON confirmados no run de 13/11/2026: a partida de cada voo é designator.departure (NÃO existe departureDateTime — era por isso que o flow \"Reserva 24h - Hold - VCP-SDU - 1A\" não achou o voo das 21:20 e o Order deu \"JourneyKey is required\"). A hora vem sem fuso (hora local do aeroporto) e o moment lê no fuso da máquina: para rota fora do horário de Brasília, a janela fica deslocada pela diferença. MIN_HOURS vem da resposta \"antecedência mínima\" (<<minHours.number>>). O mesmo post-response nos dois passos."
+    },
+    {
+      "name": "Order v2",
+      "tool": "create_request",
+      "copyFrom": "940e3223-3eaf-4c63-9469-95a77b99d6eb",
+      "source": "POST Barramento B2B - Dev / Order / v2 / Order v2",
+      "consumes": [
+        "urlOrder",
+        "bearerToken",
+        "journeyKeyIda",
+        "fareKeyIda"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "Hold: Order v2 (POST {{urlOrder}}/api/v2/order). copyFrom pela id (há o GET Order v2). O Flow 01 não tem Order v2: a origem é a da collection. Body da origem: {{journeyKeyIda}}/{{fareKeyIda}}, 1 passageiro ADT sintético sem documento (travelDocuments vazio), comentários // que saem no envio; com pax > 1, acrescente passageiros sintéticos (override \"body\"). Sem scripts: o Checkout v1 seguinte fecha a order da sessão e não consome nada deste passo (o script da origem grava orderTotalAmount, que só o Payments usaria). Nenhum run deste passo guardado.",
+      "when": "payment == hold"
+    },
+    {
+      "name": "Order v1",
+      "tool": "create_request",
+      "copyFrom": "bb203ba7-09ed-41bd-9a82-43bff92de115",
+      "source": "POST Barramento B2B - Dev / Order / v1 / Order v1",
+      "consumes": [
+        "urlOrder",
+        "bearerToken",
+        "journeyKeyIda",
+        "fareKeyIda"
+      ],
+      "produces": [
+        "orderTotalAmount"
+      ],
+      "preRequestScript": "// Zera o que este passo produz: se ele falhar, o seguinte não usa o valor de outra execução.\n[\"orderTotalAmount\"].forEach(function (name) { pm.environment.set(name, \"\"); });",
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"orderTotalAmount\", response.data.order.totals.amount);",
+      "status": "confirmado",
+      "notes": "Paga: SEMPRE Order v1 (Order v2 + Payments não fecha o Checkout). copyFrom pela id (há Order v1 GET e DELETE). O body da origem já usa {{journeyKeyIda}}/{{fareKeyIda}} e 1 passageiro ADT sintético (CPF com dígito válido, e-mail @example.com); os comentários // do body saem no envio. Com pax > 1, acrescente passageiros sintéticos no body (override \"body\") — a receita não gera. Produz orderTotalAmount (data.order.totals.amount: script da própria origem e do Flow 01), que o Payments usa; NÃO produz recordLocator (quem produz é o Checkout v1). O pre-request do Flow 01 aqui é só pm.test das chaves do AirSearch: não entra (flow não valida por padrão), por isso o pre-request é só o reset.",
+      "when": "payment == paga"
+    },
+    {
+      "name": "Payments v1",
+      "tool": "create_request",
+      "copyFrom": "39de420c-8816-486e-b34b-df2d397fbc5d",
+      "source": "POST Barramento B2B - Dev / Order.Payments / v1 / Payments",
+      "body": "{\n    \"methodCode\": \"VI\",\n    \"amount\": {{orderTotalAmount}},\n    \"installments\": 1,\n    \"account\": \"4111111111111111\",\n    \"expirationMonth\": 3,\n    \"expirationYear\": 2030,\n    \"holderName\": \"JOHN SMITH\",\n    \"verificationCode\": \"737\"\n}",
+      "consumes": [
+        "urlOrderPayments",
+        "bearerToken",
+        "orderTotalAmount"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "POST {{urlOrderPayments}}/api/v1/order/payments. copyFrom pela id (há Payments GET). O body da origem é só exemplos comentados (vazio no envio): a receita usa o do Flow 01 — cartão de TESTE VI 4111 1111 1111 1111 (a opção \"Cartão Regular\" da própria origem), 1 parcela, amount = {{orderTotalAmount}} do Order v1. Nunca cartão real. Sem scripts: no Flow 01 são só pm.test e console.log.",
+      "when": "payment == paga"
+    },
+    {
+      "name": "Checkout v1",
+      "tool": "create_request",
+      "copyFrom": "749f1045-05d2-4cac-baff-c662350dbb2a",
+      "source": "POST Barramento B2B - Dev / Order / v1 / Checkout v1",
+      "consumes": [
+        "urlOrder",
+        "bearerToken"
+      ],
+      "produces": [
+        "recordLocator"
+      ],
+      "preRequestScript": "// Zera o que este passo produz: se ele falhar, o seguinte não usa o valor de outra execução.\n[\"recordLocator\"].forEach(function (name) { pm.environment.set(name, \"\"); });",
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"recordLocator\", response.data.recordLocator);",
+      "status": "confirmado",
+      "notes": "POST {{urlOrder}}/api/v1/checkout, body {\"notifyContacts\": \"Customer\"}; fica em Order / v1 (não há pasta Checkout). Fecha a order da SESSÃO (a do Order anterior): não lê {{recordLocator}}, só produz (data.recordLocator — script da origem e do Flow 01). Por isso o reset do recordLocator é aqui. \"Conforme a order\": hold → depois do Order v2; paga → depois do Payments v1."
+    }
+  ],
+  "verify": [
+    "O passo de hoje zera journeyKeyIda/fareKeyIda/flowDepartureAt no pre-request; o de amanhã não.",
+    "Os dois AirSearch têm o MESMO post-response (partida em designator.departure).",
+    "Só um Order foi criado (v2 se hold, v1 se paga); Payments só se paga."
+  ],
+  "notes": "Sem voo na janela, journeyKeyIda fica vazio e o Order falha (\"JourneyKey is required\"): diga na entrega que a rota precisa ter voo hoje/amanhã no dev. Origens e scripts confirmados em 14/11/2026; execução de ponta a ponta ainda não vista (o run de 13/11/2026 passou até o AirSearch)."
+}

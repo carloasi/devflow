@@ -528,3 +528,42 @@ a:focus-visible {
 .tree-drop-inside {
   animation: tree-drop-inside-pulse 850ms ease-in-out infinite;
 }
+/* Avisos por cima de um diálogo modal do Radix (Central de Sincronização,
+   revisão): o Radix desliga os cliques em tudo fora do diálogo
+   (body { pointer-events: none }), e os toasts herdavam isso — o "Desfazer"
+   do pull e o "Open settings" ficavam visíveis mas sem clique. */
+[data-sonner-toast][data-visible='true'] {
+  pointer-events: auto;
+}
+
+/* Carregando com o ícone do DevFlow (components/helper/DevFlowLoader):
+   o ícone respira (cresce e brilha), o anel gira em volta, e a barra fina
+   corre de um lado ao outro. */
+@keyframes devflow-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes devflow-breathe {
+  0%, 100% { transform: scale(0.92); filter: drop-shadow(0 0 2px rgba(79, 195, 255, 0.25)); }
+  50% { transform: scale(1); filter: drop-shadow(0 0 12px rgba(79, 195, 255, 0.75)); }
+}
+@keyframes devflow-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+.devflow-breathe { animation: devflow-breathe 1.6s ease-in-out infinite; }
+.devflow-ring { animation: devflow-spin 1s linear infinite; }
+.devflow-progress { animation: devflow-progress 1.1s ease-in-out infinite; }
+/* Reticências animadas depois de um texto de "trabalhando" (0 a 3 pontos). */
+@keyframes devflow-dots {
+  from { width: 0; }
+  to { width: 1.05em; }
+}
+.devflow-dots { display: inline-block; overflow: hidden; vertical-align: bottom; width: 0; }
+.devflow-dots::after { content: '...'; }
+.devflow-dots { animation: devflow-dots 1.2s steps(4, end) infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .devflow-breathe { animation: none; }
+  .devflow-dots { animation: none; width: 1.05em; }
+  .devflow-ring { animation-duration: 3s; }
+  .devflow-progress { animation-duration: 3s; }
+}

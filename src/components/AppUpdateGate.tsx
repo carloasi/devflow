@@ -1,5 +1,6 @@
 'use client'
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { ShieldAlert, RefreshCw, ExternalLink, Download } from 'lucide-react'
@@ -317,7 +318,7 @@ export function AppUpdateGate({ children }: Props) {
                 disabled={checking}
                 className="flex items-center gap-1.5 h-8 px-3 rounded-md text-xs font-semibold text-pm-text-secondary border border-pm-border hover:bg-pm-hover transition-colors cursor-pointer disabled:opacity-50"
               >
-                <RefreshCw size={13} className={checking ? 'animate-spin' : ''} /> Check again
+                {checking ? <DevFlowSpinner size={14} /> : <RefreshCw size={13} />} Check again
               </button>
             </div>
           </div>

@@ -12,6 +12,7 @@ import React, {
 } from 'react'
 
 import { Environment } from '@/app/types/Environment'
+import { sameForSync } from '@/lib/jwt'
 import { isBlankValue, sanitizeVariableHistory } from '@/lib/variableHistory'
 
 interface EnvironmentContextType {
@@ -146,7 +147,14 @@ const updateEnvironment = useCallback((updatedEnv: Environment) => {
   setEnvironments(prev =>
     prev.map(env =>
       env.id === updatedEnv.id
-        ? { ...updatedEnv, values: [...updatedEnv.values], isDirty: true }
+        ? {
+            ...updatedEnv,
+            values: [...updatedEnv.values],
+            // Só o que sobe pro GitHub acende o "não sincronizado": um token
+            // de sessão colado à mão não sobe, e o aviso ficava aceso sem
+            // nada a enviar (lib/jwt.sameForSync).
+            isDirty: env.isDirty || !sameForSync(env, updatedEnv),
+          }
         : env
     )
   )

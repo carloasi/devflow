@@ -214,3 +214,12 @@ describe('applySelectedChanges', () => {
     });
   });
 });
+
+describe('ordem do GitHub com item só daqui no meio', () => {
+  it('aplica a ordem de lá e deixa o item daqui no mesmo lugar', () => {
+    const local = [folder('f', 'F', [req('a', 'a'), req('x', 'x'), req('b', 'b')])];
+    const remote = [folder('f', 'F', [req('b', 'b'), req('a', 'a')])];
+    const merged = applySelectedChanges(local, remote, new Set(['f']));
+    expect(merged[0].item!.map(i => i.id)).toEqual(['b', 'x', 'a']);
+  });
+});

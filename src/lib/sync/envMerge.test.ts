@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Environment } from '@/app/types/Environment';
 import { envKeepMineIds, environmentHashes, rebaseEnvironments } from './envMerge';
+import { withoutSessionTokens } from '@/lib/jwt';
 
 const env = (vars: Record<string, string>, id = 'e1', name = 'tst'): Environment => ({
   id,
@@ -104,5 +105,58 @@ describe('environments casados pelo nome, com ids diferentes', () => {
     expect(result.keptMine).toBe(0);
     expect(valuesOf(result.merged, 'LOCAL')).toEqual({ baseUrl: 'https://new' });
     expect([...envKeepMineIds(local, remote, baseFromPull)]).toEqual([]);
+  });
+});
+
+describe('tokens de sessão', () => {
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln';
+  const make = (vals: Record<string, string>) => [env(vals, 'e1', 'env-tst')];
+
+  it('depois do envio não aparecem em "Para enviar" (sobem vazios de propósito)', () => {
+    const local = make({ baseUrl: 'x', bearerToken: JWT, orderToken: JWT });
+    const remote = withoutSessionTokens(local);
+    const r = rebaseEnvironments(local, remote, environmentHashes(remote));
+    expect(r.outgoingNames).toEqual([]);
+    expect(r.keptMineNames).toEqual([]);
+    expect(r.sessionTokenNames.sort()).toEqual(['env-tst › bearerToken', 'env-tst › orderToken']);
+  });
+
+  it('o token daqui fica quando o do GitHub é outro, e o resto do merge segue', () => {
+    const synced = make({ baseUrl: 'x', bearerToken: '' });
+    const local = make({ baseUrl: 'x', bearerToken: JWT });
+    const remote = make({ baseUrl: 'y', bearerToken: '' });
+    const r = rebaseEnvironments(local, remote, environmentHashes(synced));
+    expect(r.incomingNames).toEqual(['env-tst › baseUrl']);
+    const merged = r.merged[0].values;
+    expect(merged.find(v => v.key === 'bearerToken')?.value).toBe(JWT);
+    expect(merged.find(v => v.key === 'baseUrl')?.value).toBe('y');
+  });
+});
+
+describe('variável de token só no GitHub (arquivo antigo, com o token de alguém)', () => {
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln';
+  it('chega aqui vazia, sem o token de outra pessoa', () => {
+    const local = [env({ baseUrl: 'x' }, 'e1', 'env-tst')];
+    const remote = [env({ baseUrl: 'x', accessToken: JWT }, 'e1', 'env-tst')];
+    const r = rebaseEnvironments(local, remote, environmentHashes(local));
+    expect(r.incomingNames).toEqual(['env-tst › accessToken']);
+    expect(valuesOf(r.merged)).toEqual({ baseUrl: 'x', accessToken: '' });
+  });
+});
+
+describe('valores pro diff da Central', () => {
+  it('dá o valor daqui e o do GitHub de cada variável listada', () => {
+    const synced = [env({ url: 'https://old' }, 'e1', '5by5')];
+    const local = [env({ url: 'https://new' }, 'e1', '5by5')];
+    const r = rebaseEnvironments(local, synced, environmentHashes(synced));
+    expect(r.outgoingNames).toEqual(['5by5 › url']);
+    expect(r.values['5by5 › url']).toEqual({ local: 'https://new', remote: 'https://old' });
+  });
+
+  it('environment só daqui vem como "chave = valor", sem token de sessão', () => {
+    const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln';
+    const local = [env({ url: 'x', bearerToken: JWT }, 'e2', 'novo')];
+    const r = rebaseEnvironments(local, [], null);
+    expect(r.values['novo']).toEqual({ local: 'url = x\nbearerToken = ', remote: undefined });
   });
 });

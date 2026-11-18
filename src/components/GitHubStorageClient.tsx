@@ -5,7 +5,9 @@ import { createPortal } from "react-dom";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
 import { saveSecret, getSecret, deleteSecret } from '@/lib/secureStorage'
-import { FolderGit2 } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Check, FolderGit2 } from "lucide-react";
+import { useSyncDiffStrings } from "@/lib/i18n/syncDiffStrings";
+import { isCapturingSyncStatus, openSyncCenter, reportSyncStatus, setRemoteBehind, throwIfSyncCancelled, useKnownConflicts } from "@/lib/sync/syncCenterStore";
 import { storeGet, storeSet } from "@/lib/tauriStore";
 import { toast } from "sonner";
 import { withoutSessionTokens } from "@/lib/jwt";
@@ -18,7 +20,7 @@ import { encryptData, decryptData, clearDerivedKeyCache, MissingPassphraseError 
 import { diffCollection, diffEnvironment, fileTitle, prettyContent, FileChange } from "@/lib/commitDiff";
 import { CommitChangesView } from "@/components/CommitChangesView";
 import { ModalCard } from "@/components/ui/modal-card";
-import { catalogForPush, MARKER_BASE_PREFIX, markerBaseHashes, type Marker } from "@/lib/markers";
+import { catalogForPush, MARKER_BASE_PREFIX, markerBaseAfterPush, type Marker } from "@/lib/markers";
 import { loadSyncBase, recordSyncBase } from "@/lib/syncBase";
 import {
   applyShaChanges,
@@ -31,14 +33,20 @@ import {
   workspaceShaChanges,
   type FileShas,
 } from "@/lib/remoteVersions";
-import type { PendingPush } from "@/storage/pendingPushStore";
+import { isPendingEmpty, readPendingPush, type PendingPush } from "@/storage/pendingPushStore";
+import { DevFlowBusyCard, DevFlowSpinner } from "@/components/helper/DevFlowLoader";
 import {
   buildPushPlan,
   collectionFilePath,
   collisionMessage,
+  duplicateIdGroups,
   environmentFilePath,
   markersFilePath,
+  MARKERS_FILE,
+  newestOf,
   pushCommitMessage,
+  renamedStalePaths,
+  rootIdOf,
 } from "@/lib/sync/pushPlan";
 
 // Mesma chave/comando que o UserBadge.tsx usa pro nome exibido no canto
@@ -148,24 +156,6 @@ const RefreshIcon = () => (
   </svg>
 );
 
-const SearchIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="11" cy="11" r="8" />
-    <path d="m21 21-4.3-4.3" />
-  </svg>
-);
-
-const PullIcon = () => (
-  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-    <path d="M8 2.5v8M4.5 7l3.5 3.5L11.5 7M3 13.5h10" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
-
-const PushIcon = () => (
-  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-    <path d="M8 13.5v-8M4.5 9l3.5-3.5L11.5 9M3 2.5h10" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
 
 const FolderIcon = () => (
   <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style={{ opacity: 0.85 }}>
@@ -223,12 +213,17 @@ export interface GitHubSyncHandle {
   // `statusLabel` acende a pílula de operação pontual enquanto baixa. É
   // opcional porque quem chama de dentro do painel já tem o próprio aviso;
   // quem chama da árvore não tem nada, e a busca pode levar segundos.
+  // `peek`: só pra mostrar (prévias, avisos) — não conta como versão lida
+  // (ver getFile).
   fetchWorkspace: (
     workspaceName: string,
     ref?: string,
-    statusLabel?: string
+    statusLabel?: string,
+    options?: { peek?: boolean }
   ) => Promise<RemoteWorkspaceData>;
-  pullWorkspace: (workspaceName: string) => Promise<void>; // ✅ novo — pull de só um workspace
+  // Baixa todos os workspaces do repositório e substitui os daqui (os que têm
+  // alteração não enviada são pulados) — Configurações → Avançado.
+  replaceAllFromGitHub: () => Promise<void>;
   pushWorkspace: (workspaceName: string, options?: PushOptions) => Promise<void>; // ✅ novo — push de só um workspace
   // Renomeia a pasta remota do workspace (ver renameRemoteWorkspace) — no-op
   // silencioso se o workspace nunca foi sincronizado.
@@ -332,7 +327,9 @@ interface GitHubSyncProps {
   onReviewSnapshot?: (workspaceName: string, collections: unknown[], environments: unknown[], commitSha: string) => void;
   // Push de um workspace terminou com sucesso (local == remoto de novo).
   // `pushed`: o que subiu de fato — é dele que sai a base da sincronização.
-  onPushCompleted?: (workspaceName: string, pushed?: { collections: unknown[]; environments: unknown[] }) => void;
+  // keptStale: a pessoa escolheu manter no GitHub arquivos apagados aqui — o
+  // push valeu, mas a exclusão continua pendente.
+  onPushCompleted?: (workspaceName: string, pushed?: { collections: unknown[]; environments: unknown[]; keptStale?: boolean }) => void;
   // Conflito ao enviar UM workspace pelo menu (pushSingleWorkspace) — esse
   // workspace pode não ser o selecionado agora, então vai junto o que foi
   // lido do disco pra tentar o push (local) e o que tem no repositório
@@ -353,8 +350,6 @@ interface GitHubSyncProps {
   // changedRootIds: collections cujos arquivos mudaram no GitHub — sem item a
   // trazer, a prévia mostra o que o último commit delas mudou.
   onConflictPreview?: (workspaceName: string, changedRootIds?: string[]) => Promise<{ conflicts: string[]; incoming: number; preview?: RemoteChangePreview } | null>;
-  // "Preview push…": o que o push faria, sem enviar nada.
-  onPushPreview?: () => void;
   // "Conflict history…": as decisões de conflito tomadas nesta máquina.
   onShowConflictHistory?: () => void;
   // Merge automático por item antes do push (e de novo se alguém enviar no
@@ -666,26 +661,38 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
 
   // `ref` opcional: SHA de commit pra ler a versão do arquivo naquele ponto
   // do histórico em vez do topo da branch.
-  async getFile(path: string, ref?: string): Promise<{ content: any; sha: string } | null> {
+  // `peek`: só olhar (prévias, avisos). Não conta como "visto": a versão
+  // vista é a que a checagem do push compara, e uma prévia que a
+  // atualizasse deixava passar por cima uma mudança que ninguém revisou.
+  async getFile(path: string, ref?: string, opts?: { peek?: boolean }): Promise<{ content: any; sha: string } | null> {
     const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(ref || this.config.branch)}`;
+    const remember = !ref && !opts?.peek;
 
     try {
-      const metaRes = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
+      // Logo depois de um commit nosso, a Contents API ainda pode devolver a
+      // versão anterior por alguns segundos — ou 404, num arquivo que o envio
+      // acabou de criar. Numa prévia (Central, aviso de fundo) isso fazia o
+      // que acabou de subir aparecer de novo em "Para enviar". Se este
+      // arquivo foi gravado daqui há pouco, lê direto a versão gravada (pelo
+      // sha do blob, que não muda), sem passar pela Contents API.
+      const recent = !ref && opts?.peek ? recentWriteOf(this.repoKey, path) : undefined;
+      const metaRes =
+        typeof recent === "string" ? null : await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
 
-      if (metaRes.status === 404) {
+      if (metaRes && metaRes.status === 404) {
         console.warn(`⚠️ Arquivo não encontrado (404): ${path}`);
         // Sumiu do remoto: a próxima gravação é uma criação, não uma
         // atualização da versão que se tinha visto antes.
-        if (!ref) this.rememberSha(path, undefined);
+        if (remember) this.rememberSha(path, undefined);
         return null;
       }
 
-      if (!metaRes.ok) throw rateLimitErrorFrom(metaRes) ?? new Error(`HTTP ${metaRes.status}`);
+      if (metaRes && !metaRes.ok) throw rateLimitErrorFrom(metaRes) ?? new Error(`HTTP ${metaRes.status}`);
 
-      const metaData = (await metaRes.json()) as any;
+      const metaData = metaRes ? ((await metaRes.json()) as any) : { sha: recent };
       // Só a versão do topo da branch conta como "vista": ler um commit
       // antigo (histórico) não diz nada sobre o que está lá agora.
-      if (!ref) this.rememberSha(path, metaData?.sha);
+      if (remember) this.rememberSha(path, metaData?.sha);
       let rawStringContent = "";
 
       if (metaData.content && metaData.encoding === "base64") {
@@ -778,11 +785,15 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
         const filename = String(f.filename);
         const status: FileChange["status"] =
           f.status === "added" || f.status === "removed" || f.status === "renamed" ? f.status : "modified";
+        // O catálogo de marcadores também é .json, mas não é collection:
+        // comparado como uma, o histórico mostrava um diff sem sentido.
         const kind: FileChange["kind"] = /\/environments\//i.test(filename)
           ? "environment"
-          : /\.json$/i.test(filename)
-            ? "collection"
-            : "other";
+          : filename.endsWith(`/${MARKERS_FILE}`)
+            ? "other"
+            : /\.json$/i.test(filename)
+              ? "collection"
+              : "other";
 
         if (kind === "other") {
           return { file: filename, status, kind, title: filename.split("/").pop() ?? filename, changes: [] };
@@ -927,6 +938,8 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
     const writes = changes.filter((c) => !c.delete);
     const deletes = changes.filter((c) => c.delete);
 
+    // "Cancelar" da Central: antes de mandar qualquer coisa.
+    throwIfSyncCancelled();
     const head0 = await this.gitJson<{ object: { sha: string } }>(`/ref/heads/${branch}`);
     if (!head0.data) return this.commitFilesOneByOne(changes, message);
 
@@ -988,6 +1001,9 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
           .map((d) => ({ path: d.path, mode: "100644", type: "blob", sha: null })),
       ];
       if (tree.length === 0) return { ok: true, written: {} };
+      // Último ponto seguro: até aqui nada mudou no GitHub (os blobs soltos
+      // não aparecem em lugar nenhum). Depois do commit, o envio está feito.
+      throwIfSyncCancelled();
 
       const newTree = await this.gitJson<{ sha: string }>("/trees", {
         method: "POST",
@@ -1018,10 +1034,12 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
           written[w.path] = sha;
           recorded[w.path] = sha;
           this.rememberSha(w.path, sha);
+          rememberRecentWrite(this.repoKey, w.path, sha);
         }
         for (const d of deletes) {
           recorded[d.path] = null;
           this.rememberSha(d.path, undefined);
+          rememberRecentWrite(this.repoKey, d.path, null);
         }
         await recordSyncedShas(this.repoKey, recorded);
         return { ok: true, written };
@@ -1045,6 +1063,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   ): Promise<{ ok: true; written: FileShas } | { ok: false; conflicts: string[] }> {
     const conflicts: string[] = [];
     for (const c of changes) {
+      throwIfSyncCancelled();
       try {
         if (c.delete) await this.deleteFile(c.path, message);
         else await this.putFile(c.path, c.content, message, { force: c.noCheck });
@@ -1120,7 +1139,8 @@ async function downloadWorkspaceFilesData(
   ePaths: string[],
   // SHA de commit opcional — quando informado, baixa a versão dos arquivos
   // naquele commit (histórico) em vez da versão atual da branch.
-  ref?: string
+  ref?: string,
+  peek = false
 ): Promise<{
   collections: any[];
   environments: any[];
@@ -1129,54 +1149,87 @@ async function downloadWorkspaceFilesData(
   shas: FileShas;
   /** Ids das collections raiz em cada arquivo — pra saber qual arquivo uma revisão de UMA collection cobriu. */
   idsByPath: Record<string, string[]>;
+  /**
+   * Arquivos deixados de fora por guardarem o mesmo id de outro mais novo
+   * (renomeação que manteve o antigo), com os ids de cada um.
+   */
+  superseded: Record<string, string[]>;
 }> {
   const failedPaths: string[] = [];
   const shas: FileShas = {};
   const idsByPath: Record<string, string[]> = {};
+  // Conteúdo por arquivo, na ordem da listagem (o Map guarda a ordem).
+  const collectionByPath = new Map<string, unknown[]>();
+  const envByPath = new Map<string, unknown[]>();
 
-  const collectionSettled = await Promise.allSettled(cPaths.map((p) => storage.getFile(p, ref)));
-  const collections = collectionSettled
-    .map((settled, i) => {
-      if (settled.status === "rejected" || !settled.value || !settled.value.content) {
-        failedPaths.push(cPaths[i]);
-        return null;
-      }
-      if (settled.value.sha) shas[cPaths[i]] = settled.value.sha;
-      const content = settled.value.content;
-      idsByPath[cPaths[i]] = (Array.isArray(content) ? content : [content])
-        .map((c: any) => c?.id ?? c?.info?._postman_id)
-        .filter((id: unknown): id is string => typeof id === "string");
-      return content;
-    })
-    .filter((content) => content !== null)
-    .flat();
+  const collectionSettled = await Promise.allSettled(cPaths.map((p) => storage.getFile(p, ref, { peek })));
+  collectionSettled.forEach((settled, i) => {
+    if (settled.status === "rejected" || !settled.value || !settled.value.content) {
+      failedPaths.push(cPaths[i]);
+      return;
+    }
+    if (settled.value.sha) shas[cPaths[i]] = settled.value.sha;
+    const content = settled.value.content;
+    const list = Array.isArray(content) ? content : [content];
+    idsByPath[cPaths[i]] = list.map(rootIdOf).filter((id): id is string => !!id);
+    collectionByPath.set(cPaths[i], list);
+  });
 
-  const envSettled = await Promise.allSettled(ePaths.map((p) => storage.getFile(p, ref)));
-  const rawEnvironments = envSettled
-    .map((settled, i) => {
-      if (settled.status === "rejected" || !settled.value || !settled.value.content) {
-        failedPaths.push(ePaths[i]);
-        return null;
-      }
-      if (settled.value.sha) shas[ePaths[i]] = settled.value.sha;
-      let content = settled.value.content;
-      if (typeof content === "string") {
-        try { content = JSON.parse(content); } catch (e) {}
-      }
-      const list = Array.isArray(content) ? content : [content];
-      idsByPath[ePaths[i]] = list
-        .map((env: any) => env?.id)
-        .filter((id: unknown): id is string => typeof id === "string");
-      return list;
-    })
-    .filter((content) => content !== null)
-    .flat();
+  const envSettled = await Promise.allSettled(ePaths.map((p) => storage.getFile(p, ref, { peek })));
+  envSettled.forEach((settled, i) => {
+    if (settled.status === "rejected" || !settled.value || !settled.value.content) {
+      failedPaths.push(ePaths[i]);
+      return;
+    }
+    if (settled.value.sha) shas[ePaths[i]] = settled.value.sha;
+    let content = settled.value.content;
+    if (typeof content === "string") {
+      try { content = JSON.parse(content); } catch (e) {}
+    }
+    const list = Array.isArray(content) ? content : [content];
+    idsByPath[ePaths[i]] = list
+      .map((env: any) => env?.id)
+      .filter((id: unknown): id is string => typeof id === "string");
+    envByPath.set(ePaths[i], list);
+  });
 
+  // O mesmo id em dois arquivos: alguém renomeou e manteve o arquivo antigo.
+  // Antes valia o que viesse primeiro (collections) ou por último
+  // (environments) na listagem — e o pull podia trazer a versão VELHA por
+  // cima da nova, sem aviso. Vale o do commit mais recente; os outros ficam
+  // de fora (e o próximo push os apaga, ver renamedStalePaths). Sem conseguir
+  // a data de algum, o grupo inteiro conta como não lido: nada é aplicado.
+  const superseded: Record<string, string[]> = {};
+  const groups = [
+    ...duplicateIdGroups(idsByPath, [...collectionByPath.keys()]),
+    ...duplicateIdGroups(idsByPath, [...envByPath.keys()]),
+  ];
+  for (const group of groups) {
+    const dates = await Promise.all(
+      group.map((p) => storage.listCommits(p, 1).then((c) => c[0]?.date).catch(() => undefined))
+    );
+    const keep = newestOf(group, (p) => dates[group.indexOf(p)]);
+    for (const p of group) {
+      if (p === keep) continue;
+      if (keep) superseded[p] = idsByPath[p];
+      else failedPaths.push(p);
+      delete idsByPath[p];
+      delete shas[p];
+      collectionByPath.delete(p);
+      envByPath.delete(p);
+    }
+    if (!keep) {
+      console.warn("Could not tell which of these files is the current one (same id):", group);
+    }
+  }
+
+  const collections = [...collectionByPath.values()].flat() as any[];
+  const rawEnvironments = [...envByPath.values()].flat() as any[];
   const environments = Array.from(
     new Map(rawEnvironments.map((env: any) => [env.id, env])).values()
   );
 
-  return { collections, environments, failedPaths, shas, idsByPath };
+  return { collections, environments, failedPaths, shas, idsByPath, superseded };
 }
 
 // ─── O que a última leitura do remoto trouxe, por workspace ─────────────
@@ -1189,8 +1242,59 @@ interface FetchedVersions {
   wsRemotePath: string;
   shas: FileShas;
   idsByPath: Record<string, string[]>;
+  /** Arquivos deixados de fora na leitura (mesmo id de um mais novo), com os ids. */
+  superseded?: Record<string, string[]>;
 }
 const lastFetched = new Map<string, FetchedVersions>();
+
+// O que esta máquina gravou há pouco, por arquivo (ver getFile, modo prévia).
+// 2 minutos: bem mais que o atraso da API, e curto o bastante pra não
+// esconder por muito tempo a mudança de um colega que viesse logo depois.
+const RECENT_WRITE_MS = 120_000;
+// sha = gravado; null = apagado.
+const recentWrites = new Map<string, { sha: string | null; at: number }>();
+function rememberRecentWrite(repoKey: string, path: string, sha: string | null) {
+  recentWrites.set(`${repoKey}|${path}`, { sha, at: Date.now() });
+}
+function recentWriteOf(repoKey: string, path: string): string | null | undefined {
+  const entry = recentWrites.get(`${repoKey}|${path}`);
+  return entry && Date.now() - entry.at < RECENT_WRITE_MS ? entry.sha : undefined;
+}
+/**
+ * A lista de arquivos de uma prévia, acertada com o que esta máquina gravou
+ * ou apagou há pouco: a listagem do GitHub também atrasa, e uma collection
+ * recém-criada (ou apagada) pelo envio voltava a aparecer na Central.
+ */
+function withRecentWrites(
+  repoKey: string,
+  wsRemotePath: string,
+  lists: { collectionPaths: string[]; envPaths: string[] }
+): { collectionPaths: string[]; envPaths: string[] } {
+  const prefix = `${repoKey}|${wsRemotePath}/`;
+  const collectionPaths = new Set(lists.collectionPaths);
+  const envPaths = new Set(lists.envPaths);
+  for (const [key, entry] of recentWrites) {
+    if (!key.startsWith(prefix) || Date.now() - entry.at >= RECENT_WRITE_MS) continue;
+    const filePath = key.slice(repoKey.length + 1);
+    if (!isTrackedPath(wsRemotePath, filePath)) continue;
+    const list = isEnvironmentPath(wsRemotePath, filePath) ? envPaths : collectionPaths;
+    if (entry.sha === null) list.delete(filePath);
+    else list.add(filePath);
+  }
+  return { collectionPaths: [...collectionPaths], envPaths: [...envPaths] };
+}
+// O que uma PRÉVIA leu (aviso em segundo plano, "Check for updates", "Preview
+// push"). Fica à parte: lastFetched é a versão que a revisão aberta comparou
+// (markReviewed a registra como sincronizada), e uma prévia no meio a
+// trocava pela versão nova — que ninguém revisou. Serve só pra achar o
+// arquivo de uma collection (histórico, versão sincronizada).
+const lastPeeked = new Map<string, FetchedVersions>();
+
+/** Arquivos e ids da última leitura, revisada ou de prévia — só pra localizar arquivos. */
+function knownVersions(storage: GitHubStorageClient, workspaceName: string): FetchedVersions | undefined {
+  const key = `${storage.repoKey}|${workspaceName}`;
+  return lastFetched.get(key) ?? lastPeeked.get(key);
+}
 
 // Commit mais recente por arquivo, guardado pelo sha do blob: enquanto o
 // arquivo não muda, quem mexeu por último também não.
@@ -1233,6 +1337,40 @@ async function recordPulledWorkspace(
   await recordSyncedShas(storage.repoKey, changes, options);
 }
 
+/**
+ * Dos arquivos que existem lá e não correspondem a nada daqui, os que já
+ * estiveram sincronizados nesta máquina — esses você apagou (ou renomeou)
+ * aqui. Os outros nunca passaram por aqui: são novos no GitHub, e propor
+ * apagá-los era propor apagar o trabalho de um colega.
+ */
+async function removedHere(storage: GitHubStorageClient, paths: string[]): Promise<string[]> {
+  if (paths.length === 0) return paths;
+  const synced = await loadSyncedShas(storage.repoKey);
+  return paths.filter((path) => !!synced[path]);
+}
+
+/**
+ * Dos arquivos que sobraram lá: os que são RENOMEAÇÃO (tudo o que guardam
+ * está sendo gravado neste push com outro nome) saem sem perguntar — mantê-los
+ * deixava dois arquivos com o mesmo id, e o pull seguinte podia trazer a
+ * versão velha de volta. Os outros seguem a regra de sempre (removedHere) e
+ * a pessoa confirma.
+ */
+async function staleToRemove(
+  storage: GitHubStorageClient,
+  workspaceName: string,
+  stalePaths: string[],
+  writtenIds: ReadonlySet<string>
+): Promise<{ renamed: string[]; ask: string[] }> {
+  if (stalePaths.length === 0) return { renamed: [], ask: [] };
+  const fetched = knownVersions(storage, workspaceName);
+  const renamed = fetched
+    ? renamedStalePaths(stalePaths, (path) => fetched.idsByPath[path] ?? fetched.superseded?.[path], writtenIds)
+    : [];
+  const ask = await removedHere(storage, stalePaths.filter((path) => !renamed.includes(path)));
+  return { renamed, ask };
+}
+
 // O que o remoto tem, decriptado, SEM nada aplicado localmente.
 export interface RemoteWorkspaceData {
   // Cru, como saiu do arquivo decriptado: ainda não passou pelo importData
@@ -1251,6 +1389,11 @@ export interface RemoteWorkspaceData {
   // deixem de ser cegas pra mudança só-no-catálogo (renomear/recolorir um
   // marcador existente) — todas passam por fetchWorkspace/fetchRemoteWorkspace.
   markers: Marker[] | null;
+  /**
+   * Arquivos com o mesmo id de outro mais novo (renomeação que manteve o
+   * antigo): ficaram de fora da leitura, e o próximo push os apaga.
+   */
+  supersededPaths: string[];
 }
 
 // Resolve os caminhos e baixa — a metade "buscar" do pull, separada da
@@ -1277,41 +1420,86 @@ async function fetchRemoteMarkers(
   ref?: string
 ): Promise<Marker[] | null> {
   try {
-    const file = await storage.getFile(markersFilePath(remotePath), ref);
-    if (!file?.content) return null;
-    let content = file.content;
-    if (typeof content === "string") content = JSON.parse(content);
-    const list = Array.isArray(content) ? content : (content as { markers?: unknown })?.markers;
-    if (!Array.isArray(list)) return null;
-    // Valida entrada a entrada: o arquivo é editável à mão no repositório, e
-    // um marcador sem id derrubaria o Map do catálogo inteiro.
-    return list.filter(
-      (m): m is Marker =>
-        !!m &&
-        typeof (m as Marker).id === "string" &&
-        typeof (m as Marker).name === "string" &&
-        typeof (m as Marker).color === "string"
-    );
+    return await fetchRemoteMarkersStrict(storage, remotePath, ref);
   } catch {
     return null;
   }
 }
 
+/**
+ * Igual, mas FALHA quando o arquivo existe e não deu pra ler (rede, senha,
+ * conteúdo estragado) — `null` só quando não existe. É a que o PUSH usa: com
+ * a leitura falhando, ele gravava só o catálogo daqui (sem checagem de
+ * versão) e apagava do GitHub os marcadores dos colegas.
+ */
+async function fetchRemoteMarkersStrict(
+  storage: GitHubStorageClient,
+  remotePath: string,
+  ref?: string
+): Promise<Marker[] | null> {
+  const file = await storage.getFile(markersFilePath(remotePath), ref);
+  if (!file) return null;
+  let content = file.content;
+  if (typeof content === "string") content = JSON.parse(content);
+  const list = Array.isArray(content) ? content : (content as { markers?: unknown })?.markers;
+  if (!Array.isArray(list)) throw new Error("Unexpected content in the markers file on GitHub");
+  // Valida entrada a entrada: o arquivo é editável à mão no repositório, e
+  // um marcador sem id derrubaria o Map do catálogo inteiro.
+  return list.filter(
+    (m): m is Marker =>
+      !!m &&
+      typeof (m as Marker).id === "string" &&
+      typeof (m as Marker).name === "string" &&
+      typeof (m as Marker).color === "string"
+  );
+}
+
+/**
+ * O catálogo a gravar num push e a base que ele deixa — ou `null` quando o
+ * de lá não pôde ser lido: aí o catálogo fica fora do push (o resto sobe).
+ */
+async function markersForPush(
+  storage: GitHubStorageClient,
+  remotePath: string,
+  workspaceName: string,
+  local: Marker[]
+): Promise<{ send: Marker[]; base: Record<string, string> } | null> {
+  let remote: Marker[] | null;
+  try {
+    remote = await fetchRemoteMarkersStrict(storage, remotePath);
+  } catch (e) {
+    console.log("Could not read the markers catalog on GitHub — leaving it out of this push:", e);
+    return null;
+  }
+  const previous = await loadSyncBase(workspaceName);
+  const send = catalogForPush(local, remote, previous);
+  return { send, base: markerBaseAfterPush(local, send, previous) };
+}
+
 async function fetchRemoteWorkspace(
   storage: GitHubStorageClient,
   workspaceName: string,
-  ref?: string
+  ref?: string,
+  opts?: { peek?: boolean }
 ): Promise<RemoteWorkspaceData> {
+  const peek = opts?.peek === true;
   const wsRemotePath = `${WORKSPACES_ROOT}/${workspaceName}`;
-  const { collectionPaths, envPaths } = await storage.resolveWorkspaceFilePaths(wsRemotePath, ref);
+  const listed = await storage.resolveWorkspaceFilePaths(wsRemotePath, ref);
+  // Prévia logo depois de um envio daqui: arquivos criados ou apagados por
+  // ele entram (ou saem) mesmo que a listagem ainda não os mostre.
+  const { collectionPaths, envPaths } = !ref && peek ? withRecentWrites(storage.repoKey, wsRemotePath, listed) : listed;
 
-  const [{ collections, environments, failedPaths, shas, idsByPath }, markers] = await Promise.all([
-    downloadWorkspaceFilesData(storage, collectionPaths, envPaths, ref),
+  const [{ collections, environments, failedPaths, shas, idsByPath, superseded }, markers] = await Promise.all([
+    downloadWorkspaceFilesData(storage, collectionPaths, envPaths, ref, peek),
     fetchRemoteMarkers(storage, wsRemotePath, ref),
   ]);
 
-  if (!ref) rememberFetched(storage, workspaceName, { wsRemotePath, shas, idsByPath });
-  return { collections, environments, collectionPaths, envPaths, failedPaths, shas, idsByPath, markers };
+  if (!ref && peek) lastPeeked.set(`${storage.repoKey}|${workspaceName}`, { wsRemotePath, shas, idsByPath, superseded });
+  else if (!ref) rememberFetched(storage, workspaceName, { wsRemotePath, shas, idsByPath, superseded });
+  return {
+    collections, environments, collectionPaths, envPaths, failedPaths, shas, idsByPath, markers,
+    supersededPaths: Object.keys(superseded),
+  };
 }
 
 // ─── Mensagens do push, iguais nos dois caminhos ─────────────────────────
@@ -1398,7 +1586,6 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   onWorkspacePushConflict,
   onRebasePush,
   onConflictPreview,
-  onPushPreview,
   onShowConflictHistory,
   currentMarkers,
   onPullMarkers,
@@ -1412,6 +1599,11 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   const [configDraft, setConfigDraft] = useState<GitHubConfig>(config);
   const configDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isOpen, setIsOpen] = useState(false);
+  // Lido no showStatus, que roda no fim de um push começado num render
+  // anterior: o isOpen daquele render pode já não valer (abriu ou fechou o
+  // painel no meio do envio).
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
   const [loading, setLoading] = useState(false);
   // Separado de `loading` de propósito: `loading` aciona o overlay
   // fullscreen (isBlocking) usado pelas operações de workspace inteiro
@@ -1489,6 +1681,18 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
     const finalMessage = (isAuth ? AUTH_ERROR_MESSAGE : message).replace(/^\s*(✓|✗|⚠️?|❌)\s*/u, "");
 
     setStatus({ type, message: finalMessage });
+    // A Central de Sincronização dispara push e pull com este painel
+    // fechado: o que ele diria aqui volta no resultado da ação dela.
+    if (type) reportSyncStatus(type, finalMessage);
+    // Fora da Central e com este painel fechado (a revisão que reenvia
+    // depois da mescla, uma chamada de fora), o erro só existiria aqui —
+    // invisível. Vira toast. Na Central ele já aparece na faixa dela.
+    if (type === "error" && !isAuth && !isOpenRef.current && !isCapturingSyncStatus()) {
+      toast.error(finalMessage, {
+        duration: 10000,
+        action: { label: "Open Sync", onClick: () => openSyncCenter() },
+      });
+    }
     if (type === "success" || type === "info") {
       setTimeout(() => setStatus({ type: null, message: "" }), 5000);
     }
@@ -1520,6 +1724,7 @@ const PASSPHRASE_MISSING_MESSAGE = "Set a sync passphrase in GitHub Sync setting
 const requirePassphrase = (): boolean => {
   if (passphrase) return true;
   setStatus({ type: "error", message: `✗ ${PASSPHRASE_MISSING_MESSAGE}` });
+  reportSyncStatus("error", PASSPHRASE_MISSING_MESSAGE);
   toast.error(PASSPHRASE_MISSING_MESSAGE, {
     id: "missing-sync-passphrase",
     duration: 10000,
@@ -1727,7 +1932,7 @@ useEffect(() => {
 
   const lastChangeOf = useCallback(async (workspaceName: string, rootId: string): Promise<CommitInfo | null> => {
     const storage = client();
-    const fetched = lastFetched.get(`${storage.repoKey}|${workspaceName}`);
+    const fetched = knownVersions(storage, workspaceName);
     if (!fetched) return null;
     const path = Object.keys(fetched.idsByPath).find((p) => fetched.idsByPath[p].includes(rootId));
     if (!path) return null;
@@ -1748,7 +1953,7 @@ useEffect(() => {
   // uma versão de arquivo não muda.
   const syncedVersionOf = useCallback(async (workspaceName: string, rootId: string): Promise<unknown | null> => {
     const storage = client();
-    const fetched = lastFetched.get(`${storage.repoKey}|${workspaceName}`);
+    const fetched = knownVersions(storage, workspaceName);
     if (!fetched) return null;
     const path = Object.keys(fetched.idsByPath).find((p) => fetched.idsByPath[p].includes(rootId));
     if (!path) return null;
@@ -1806,8 +2011,18 @@ useEffect(() => {
     const fresh = [...changed, ...added].filter((p) => seen[p] !== remoteShas[p]);
     const gone = deleted.filter((p) => seen[p] !== NOTIFIED_DELETED);
     if (fresh.length + gone.length === 0) return;
-    for (const p of fresh) seen[p] = remoteShas[p];
-    for (const p of gone) seen[p] = NOTIFIED_DELETED;
+    // delete antes de gravar: move a chave pro FIM do objeto. saveNotified
+    // guarda só as NOTIFIED_MAX últimas pela ordem de inserção, e atualizar
+    // no lugar deixava um arquivo antigo, recém-avisado, cair no corte — o
+    // próximo ciclo o via como novo e repetia o aviso.
+    for (const p of fresh) {
+      delete seen[p];
+      seen[p] = remoteShas[p];
+    }
+    for (const p of gone) {
+      delete seen[p];
+      seen[p] = NOTIFIED_DELETED;
+    }
     saveNotified(seen);
 
     const collections: any[] = Array.isArray(currentCollections) ? currentCollections : [];
@@ -1878,7 +2093,10 @@ useEffect(() => {
           />
         ),
         // Com prévia aberta a pessoa lê; o sonner já pausa no hover.
-        { duration: conflicts > 0 ? 60000 : 30000 }
+        // id por workspace: um aviso novo do mesmo workspace SUBSTITUI o que
+        // está na tela em vez de empilhar outro card igual por cima (a prévia
+        // é do workspace inteiro, então o mais novo já contém o anterior).
+        { id: `remote-change:${workspace}`, duration: conflicts > 0 ? 60000 : 30000 }
       );
     })();
   }, [
@@ -2021,7 +2239,10 @@ useEffect(() => {
         setLoading(false);
       }
     },
-    [client, onPullCollections, onPullEnvironments]
+    // remotePath e workspace também: sem eles, depois de trocar de workspace o
+    // Pull gravava os shas filtrando pelo workspace ANTERIOR (zerando o
+    // "sincronizado" dele e sem registrar o novo) e mesclava o catálogo dele.
+    [client, onPullCollections, onPullEnvironments, onPullMarkers, remotePath, workspace]
   );
 
   const [pendingDelete, setPendingDelete] = useState<{ paths: string[] } | null>(null);
@@ -2041,37 +2262,6 @@ useEffect(() => {
     setPendingDelete(null);
   }
 
-  // ── Confirmação antes do Pull, quando há alterações locais não
-  // sincronizadas — Pull sempre sobrescreve o local com o que está no
-  // GitHub, sem merge, então avisa antes de descartar trabalho não salvo.
-  const [pendingPullConfirm, setPendingPullConfirm] = useState(false);
-  const pullConfirmResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
-
-  function askPullConfirmation(): Promise<boolean> {
-    return new Promise((resolve) => {
-      pullConfirmResolveRef.current = resolve;
-      setPendingPullConfirm(true);
-    });
-  }
-
-  function resolvePendingPullConfirm(confirmed: boolean) {
-    pullConfirmResolveRef.current?.(confirmed);
-    pullConfirmResolveRef.current = null;
-    setPendingPullConfirm(false);
-  }
-
-  const handlePullAllWorkspacesClick = useCallback(async () => {
-    if (hasUnsyncedChanges) {
-      const confirmed = await askPullConfirmation();
-      if (!confirmed) return;
-    }
-    await handlePullAllWorkspaces();
-  }, [hasUnsyncedChanges, handlePullAllWorkspaces]);
-
-  // ── Confirmação antes do Pull de UM workspace só, quando é o workspace
-  // ativo agora e tem alterações locais não salvas (é o único cujo estado
-  // "dirty" a gente enxerga daqui — de outro workspace não sabemos).
-  const [pendingSinglePullConfirm, setPendingSinglePullConfirm] = useState<string | null>(null);
 
   // ── Histórico de commits de um workspace ────────────────────────────────
   // Janela aberta pelo ícone de relógio no menu de workspaces: lista os
@@ -2088,103 +2278,9 @@ useEffect(() => {
   const [commitChanges, setCommitChanges] = useState<
     Record<string, { loading: boolean; error: string | null; files: FileChange[] | null }>
   >({});
-  const singlePullConfirmResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
 
-  function askSinglePullConfirmation(workspaceName: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      singlePullConfirmResolveRef.current = resolve;
-      setPendingSinglePullConfirm(workspaceName);
-    });
-  }
-
-  function resolvePendingSinglePullConfirm(confirmed: boolean) {
-    singlePullConfirmResolveRef.current?.(confirmed);
-    singlePullConfirmResolveRef.current = null;
-    setPendingSinglePullConfirm(null);
-  }
-
-  // Pull de um único workspace remoto (por nome) — usado pelo ícone de
-  // atualizar no menu de workspaces, sem precisar trocar pro workspace nem
-  // baixar todos os outros junto.
-  const pullSingleWorkspace = useCallback(async (workspaceName: string) => {
-    if (!isConfigValid) {
-      showStatus("error", "✗ Configure GitHub sync before pulling.");
-      return;
-    }
-
-    // Não usa `loading` (que travaria a tela inteira via isBlocking) — só
-    // impede que outro save/pull pontual comece em paralelo.
-    if (singleOpBusy) {
-      showStatus("error", "✗ Another save/download is already in progress. Wait for it to finish.");
-      return;
-    }
-
-    if (workspaceName === workspace && hasUnsyncedChanges) {
-      const confirmed = await askSinglePullConfirmation(workspaceName);
-      if (!confirmed) return;
-    }
-
-    setSingleOp(`Updating "${workspaceName}"...`);
-    showStatus("info", `Downloading workspace "${workspaceName}"...`);
-
-    try {
-      const storage = client();
-      const remote = await fetchRemoteWorkspace(storage, workspaceName);
-      const { collections, environments, failedPaths } = remote;
-      const cPaths = remote.collectionPaths;
-      const ePaths = remote.envPaths;
-
-      if (cPaths.length === 0 && ePaths.length === 0) {
-        showStatus("info", `No files found for workspace "${workspaceName}" on GitHub.`);
-        return;
-      }
-      // Substituir sem um arquivo que não baixou apagaria aquela collection daqui.
-      if (failedPaths.length > 0) {
-        showStatus(
-          "error",
-          `Pull cancelled — ${failedPaths.length} file(s) could not be downloaded: ${failedPaths.map((p) => p.split("/").pop()).join(", ")}. Nothing was changed here.`
-        );
-        return;
-      }
-
-      // Buscar e aplicar agora são duas chamadas: a de cima só traz, esta
-      // substitui o local. É a separação que a tela de comparação vai usar
-      // pra se intrometer entre as duas.
-      await onPullWorkspaceData?.(workspaceName, collections, environments);
-      await recordPulledWorkspace(storage, `${WORKSPACES_ROOT}/${workspaceName}`, remote.shas);
-
-      if (onPullMarkers) {
-        const remoteMarkers = await fetchRemoteMarkers(
-          client(),
-          `${WORKSPACES_ROOT}/${workspaceName}`
-        );
-        if (remoteMarkers) await onPullMarkers(workspaceName, remoteMarkers);
-      }
-
-      // Se for o workspace ativo agora, mantém o painel de sync coerente.
-      if (workspaceName === workspace) {
-        setCollectionPaths(cPaths);
-        setEnvPaths(ePaths);
-      }
-
-      if (failedPaths.length > 0) {
-        showStatus(
-          "error",
-          `⚠ ${failedPaths.length} file(s) could not be downloaded for "${workspaceName}".`
-        );
-      } else {
-        showStatus(
-          "success",
-          `✓ "${workspaceName}" updated (${collections.length} collection(s), ${environments.length} environment(s))!`
-        );
-      }
-    } catch (e: any) {
-      console.error(`❌ Erro ao baixar workspace "${workspaceName}":`, e);
-      showStatus("error", `✗ Pull failed: ${e.message}`);
-    } finally {
-      setSingleOp(null);
-    }
-  }, [isConfigValid, workspace, hasUnsyncedChanges, client, onPullWorkspaceData, showStatus, singleOpBusy]);
+  // O Pull de UM workspace (menu de workspaces) saiu: receber é pela Central
+  // de Sincronização, com merge; substituir tudo, em Configurações → Avançado.
 
   // Abre a janela de histórico e busca os commits daquele workspace.
   const openCommitHistory = useCallback((workspaceName: string) => {
@@ -2372,28 +2468,36 @@ useEffect(() => {
     const wsRemotePath = `${WORKSPACES_ROOT}/${input.workspaceName}`;
     const existing = await storage.resolveWorkspaceFilePaths(wsRemotePath);
     // O catálogo de lá entra junto (catalogForPush): gravar só o daqui
-    // apagava os marcadores que outra pessoa criou desde o último pull.
-    const remoteMarkers = await fetchRemoteMarkers(storage, wsRemotePath);
-    // Com a base: marcador apagado aqui não volta, apagado lá não é reenviado,
-    // e o que o colega renomeou não é desfeito (lib/markers).
-    const markersToSend = catalogForPush(input.markers, remoteMarkers, await loadSyncBase(input.workspaceName));
+    // apagava os marcadores que outra pessoa criou desde o último pull. Com
+    // a base: marcador apagado aqui não volta, apagado lá não é reenviado, e
+    // o que o colega renomeou não é desfeito (lib/markers). Sem conseguir
+    // ler o de lá, o catálogo fica fora deste push.
+    const markers = await markersForPush(storage, wsRemotePath, input.workspaceName, input.markers);
     const plan = buildPushPlan({
       wsRemotePath,
       collections: input.collections,
       // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
       environments: withoutSessionTokens(input.environments),
-      markers: markersToSend,
+      markers: markers?.send ?? null,
       existingPaths: [...existing.collectionPaths, ...existing.envPaths],
     });
+    // Só propõe apagar o que já esteve sincronizado aqui (você apagou). Um
+    // arquivo que nunca foi sincronizado é NOVO no GitHub — de um colega —, e
+    // o diálogo dizia "You removed this here" sobre ele.
+    // Renomeação (o mesmo id gravado com outro nome) sai sem perguntar.
+    const writtenIds = new Set(
+      plan.files.filter((f) => f.kind !== "markers").map((f) => rootIdOf(f.content)).filter((id): id is string => !!id)
+    );
+    const { renamed, ask: stalePaths } = await staleToRemove(storage, input.workspaceName, plan.stalePaths, writtenIds);
 
     if (plan.collisions.length > 0) return { status: "collision", message: collisionMessage(plan.collisions) };
 
     // Pergunta ANTES de gravar: assim a exclusão entra no mesmo commit.
-    let removed: string[] = [];
+    let removed: string[] = [...renamed];
     let keptStale: string[] = [];
-    if (input.allowDeletes && plan.stalePaths.length > 0) {
-      if (await askDeleteConfirmation(plan.stalePaths)) removed = plan.stalePaths;
-      else keptStale = plan.stalePaths;
+    if (input.allowDeletes && stalePaths.length > 0) {
+      if (await askDeleteConfirmation(stalePaths)) removed = [...removed, ...stalePaths];
+      else keptStale = stalePaths;
     }
 
     const result = await storage.commitFiles(
@@ -2405,8 +2509,8 @@ useEffect(() => {
       pushCommitMessage(input.workspaceName, plan, removed.length)
     );
     if (!result.ok) return { status: "conflict", paths: result.conflicts };
-    // O catálogo que subiu vira a base dele.
-    await recordSyncBase(input.workspaceName, markerBaseHashes(markersToSend), [MARKER_BASE_PREFIX]);
+    // A base do catálogo: o que ficou igual dos dois lados (markerBaseAfterPush).
+    if (markers) await recordSyncBase(input.workspaceName, markers.base, [MARKER_BASE_PREFIX]);
 
     const isEnv = (path: string) => path.startsWith(`${wsRemotePath}/environments/`);
     const kept = new Set(keptStale);
@@ -2546,12 +2650,16 @@ useEffect(() => {
         setCollectionPaths(result.collectionPaths);
         setEnvPaths(result.envPaths);
       }
-      if (result.keptStale.length > 0) {
-        showStatus("info", keptStaleMessage(workspaceName, result.keptStale.length));
-        return;
-      }
-      onPushCompleted?.(workspaceName, { collections: collectionsToPush, environments: withoutSessionTokens(envsToPush) });
-      showStatus("success", pushedMessage(workspaceName, result.removed.length, incoming, keptMine));
+      // O commit subiu mesmo mantendo arquivos lá: registra (base, pendência)
+      // — antes voltava aqui, e o que tinha subido continuava "pendente", com
+      // a base velha gerando conflitos falsos depois.
+      onPushCompleted?.(workspaceName, {
+        collections: collectionsToPush,
+        environments: withoutSessionTokens(envsToPush),
+        keptStale: result.keptStale.length > 0,
+      });
+      if (result.keptStale.length > 0) showStatus("info", keptStaleMessage(workspaceName, result.keptStale.length));
+      else showStatus("success", pushedMessage(workspaceName, result.removed.length, incoming, keptMine));
     } catch (e: any) {
       if (e instanceof MissingPassphraseError) {
         // A senha sumiu no meio (apagada nas settings): só avisa.
@@ -2619,7 +2727,12 @@ useEffect(() => {
       const changes: { path: string; content?: unknown; delete?: boolean; noCheck?: boolean }[] = [];
       for (const file of files) {
         const data = await storage.getFile(file.path);
-        if (!data) continue;
+        // Sem conteúdo (sumiu no meio, ou não deu pra ler): pular deixava a
+        // pasta antiga com esse arquivo — e o "Pull de todos" recriava o
+        // workspace antigo. Para tudo; a pasta antiga continua inteira.
+        if (!data) {
+          throw new Error(`Could not read "${file.path.split("/").pop()}" on GitHub — nothing was renamed there. Try again.`);
+        }
         changes.push({ path: `${newRemotePath}${file.path.slice(oldRemotePath.length)}`, content: data.content, noCheck: true });
         changes.push({ path: file.path, delete: true, noCheck: true });
       }
@@ -2853,12 +2966,14 @@ useEffect(() => {
 
       setCollectionPaths(result.collectionPaths);
       setEnvPaths(result.envPaths);
-      if (result.keptStale.length > 0) {
-        showStatus("info", keptStaleMessage(workspace, result.keptStale.length));
-        return;
-      }
-      onPushCompleted?.(workspace, { collections: collectionsToSend, environments: withoutSessionTokens(environmentsToSend) });
-      showStatus("success", pushedMessage(workspace, result.removed.length, incoming, keptMine));
+      // Ver pushSingleWorkspace: mantendo arquivos lá, o push vale do mesmo jeito.
+      onPushCompleted?.(workspace, {
+        collections: collectionsToSend,
+        environments: withoutSessionTokens(environmentsToSend),
+        keptStale: result.keptStale.length > 0,
+      });
+      if (result.keptStale.length > 0) showStatus("info", keptStaleMessage(workspace, result.keptStale.length));
+      else showStatus("success", pushedMessage(workspace, result.removed.length, incoming, keptMine));
     } catch (e: any) {
       console.error("❌ Erro no Push:", e);
       showStatus("error", `Push failed: ${e.message}`);
@@ -2907,8 +3022,15 @@ useEffect(() => {
     // no GitHub — e ele voltava no próximo pull. Pergunta antes, pra a
     // exclusão entrar no mesmo commit.
     const expected = new Set(allEnvironments.map((other) => environmentFilePath(remotePath, other)));
-    const stale = envPaths.filter((path) => path !== targetEnvPath && !expected.has(path));
-    const removed = stale.length > 0 && (await askDeleteConfirmation(stale)) ? stale : [];
+    // Só o que já foi sincronizado aqui: arquivo novo de colega não é "removido aqui".
+    // Renomeação deste environment (o arquivo antigo tem o mesmo id) sai sem perguntar.
+    const { renamed, ask: stale } = await staleToRemove(
+      storage,
+      workspace,
+      envPaths.filter((path) => path !== targetEnvPath && !expected.has(path)),
+      new Set(env?.id ? [env.id] : [])
+    );
+    const removed = [...renamed, ...(stale.length > 0 && (await askDeleteConfirmation(stale)) ? stale : [])];
 
     const result = await storage.commitFiles(
       // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
@@ -2988,27 +3110,47 @@ useEffect(() => {
     try {
       const storage = client();
 
+      // O arquivo lá (mesmo nome) é de OUTRA collection — alguém criou uma
+      // com esse nome. Os ids diferem, então nenhuma checagem via isso como
+      // conflito, e o envio gravava por cima da collection da pessoa. Só
+      // quando o arquivo nunca foi sincronizado aqui: um export do Postman
+      // (ids gerados a cada leitura) que já passou por aqui é o mesmo.
+      const fetched = lastFetched.get(`${storage.repoKey}|${workspace}`);
+      const idsThere = fetched?.idsByPath[targetPath] ?? [];
+      const knownHere = (await removedHere(storage, [targetPath])).length > 0;
+      if (col?.id && idsThere.length > 0 && !idsThere.includes(col.id) && !knownHere) {
+        const message = `Push cancelled: GitHub already has a different collection named "${rawName}" (someone else created it). Pull it first, or rename yours.`;
+        showStatus("error", message);
+        throw new Error(message);
+      }
+
       // Renomear esta collection e enviar só ela deixava o arquivo do nome
       // ANTIGO órfão no remoto. Path conhecido que não corresponde a NENHUMA
       // collection local é candidato; pergunta ANTES, pra a exclusão entrar
       // no mesmo commit do envio.
       const expectedPaths = new Set(allCollections.map((c) => collectionFilePath(remotePath, c)));
       // Envio de um item só não mexe em outros arquivos.
-      const stalePaths = partOf ? [] : collectionPaths.filter((p) => p !== targetPath && !expectedPaths.has(p));
-      const removed = stalePaths.length > 0 && (await askDeleteConfirmation(stalePaths)) ? stalePaths : [];
+      // Só o que já foi sincronizado aqui: arquivo novo de colega não é "removido aqui".
+      // Renomeação desta collection (o arquivo antigo tem o mesmo id) sai sem perguntar.
+      const { renamed, ask: stalePaths } = partOf
+        ? { renamed: [], ask: [] }
+        : await staleToRemove(
+            storage,
+            workspace,
+            collectionPaths.filter((p) => p !== targetPath && !expectedPaths.has(p)),
+            new Set(col?.id ? [col.id] : [])
+          );
+      const removed = [...renamed, ...(stalePaths.length > 0 && (await askDeleteConfirmation(stalePaths)) ? stalePaths : [])];
 
       // O catálogo de marcadores é do workspace, não da collection — sobe
       // junto, no mesmo commit, senão renomear/recolorir um marcador só
       // chegaria ao GitHub num push do workspace inteiro.
-      const markersToSend = catalogForPush(currentMarkers ?? [], await fetchRemoteMarkers(storage, remotePath), await loadSyncBase(workspace));
+      // Sem conseguir ler o catálogo de lá, ele fica fora deste envio.
+      const markers = await markersForPush(storage, remotePath, workspace, currentMarkers ?? []);
       const result = await storage.commitFiles(
         [
           { path: targetPath, content: stripStarredFlags(col) },
-          {
-            path: markersFilePath(remotePath),
-            content: { markers: markersToSend },
-            noCheck: true,
-          },
+          ...(markers ? [{ path: markersFilePath(remotePath), content: { markers: markers.send }, noCheck: true }] : []),
           ...removed.map((path) => ({ path, delete: true })),
         ],
         partOf
@@ -3017,7 +3159,7 @@ useEffect(() => {
       );
       // Quem chamou (AppLayout) abre a revisão ao ver o conflito.
       if (!result.ok) throw new GitHubConflictError(result.conflicts[0]);
-      await recordSyncBase(workspace, markerBaseHashes(markersToSend), [MARKER_BASE_PREFIX]);
+      if (markers) await recordSyncBase(workspace, markers.base, [MARKER_BASE_PREFIX]);
 
       setCollectionPaths(prev =>
         [...prev.filter((p) => !removed.includes(p)), ...(prev.includes(targetPath) ? [] : [targetPath])]
@@ -3043,40 +3185,6 @@ useEffect(() => {
     }
   }
 
-  // Busca o remoto e manda comparar — sem aplicar nada. A interpretação é do
-  // AppLayout (só lá o formato remoto vira árvore, via importData), aqui só
-  // se sabe baixar.
-  async function handleCheckRemoteUpdates() {
-    if (!isConfigValid || !workspace || !onCompareRemote) return;
-    if (!requirePassphrase()) return;
-
-    if (singleOpBusy) {
-      showStatus("error", "✗ Another save/download is already in progress. Wait for it to finish.");
-      return;
-    }
-
-    setSingleOp("Checking GitHub...");
-    try {
-      const remote = await fetchRemoteWorkspace(client(), workspace);
-      if (remote.collectionPaths.length === 0 && remote.envPaths.length === 0) {
-        showStatus("info", `Nothing found for "${workspace}" on GitHub yet.`);
-        return;
-      }
-      const { summary } = onCompareRemote(workspace, remote.collections, remote.environments);
-      // Arquivo que não baixou não pode passar por "igual ao local": seria
-      // dizer que não há novidade justamente onde não se conseguiu olhar.
-      showStatus(
-        remote.failedPaths.length > 0 ? "error" : "info",
-        remote.failedPaths.length > 0
-          ? `${summary} — ${remote.failedPaths.length} file(s) could not be read.`
-          : summary
-      );
-    } catch (e) {
-      showStatus("error", `✗ Could not check GitHub: ${(e as Error)?.message ?? String(e)}`);
-    } finally {
-      setSingleOp(null);
-    }
-  }
 
   async function handleReloadAfterConflict() {
     setPushConflict(null);
@@ -3154,9 +3262,18 @@ useEffect(() => {
       let pulledCollections = 0;
       let pulledEnvironments = 0;
       const failedWorkspaces: string[] = [];
+      // Workspaces fechados com alteração não enviada: substituir apagaria o
+      // trabalho deles sem pergunta nenhuma (a confirmação do "Pull all" fala
+      // só do aberto). Ficam de fora — Pull ou Push deles pelo menu.
+      const skippedUnsynced: string[] = [];
 
       for (let i = 0; i < folders.length; i++) {
         const folder = folders[i];
+        // O aberto conta também as abas com edição (hasUnsyncedChanges).
+        if (folder.name === workspace ? !!hasUnsyncedChanges : !isPendingEmpty(readPendingPush(folder.name))) {
+          skippedUnsynced.push(folder.name);
+          continue;
+        }
         showStatus("info", `Downloading workspace "${folder.name}" (${i + 1}/${folders.length})...`);
 
         try {
@@ -3196,11 +3313,17 @@ useEffect(() => {
         }
       }
 
+      const downloaded = folders.length - failedWorkspaces.length - skippedUnsynced.length;
+      const skippedNote = skippedUnsynced.length > 0
+        ? ` Skipped (unpushed changes — push or pull them from the workspace menu): ${skippedUnsynced.join(", ")}.`
+        : "";
       if (failedWorkspaces.length > 0) {
         showStatus(
           "error",
-          `⚠ ${folders.length - failedWorkspaces.length}/${folders.length} workspaces downloaded successfully. Failed: ${failedWorkspaces.join(", ")}`
+          `⚠ ${downloaded}/${folders.length} workspaces downloaded successfully. Failed: ${failedWorkspaces.join(", ")}.${skippedNote}`
         );
+      } else if (skippedUnsynced.length > 0) {
+        showStatus("info", `${downloaded}/${folders.length} workspace(s) downloaded.${skippedNote}`);
       } else {
         showStatus(
           "success",
@@ -3221,17 +3344,18 @@ useImperativeHandle(ref, () => ({
   pushEnvironment: (env: any) => handlePushSingleEnvironment(env),
   pushCollection: (collection: CollectionItem, options?: { partOf?: string }) =>
     handlePushSingleCollection(collection, options),
-  fetchWorkspace: async (workspaceName: string, ref?: string, statusLabel?: string) => {
-    if (!statusLabel) return fetchRemoteWorkspace(client(), workspaceName, ref);
+  fetchWorkspace: async (workspaceName: string, ref?: string, statusLabel?: string, options?: { peek?: boolean }) => {
+    if (!statusLabel) return fetchRemoteWorkspace(client(), workspaceName, ref, options);
     setSingleOp(statusLabel);
     try {
-      return await fetchRemoteWorkspace(client(), workspaceName, ref);
+      return await fetchRemoteWorkspace(client(), workspaceName, ref, options);
     } finally {
       setSingleOp(null);
     }
   },
   isSynced: () => collectionPaths.length > 0 || envPaths.length > 0,
-  pullWorkspace: (workspaceName: string) => pullSingleWorkspace(workspaceName),
+  // Configurações → Avançado: baixa todos os workspaces e substitui os daqui.
+  replaceAllFromGitHub: () => handlePullAllWorkspaces(),
   pushWorkspace: (workspaceName: string, options?: PushOptions) => pushSingleWorkspace(workspaceName, options),
   renameWorkspace: (oldName: string, newName: string) => renameRemoteWorkspace(oldName, newName),
   openCommitHistory: (workspaceName: string) => openCommitHistory(workspaceName),
@@ -3256,7 +3380,7 @@ useImperativeHandle(ref, () => ({
   },
   fileHistoryOf: async (workspaceName: string, rootId: string, limit = 15) => {
     const storage = client();
-    const fetched = lastFetched.get(`${storage.repoKey}|${workspaceName}`);
+    const fetched = knownVersions(storage, workspaceName);
     const path = fetched && Object.keys(fetched.idsByPath).find((p) => fetched.idsByPath[p].includes(rootId));
     if (!path) return null;
     const commits = await storage.listCommits(path, limit);
@@ -3287,6 +3411,15 @@ useImperativeHandle(ref, () => ({
   const hasAhead = pendingPushSummary ? aheadCount > 0 || aheadDeletions : !!hasPendingPush;
 
   const isBlocking = loading || resolvingFiles;
+  const knownConflicts = useKnownConflicts(workspace);
+  // Sincronizado de fato: nada lá (com referência), nada aqui, sem conflito.
+  const inSync = behindCount === 0 && aheadCount === 0 && !aheadDeletions && !knownConflicts;
+  // O ↓N também vai pra Central: com arquivo mudado lá e nada a mesclar, ela
+  // ainda libera o "Receber" (o pull é que marca o arquivo como lido).
+  useEffect(() => {
+    setRemoteBehind(workspace, behindCount);
+  }, [workspace, behindCount]);
+  const syncText = useSyncDiffStrings();
 
   return (
     <>
@@ -3297,16 +3430,15 @@ useImperativeHandle(ref, () => ({
         // No topo ela dividia espaço com a barra de abas e ficava fácil de
         // não notar — bloqueante merece ocupar o centro, igual um diálogo,
         // com o fundo escurecido deixando claro que o app pausou pra isso.
-        <div className="fixed inset-0 z-[9999] select-none flex items-center justify-center bg-black/20 backdrop-blur-[2px]">
-          <div className="flex items-center gap-3 pl-3.5 pr-6 py-3.5 bg-pm-surface/95 border border-pm-border rounded-full ring-1 ring-pm-border/40 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
-            <div className="relative w-5 h-5 flex-shrink-0">
-              <div className="absolute inset-0 border-2 border-pm-border rounded-full" />
-              <div className="absolute inset-0 border-2 border-transparent border-t-[#007acc] rounded-full animate-spin" />
-            </div>
-            <span className="text-[13px] font-medium text-pm-text whitespace-nowrap">
-              {resolvingFiles ? "Syncing workspace..." : "Processing..."}
-            </span>
-          </div>
+        <div className="fixed inset-0 z-[9999] select-none flex items-center justify-center bg-black/25 backdrop-blur-[3px] animate-in fade-in duration-150">
+          <DevFlowBusyCard
+            title={resolvingFiles ? "Syncing workspace" : "Processing"}
+            detail={
+              resolvingFiles
+                ? `"${workspace.split(/[\\/]/).pop() || workspace}" — reading the files on GitHub`
+                : "Hold on — the app continues as soon as this finishes"
+            }
+          />
         </div>,
         document.body
       )}
@@ -3319,21 +3451,13 @@ useImperativeHandle(ref, () => ({
           duas nunca se sobreporem. */}
       {singleOp && !isBlocking && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-[9999] pointer-events-none select-none flex items-center justify-center">
-          <div className="flex items-center gap-3 pl-3.5 pr-6 py-3.5 bg-pm-surface/95 border border-pm-border rounded-full shadow-[0_8px_28px_-6px_rgba(0,0,0,0.55)] ring-1 ring-pm-border/40 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
-            <div className="relative w-5 h-5 flex-shrink-0">
-              <div className="absolute inset-0 border-2 border-pm-border rounded-full" />
-              <div className="absolute inset-0 border-2 border-transparent border-t-[#007acc] rounded-full animate-spin" />
-            </div>
-            <span className="text-[13px] font-medium text-pm-text whitespace-nowrap">
-              {singleOp}
-            </span>
-          </div>
+          <DevFlowBusyCard title={singleOp} detail="You can keep using the app meanwhile" />
         </div>,
         document.body
       )}
 
       {pendingDelete && (
-        <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[10001] pointer-events-auto flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <ModalCard className="w-[380px]" onClose={() => resolvePendingDelete(false)} closeLabel="Keep on GitHub">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-pm-border">
               <span className="w-[22px] h-[22px] rounded-md bg-rose-500/15 text-rose-400 flex items-center justify-center">
@@ -3379,7 +3503,7 @@ useImperativeHandle(ref, () => ({
       )}
 
       {pendingDeleteWorkspace && (
-        <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[10001] pointer-events-auto flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <ModalCard className="w-[380px]" onClose={deletingWorkspace ? undefined : () => setPendingDeleteWorkspace(null)} closeLabel="Cancel">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-pm-border">
               <span className="w-[22px] h-[22px] rounded-md bg-rose-500/15 text-rose-400 flex items-center justify-center">
@@ -3426,118 +3550,14 @@ useImperativeHandle(ref, () => ({
         </div>
       )}
 
-      {pendingPullConfirm && (
-        <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <ModalCard className="w-[380px]" onClose={() => resolvePendingPullConfirm(false)} closeLabel="Cancel">
-            <div className="flex items-center gap-2 px-4 py-3 border-b border-pm-border">
-              <span className="w-[22px] h-[22px] rounded-md bg-amber-500/15 text-amber-400 flex items-center justify-center">
-                <MissingDotIcon />
-              </span>
-              <span className="text-[13px] font-semibold text-pm-text">
-                Overwrite local changes?
-              </span>
-            </div>
-
-            <div className="px-4 py-3 flex flex-col gap-2">
-              <p className="text-[12px] text-pm-text-muted leading-relaxed">
-                You have local changes that haven&apos;t been pushed to GitHub yet.
-                This downloads every workspace in the repository and replaces your
-                local collections and environments — there is no merge.
-              </p>
-              <p className="text-[11px] text-amber-400/90">
-                Unsaved/unpushed local changes will be lost.
-              </p>
-              {/* Esta ação cobre TODOS os workspaces, e a tela de comparação
-                  trabalha sobre o que está aberto — daí apontar o caminho em
-                  vez de oferecer o botão aqui. */}
-              {(onPullWithReview || onCompareRemote) && (
-                <p className="text-[11px] text-pm-text-muted">
-                  To pick what changes instead, cancel and use{' '}
-                  <strong className="font-semibold">Pull</strong> — it shows
-                  GitHub&apos;s changes to this workspace before applying anything.
-                </p>
-              )}
-            </div>
-
-            <div className="flex gap-2 px-4 py-3 border-t border-pm-border bg-pm-hover/20">
-              <button
-                className="flex-1 h-[32px] rounded-md text-xs font-semibold cursor-pointer border border-pm-border bg-pm-hover text-pm-text hover:bg-pm-row-active hover:text-pm-text transition-colors"
-                onClick={() => resolvePendingPullConfirm(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="flex-1 h-[32px] rounded-md text-xs font-semibold cursor-pointer border-none bg-rose-600 text-white hover:bg-rose-500 transition-colors"
-                onClick={() => resolvePendingPullConfirm(true)}
-              >
-                Overwrite and pull
-              </button>
-            </div>
-          </ModalCard>
-        </div>
-      )}
-
-      {pendingSinglePullConfirm && (
-        <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <ModalCard className="w-[380px]" onClose={() => resolvePendingSinglePullConfirm(false)} closeLabel="Cancel">
-            <div className="flex items-center gap-2 px-4 py-3 border-b border-pm-border">
-              <span className="w-[22px] h-[22px] rounded-md bg-amber-500/15 text-amber-400 flex items-center justify-center">
-                <MissingDotIcon />
-              </span>
-              <span className="text-[13px] font-semibold text-pm-text">
-                Overwrite local changes?
-              </span>
-            </div>
-
-            <div className="px-4 py-3 flex flex-col gap-2">
-              <p className="text-[12px] text-pm-text-muted leading-relaxed">
-                &quot;{pendingSinglePullConfirm}&quot; has local changes that haven&apos;t
-                been pushed to GitHub yet. Pull replaces this workspace&apos;s local
-                data with the remote version, all at once.
-              </p>
-              <p className="text-[11px] text-amber-400/90">
-                Unsaved/unpushed local changes will be lost.
-              </p>
-            </div>
-
-            <div className="flex flex-col gap-2 px-4 py-3 border-t border-pm-border bg-pm-hover/20">
-              {/* Primário de propósito: comparar antes é estritamente mais
-                  seguro que substituir, e até existir essa tela o usuário não
-                  tinha escolha a não ser aceitar a perda. */}
-              {onCompareRemote && (
-                <button
-                  className="h-[32px] rounded-md text-xs font-semibold cursor-pointer border-none bg-[#007acc] text-white hover:bg-[#1a8ad4] transition-colors"
-                  onClick={() => {
-                    resolvePendingSinglePullConfirm(false);
-                    void handleCheckRemoteUpdates();
-                  }}
-                >
-                  Review changes first
-                </button>
-              )}
-              <div className="flex gap-2">
-                <button
-                  className="flex-1 h-[32px] rounded-md text-xs font-semibold cursor-pointer border border-pm-border bg-pm-hover text-pm-text hover:bg-pm-row-active hover:text-pm-text transition-colors"
-                  onClick={() => resolvePendingSinglePullConfirm(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="flex-1 h-[32px] rounded-md text-xs font-semibold cursor-pointer border-none bg-rose-600 text-white hover:bg-rose-500 transition-colors"
-                  onClick={() => resolvePendingSinglePullConfirm(true)}
-                >
-                  Overwrite and pull
-                </button>
-              </div>
-            </div>
-          </ModalCard>
-        </div>
-      )}
+      {/* Os modais de confirmação de pull saíram: a Central de Sincronização
+          mostra o que vai entrar antes de aplicar, e o "substituir tudo" tem a
+          própria confirmação em Configurações → Avançado. */}
 
       {/* Histórico de commits do workspace — escolher qual versão baixar */}
       {commitHistoryWorkspace && (
         <div
-          className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          className="fixed inset-0 z-[10001] pointer-events-auto flex items-center justify-center bg-black/60 backdrop-blur-sm"
           onClick={closeCommitHistory}
         >
           <div
@@ -3664,6 +3684,42 @@ useImperativeHandle(ref, () => ({
         </div>
       )}
 
+      {/* Indicador da Central de Sincronização: ↓ receber · ↑ enviar · ⚠
+          conflitos (o ⚠ é o que a última verificação achou). Clicar abre a
+          Central — o lugar único de ver o que entra e o que sai. */}
+      {canSync && (
+        <button
+          type="button"
+          onClick={() => openSyncCenter()}
+          title={inSync ? syncText.scIndicatorSynced : syncText.scIndicatorTitle(behindCount, aheadCount, knownConflicts)}
+          aria-label={syncText.scTitle}
+          className="inline-flex items-center gap-1.5 h-6 px-1.5 rounded-md border border-transparent text-[11px] tabular-nums cursor-pointer text-pm-text-muted hover:bg-pm-row-active hover:border-pm-border transition-colors"
+        >
+          {inSync ? (
+            // Nada a receber, enviar nem decidir: um ✓ diz isso de uma vez,
+            // em vez de "↓0 ↑0" que obriga a ler os dois números.
+            <span className="inline-flex items-center gap-1 text-[#4ff09d]">
+              <Check size={12} />
+            </span>
+          ) : (<>
+          <span className={`inline-flex items-center gap-0.5 ${behindCount ? "text-[#9fd3f7]" : ""}`}>
+            <ArrowDown size={11} />
+            {behindCount ?? "–"}
+          </span>
+          <span className={`inline-flex items-center gap-0.5 ${aheadCount > 0 || aheadDeletions ? "text-[#4ff09d]" : ""}`}>
+            <ArrowUp size={11} />
+            {aheadCount}
+          </span>
+          {!!knownConflicts && (
+            <span className="inline-flex items-center gap-0.5 text-amber-300">
+              <AlertTriangle size={11} />
+              {knownConflicts}
+            </span>
+          )}
+          </>)}
+        </button>
+      )}
+
       <div className="relative inline-block text-pm-text font-sans" ref={popoverRef}>
         <button
           className={`relative inline-flex items-center justify-center h-6 px-1 rounded-md cursor-pointer text-xs font-medium border transition-all ${
@@ -3680,18 +3736,9 @@ useImperativeHandle(ref, () => ({
             ].filter(Boolean).join(" — ")
           }
         >
+          {/* Sem pontos de aviso aqui: o contador ↓/↑ ao lado já mostra o que
+              há para baixar e para enviar. */}
           <FolderGit2 size={17} className="text-pm-text-muted" />
-          {/* Salvar é local: esse ponto é o que avisa que existe conteúdo
-              gravado aqui que ainda não subiu pro GitHub. */}
-          {hasPendingPush && (
-            <span className="absolute -top-0.5 -right-0.5 w-[7px] h-[7px] rounded-full bg-amber-400 ring-2 ring-pm-bg" />
-          )}
-          {/* Embaixo, em azul: novidade no GitHub (visto na última abertura
-              do painel). Ponto separado do de cima pra os dois não se
-              confundirem — um é "envie", o outro é "baixe". */}
-          {!!behindCount && (
-            <span className="absolute -bottom-0.5 -right-0.5 w-[7px] h-[7px] rounded-full bg-sky-400 ring-2 ring-pm-bg" />
-          )}
         </button>
 
         {isOpen && (
@@ -4054,33 +4101,9 @@ useImperativeHandle(ref, () => ({
                 </div>
               )}
 
-              {/* O antigo Pull: todos os workspaces, substituindo o local sem
-                  mescla. Continua existindo (é o jeito de trazer workspaces
-                  que ainda não existem aqui), mas como ação à parte e com
-                  nome que diz o que faz. */}
-              {onPullWithReview && (
-                <button
-                  type="button"
-                  onClick={handlePullAllWorkspacesClick}
-                  disabled={loading || singleOpBusy || !isConfigValid}
-                  title="Downloads every workspace in the repository and replaces the local copies — no review, no merge"
-                  className="self-start text-[11px] text-pm-text-muted hover:text-pm-text hover:underline cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline -mt-0.5"
-                >
-                  Replace all local workspaces with GitHub…
-                </button>
-              )}
-
-              {onPushPreview && (
-                <button
-                  type="button"
-                  onClick={onPushPreview}
-                  disabled={loading || singleOpBusy || !canSync}
-                  title="What the push would send and bring in — nothing is sent"
-                  className="self-start text-[11px] text-pm-text-muted hover:text-pm-text hover:underline cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline -mt-0.5"
-                >
-                  Preview push…
-                </button>
-              )}
+              {/* "Substituir tudo pelo GitHub" foi para Configurações →
+                  Avançado (zona de perigo); a prévia do push é a aba "Para
+                  enviar" da Central de Sincronização. */}
 
               {onShowConflictHistory && (
                 <button
@@ -4111,52 +4134,27 @@ useImperativeHandle(ref, () => ({
                 disabled={!canSync || resolvingFiles}
                 onClick={() => { void resolveWorkspaceFiles(); }}
               >
-                <span className={resolvingFiles ? "animate-spin" : ""}>
-                  <RefreshIcon />
-                </span>
+                {resolvingFiles ? <DevFlowSpinner size={14} /> : <RefreshIcon />}
               </button>
 
-              {/* Buscar sem aplicar. Antes só existia o Pull, que substitui a
-                  árvore — pra saber se havia novidade era preciso aceitá-la.
-                  Com o Pull revisado, os dois fariam a mesma coisa: some. */}
-              {onCompareRemote && !onPullWithReview && (
-                <button
-                  className="inline-flex items-center justify-center h-[32px] px-2.5 rounded-md text-xs font-semibold cursor-pointer border border-pm-border bg-pm-hover text-pm-text transition-colors hover:bg-pm-row-active disabled:opacity-35 disabled:cursor-not-allowed"
-                  disabled={loading || singleOpBusy || !isConfigValid || !workspace}
-                  title="Check what changed on GitHub without applying anything"
-                  onClick={handleCheckRemoteUpdates}
-                >
-                  <SearchIcon />
-                </button>
-              )}
-
-              {onPullWithReview ? (
-                <button
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 h-[32px] px-3 rounded-md text-xs font-semibold cursor-pointer border border-pm-border bg-pm-hover text-pm-text transition-colors hover:bg-pm-row-active hover:text-pm-text hover:border-pm-border disabled:opacity-35 disabled:cursor-not-allowed"
-                  disabled={loading || singleOpBusy || !canSync}
-                  title={`Get GitHub's changes to "${workspace}" — you review them before anything changes here`}
-                  onClick={() => { void onPullWithReview(); }}
-                >
-                  <PullIcon /> Pull{!!behindCount && <span className="text-sky-300 tabular-nums">({behindCount})</span>}
-                </button>
-              ) : (
-                <button
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 h-[32px] px-3 rounded-md text-xs font-semibold cursor-pointer border border-pm-border bg-pm-hover text-pm-text transition-colors hover:bg-pm-row-active hover:text-pm-text hover:border-pm-border disabled:opacity-35 disabled:cursor-not-allowed"
-                  disabled={loading || !isConfigValid}
-                  title="Downloads every workspace found in the repository"
-                  onClick={handlePullAllWorkspacesClick}
-                >
-                  <PullIcon /> Pull
-                </button>
-              )}
-
+              {/* Pull e Push daqui foram para a Central de Sincronização —
+                  um lugar só pro que entra, o que sai e o que conflita. */}
               <button
                 className="flex-1 inline-flex items-center justify-center gap-1.5 h-[32px] px-3 rounded-md text-xs font-semibold cursor-pointer border-none bg-[#007acc] text-white transition-colors hover:bg-[#1a8ad4] disabled:opacity-35 disabled:cursor-not-allowed"
-                disabled={loading || !canSync}
-                title={workspace ? `Send "${workspace}" to GitHub — if GitHub has changes you don't have, you review them first` : undefined}
-                onClick={() => handlePushEverything()}
+                disabled={!canSync}
+                onClick={() => {
+                  setIsOpen(false);
+                  openSyncCenter();
+                }}
               >
-                <PushIcon /> Push{aheadCount > 0 && <span className="text-white/80 tabular-nums">({aheadCount})</span>}
+                <ArrowDown size={13} className="text-[#9fd3f7]" />
+                <ArrowUp size={13} className="-ml-1.5 text-[#4ff09d]" />
+                {syncText.scOpen}
+                {(!!behindCount || aheadCount > 0) && (
+                  <span className="text-white/80 tabular-nums">
+                    ({behindCount ?? 0}/{aheadCount})
+                  </span>
+                )}
               </button>
 
               

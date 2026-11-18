@@ -1,0 +1,174 @@
+{
+  "id": "grupos-cotacao-pedido",
+  "title": "Cotação de grupo até o checkout do pedido (Portal de Grupos)",
+  "context": "grupos",
+  "workspace": "Barramento B2B - Dev",
+  "environment": "5by5",
+  "parentFolder": "Method Flows Grupos - Claude",
+  "folderName": "Flow NN - Cotação até checkout",
+  "ask": [
+    {
+      "id": "auth",
+      "question": "Autenticação do flow?",
+      "options": [
+        "msal (Recomendado)",
+        "b2b"
+      ]
+    },
+    {
+      "id": "route",
+      "question": "Rota da cotação (origem e destino)?",
+      "options": [
+        "SDU → GRU (Recomendado)",
+        "outra (digite)"
+      ]
+    },
+    {
+      "id": "pax",
+      "question": "Quantos passageiros (mínimo 10)?",
+      "options": [
+        "10 (Recomendado)",
+        "outro (digite, ≥ 10)"
+      ]
+    },
+    {
+      "id": "orderUrl",
+      "question": "As requests do Order.Groups usam {{urlOrderGroupsApi}}, que não existe no 5by5. Usar {{urlOrderGroups}} (a que o Flow 07 usou)?",
+      "options": [
+        "Sim, usar urlOrderGroups (Recomendado)",
+        "Não, vou criar urlOrderGroupsApi no app"
+      ]
+    }
+  ],
+  "include": [
+    {
+      "when": "auth == msal",
+      "file": "references/grupos/auth-msal.json"
+    },
+    {
+      "when": "auth == b2b",
+      "file": "references/grupos/auth-b2b.json"
+    }
+  ],
+  "steps": [
+    {
+      "name": "POST Quote",
+      "tool": "create_request",
+      "copyFrom": {
+        "collection": "Portal De Grupos - APIs",
+        "folder": "Quote.Groups / v1",
+        "request": "POST Quote"
+      },
+      "consumes": [
+        "urlGroupsQuoteApi",
+        "apiKey",
+        "bearerToken"
+      ],
+      "produces": [
+        "quoteNumber",
+        "quoteToken",
+        "flowOrigin",
+        "flowDestination",
+        "flowPaxCount",
+        "flowQuoteDeparture"
+      ],
+      "preRequestScript": "var moment = require(\"moment\");\n// Rota e passageiros das respostas do usuário (<<…>> = resposta; o create_flow_from_recipe troca sozinho):\npm.environment.set(\"flowOrigin\", \"<<route.origin>>\");\npm.environment.set(\"flowDestination\", \"<<route.destination>>\");\npm.environment.set(\"flowPaxCount\", \"<<pax.number>>\");\n// Data única por execução: evita o 409 Validate.Unblocked.Quote (cotação aberta na mesma rota+data).\npm.environment.set(\"flowQuoteDeparture\", moment().add(60 + (Math.floor(moment().valueOf() / 1000) % 240), \"days\").format(\"YYYY-MM-DD\"));\n// Começa vazio: se o POST falhar, os passos seguintes não usam a cotação de outra execução.\npm.environment.set(\"quoteNumber\", \"\");\npm.environment.set(\"quoteToken\", \"\");",
+      "body": "{\n  \"eventName\": \"Comemoração Centenária\",\n  \"tripType\": \"RoundTrip\",\n  \"tripPurpose\": \"Event\",\n  \"contact\": {\n    \"name\": {\n      \"first\": \"Teste\",\n      \"middle\": \"Grupos\",\n      \"last\": \"Sintetico\"\n    },\n    \"phones\": [\n      {\n        \"type\": \"Mobile\",\n        \"number\": \"(11)99999-0001\"\n      },\n      {\n        \"type\": \"Home\",\n        \"number\": \"(11)3333-0001\"\n      }\n    ],\n    \"email\": \"teste.grupos@example.com\"\n  },\n  \"journeys\": [\n    {\n      \"departure\": \"{{flowQuoteDeparture}}\",\n      \"origin\": \"{{flowOrigin}}\",\n      \"destination\": \"{{flowDestination}}\"\n    }\n  ],\n  \"paxCount\": {{flowPaxCount}}\n}",
+      "bodyType": "raw",
+      "postResponseScript": "var data = pm.response.json().data;\npm.environment.set(\"quoteNumber\", data.number);\npm.environment.set(\"quoteToken\", data.token);",
+      "status": "confirmado",
+      "notes": "POST {{urlGroupsQuoteApi}}/api/v1/quote. Body completo com contact (telefone Mobile obrigatório); eventName só letras e espaço. Content-Type: application/json."
+    },
+    {
+      "name": "AirSearch (AzulCorp)",
+      "tool": "create_request",
+      "copyFrom": {
+        "collection": "Portal De Grupos - APIs",
+        "folder": "Shopping.Groups",
+        "request": "AirSearch (AzulCorp)"
+      },
+      "consumes": [
+        "urlGroupsShoppingApi",
+        "apiKey",
+        "bearerToken",
+        "quoteToken",
+        "flowOrigin",
+        "flowDestination",
+        "flowPaxCount",
+        "flowQuoteDeparture"
+      ],
+      "produces": [
+        "quoteId"
+      ],
+      "body": "{\n  \"passengers\": { \"type\": \"ADT\", \"count\": {{flowPaxCount}} },\n  \"journey\": {\n    \"origin\": \"{{flowOrigin}}\",\n    \"destination\": \"{{flowDestination}}\",\n    \"departure\": \"{{flowQuoteDeparture}}\"\n  }\n}",
+      "bodyType": "raw",
+      "preRequestScript": "pm.environment.set(\"quoteId\", \"\");",
+      "postResponseScript": "// 1ª tarifa do 1º voo da oferta (mesma rota/data/pax da cotação).\nvar data = pm.response.json().data;\npm.environment.set(\"quoteId\", data.offer.journeysAvailableByMarket[0].journeys[0].fares[0].quoteId);",
+      "status": "confirmado",
+      "notes": "POST {{urlGroupsShoppingApi}}/api/v1/airSearch. Exige header JwtQuoteToken: {{quoteToken}} (confira que veio da origem; se não, inclua). Rota, data e pax iguais aos da cotação."
+    },
+    {
+      "name": "Post Order",
+      "tool": "create_request",
+      "copyFrom": {
+        "collection": "Portal De Grupos - APIs",
+        "folder": "Order.Groups",
+        "request": "Post Order"
+      },
+      "consumes": [
+        "urlOrderGroups",
+        "apiKey",
+        "bearerToken",
+        "quoteToken",
+        "quoteId",
+        "quoteNumber"
+      ],
+      "produces": [
+        "checkoutToken"
+      ],
+      "body": "{\n  \"quotes\": [{ \"quoteId\": \"{{quoteId}}\", \"includeBaggage\": false }],\n  \"Number\": {{quoteNumber}}\n}",
+      "bodyType": "raw",
+      "preRequestScript": "pm.environment.set(\"checkoutToken\", \"\");",
+      "postResponseScript": "var data = pm.response.json().data;\npm.environment.set(\"checkoutToken\", data.token);",
+      "status": "confirmado",
+      "notes": "POST /api/v1/order na URL base da resposta \"orderUrl\" (troque {{urlOrderGroupsApi}} por {{urlOrderGroups}} se o usuário confirmou — o \"replace\" do passo faz isso no create_flow_from_recipe). Header JwtQuoteToken: {{quoteToken}}. Devolve só data.token; o recordLocator vem no Checkout.",
+      "replace": [
+        {
+          "when": "orderUrl == sim",
+          "from": "{{urlOrderGroupsApi}}",
+          "to": "{{urlOrderGroups}}"
+        }
+      ]
+    },
+    {
+      "name": "Checkout",
+      "tool": "create_request",
+      "copyFrom": {
+        "collection": "Portal De Grupos - APIs",
+        "folder": "Order.Groups",
+        "request": "Checkout"
+      },
+      "consumes": [
+        "urlOrderGroups",
+        "apiKey",
+        "bearerToken",
+        "checkoutToken"
+      ],
+      "produces": [
+        "recordLocator"
+      ],
+      "body": "{\n  \"notifyContacts\": \"all\",\n  \"comments\": [\"teste qa\"]\n}",
+      "bodyType": "raw",
+      "postResponseScript": "var data = pm.response.json().data;\npm.environment.set(\"recordLocator\", data.recordLocator);",
+      "status": "confirmado",
+      "notes": "POST /api/v1/groups/order/checkout (pedido NOVO, sem recordLocator na URL — não confundir com Order Checkout nem Groups Order Checkout). Header jwtOrderCheckout: {{checkoutToken}}. Montado no Flow 07; a resposta do Checkout ainda não foi verificada numa execução.",
+      "replace": [
+        {
+          "when": "orderUrl == sim",
+          "from": "{{urlOrderGroupsApi}}",
+          "to": "{{urlOrderGroups}}"
+        }
+      ]
+    }
+  ]
+}

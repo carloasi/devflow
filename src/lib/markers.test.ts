@@ -19,11 +19,14 @@ import {
   purgeOrphans,
   nodeMatchesMarkers,
   catalogForPush,
+  markerBaseAfterPush,
   markerBaseHashes,
   filterTreeByMarkers,
   markerNote,
   setMarkerNote,
   mergeCatalogs,
+  markerChangesFromRemote,
+  markerBaseHashes as baseOfCatalog,
   remapMarkers,
 } from './markers';
 
@@ -447,5 +450,84 @@ describe('catálogo com a base da última sincronização', () => {
     expect(ids(mergeCatalogs(synced, remote, base).catalog)).toEqual(['a', 'b', 'c']);
     const local = [...synced, { id: 'd', name: 'Urgente', color: '#eb5757' }];
     expect(ids(catalogForPush(local, synced, base))).toEqual(['a', 'b', 'd']);
+  });
+});
+
+describe('base do catálogo depois do push', () => {
+  const ids = (list: Marker[]) => list.map(m => m.id).sort();
+  const a: Marker = { id: 'a', name: 'flaky', color: '#eb5757' };
+
+  it('marcador novo do colega: o pull seguinte o traz, e o push seguinte não o apaga', () => {
+    const x: Marker = { id: 'x', name: 'do colega', color: '#2f80ed' };
+    const previous = markerBaseHashes([a]);
+    const sent = catalogForPush([a], [a, x], previous);
+    expect(ids(sent)).toEqual(['a', 'x']);
+    const base = markerBaseAfterPush([a], sent, previous);
+    const pulled = mergeCatalogs([a], sent, base).catalog;
+    expect(ids(pulled)).toEqual(['a', 'x']);
+    expect(ids(catalogForPush([a], sent, base))).toEqual(['a', 'x']);
+  });
+
+  it('o colega renomeou e eu enviei antes de puxar: o pull traz o nome dele', () => {
+    const previous = markerBaseHashes([a]);
+    const sent = catalogForPush([a], [{ ...a, name: 'renomeado' }], previous);
+    const base = markerBaseAfterPush([a], sent, previous);
+    expect(mergeCatalogs([a], sent, base).catalog[0].name).toBe('renomeado');
+  });
+
+  it('apagado no GitHub e intocado aqui continua saindo no pull', () => {
+    const b: Marker = { id: 'b', name: 'pronto', color: '#27ae60' };
+    const previous = markerBaseHashes([a, b]);
+    const sent = catalogForPush([a, b], [a], previous);
+    expect(ids(sent)).toEqual(['a']);
+    const base = markerBaseAfterPush([a, b], sent, previous);
+    expect(ids(mergeCatalogs([a, b], sent, base).catalog)).toEqual(['a']);
+  });
+
+  it('o colega apagou TODOS: o push não os devolve', () => {
+    expect(catalogForPush([a], [], markerBaseHashes([a]))).toEqual([]);
+  });
+
+  it('catálogo sincronizado vazio ainda conta como base', () => {
+    // Sincronizado sem nenhum marcador; o colega apagou "a" depois que eu
+    // o vi? Não: aqui "a" é novo meu — continua indo.
+    expect(ids(catalogForPush([a], [], markerBaseHashes([])))).toEqual(['a']);
+    // E um marcador do GitHub que a base vazia não conhece entra no pull.
+    expect(ids(mergeCatalogs([], [a], markerBaseHashes([])).catalog)).toEqual(['a']);
+  });
+});
+
+
+describe('markerChangesFromRemote', () => {
+  const red = MARKER_COLORS[0];
+  const blue = MARKER_COLORS[1];
+  const m = (id: string, name: string, color: string = red): Marker => ({ id, name, color });
+
+  it('lista o que um colega criou, recoloriu ou apagou', () => {
+    const synced = [m('1', 'flaky'), m('2', 'slow'), m('3', 'old')];
+    const base = baseOfCatalog(synced);
+    const local = synced;
+    const remote = [m('1', 'flaky'), m('2', 'slow', blue), m('4', 'new one')];
+    expect(markerChangesFromRemote(local, remote, base)).toEqual({
+      added: ['new one'],
+      changed: ['slow'],
+      removed: ['old'],
+    });
+  });
+
+  it('nada a receber quando os dois lados batem, ou quando não há catálogo lá', () => {
+    const synced = [m('1', 'flaky')];
+    expect(markerChangesFromRemote(synced, synced, baseOfCatalog(synced))).toEqual({ added: [], changed: [], removed: [] });
+    expect(markerChangesFromRemote(synced, null, baseOfCatalog(synced))).toEqual({ added: [], changed: [], removed: [] });
+  });
+
+  it('o que você mudou aqui não conta como recebido', () => {
+    const synced = [m('1', 'flaky')];
+    const local = [m('1', 'flaky', blue)];
+    expect(markerChangesFromRemote(local, synced, baseOfCatalog(synced))).toEqual({ added: [], changed: [], removed: [] });
+  });
+
+  it('marcador de mesmo nome criado nos dois lados vira o do time', () => {
+    expect(markerChangesFromRemote([m('a', 'flaky')], [m('b', 'Flaky')], undefined).changed).toEqual(['Flaky']);
   });
 });

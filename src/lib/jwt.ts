@@ -45,3 +45,18 @@ export function withoutSessionTokens<T>(environments: T[]): T[] {
     return changed ? ({ ...env, values: next } as T) : env;
   });
 }
+
+/**
+ * Dois estados de um environment são iguais pro GitHub? Compara tudo menos o
+ * valor dos tokens de sessão (que não sobem) e o `isDirty` (que é controle).
+ * É o que decide se uma edição acende o "não sincronizado": colar um token
+ * novo no editor acendia, e nada o apagava — não havia o que enviar.
+ */
+export function sameForSync<T extends { values?: unknown; isDirty?: boolean }>(a: T, b: T): boolean {
+  const strip = (env: T) => {
+    const copy: Partial<T> = { ...withoutSessionTokens([env])[0] };
+    delete copy.isDirty;
+    return JSON.stringify(copy);
+  };
+  return strip(a) === strip(b);
+}

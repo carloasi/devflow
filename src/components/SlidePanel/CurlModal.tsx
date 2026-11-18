@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { Check, Copy, Download, Hash, Loader2 } from 'lucide-react';
+import { Check, Copy, Download, Hash } from 'lucide-react';
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { SlidePanel } from './SlidePanel';
 import { generateSnippet, SNIPPET_LANGUAGES, type SnippetLanguage, type SnippetRequest } from '@/lib/codeSnippets';
 
@@ -244,7 +245,7 @@ export function CurlModal({
             className="flex h-7 w-7 cursor-pointer items-center justify-center rounded text-pm-text-muted transition-colors hover:bg-pm-hover hover:text-pm-text disabled:cursor-wait"
             title="Download snippet as a file"
           >
-            {saving ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            {saving ? <DevFlowSpinner size={14} /> : <Download size={14} />}
           </button>
 
           <button

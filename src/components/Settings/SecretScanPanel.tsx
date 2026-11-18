@@ -1,7 +1,8 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { KeyRound, Loader2, ShieldAlert, Trash2, Variable } from 'lucide-react';
+import { KeyRound, ShieldAlert, Trash2, Variable } from 'lucide-react';
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import {
   applySecretActions,
@@ -113,7 +114,7 @@ export function SecretScanPanel({ collections, onApply, onJumpToItem }: Props) {
           disabled={busy}
           className="shrink-0 h-7 px-3 rounded-md text-xs font-medium border border-pm-border text-pm-text-secondary hover:text-pm-text hover:bg-pm-hover transition-colors cursor-pointer disabled:opacity-50"
         >
-          {scanning ? <Loader2 size={13} className="animate-spin" /> : findings ? 'Scan again' : 'Scan workspace'}
+          {scanning ? <DevFlowSpinner size={14} /> : findings ? 'Scan again' : 'Scan workspace'}
         </button>
       </div>
 

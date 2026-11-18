@@ -142,6 +142,79 @@ export function buildPushPlan(input: {
   return { files, collisions, stalePaths };
 }
 
+/**
+ * Arquivos que sobraram lá mas são RENOMEAÇÕES: tudo o que eles guardam
+ * (pelos ids) está sendo gravado neste push com outro nome. Apagá-los não
+ * perde nada — e mantê-los deixava dois arquivos com o mesmo id no GitHub,
+ * e o pull seguinte podia trazer a versão velha por cima da nova.
+ * `idsOf` = ids das collections/environments de cada arquivo (vazio ou
+ * ausente = não se sabe: fica de fora, e a pessoa decide como antes).
+ */
+export function renamedStalePaths(
+  stalePaths: string[],
+  idsOf: (path: string) => string[] | undefined,
+  writtenIds: ReadonlySet<string>
+): string[] {
+  return stalePaths.filter((path) => {
+    const ids = idsOf(path);
+    return !!ids && ids.length > 0 && ids.every((id) => writtenIds.has(id));
+  });
+}
+
+/** Id de uma collection ou environment como está no arquivo. */
+export function rootIdOf(item: unknown): string | undefined {
+  const c = item as { id?: unknown; info?: { _postman_id?: unknown } } | null;
+  const id = c?.id ?? c?.info?._postman_id;
+  return typeof id === 'string' ? id : undefined;
+}
+
+/**
+ * Grupos de arquivos que guardam o mesmo id (uma renomeação que manteve o
+ * arquivo antigo). Cada grupo tem 2+ caminhos, em ordem.
+ */
+export function duplicateIdGroups(idsByPath: Record<string, string[]>, paths: string[]): string[][] {
+  // Union-find nos caminhos: dois arquivos com algum id em comum se juntam.
+  const parent = new Map(paths.map((p) => [p, p]));
+  const find = (p: string): string => {
+    let root = p;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    return root;
+  };
+  const firstPathOf = new Map<string, string>();
+  for (const path of paths) {
+    for (const id of idsByPath[path] ?? []) {
+      const other = firstPathOf.get(id);
+      if (other === undefined) firstPathOf.set(id, path);
+      else parent.set(find(path), find(other));
+    }
+  }
+  const groups = new Map<string, string[]>();
+  for (const path of paths) {
+    const root = find(path);
+    groups.set(root, [...(groups.get(root) ?? []), path]);
+  }
+  return [...groups.values()].filter((g) => g.length > 1).map((g) => [...g].sort());
+}
+
+/**
+ * De um grupo de arquivos com o mesmo id, o que vale: o do commit mais
+ * recente. `null` quando falta a data de algum (não dá pra decidir sem
+ * adivinhar — quem chama não aplica nada).
+ */
+export function newestOf(group: string[], dateOf: (path: string) => string | undefined): string | null {
+  let best: string | null = null;
+  let bestTime = -Infinity;
+  for (const path of group) {
+    const time = Date.parse(dateOf(path) ?? '');
+    if (Number.isNaN(time)) return null;
+    if (time > bestTime) {
+      best = path;
+      bestTime = time;
+    }
+  }
+  return best;
+}
+
 /** Mensagem de commit do push de um workspace — em inglês, como o resto. */
 export function pushCommitMessage(workspaceName: string, plan: PushPlan, removed: number): string {
   const count = (kind: PlannedKind) => plan.files.filter((f) => f.kind === kind).length;

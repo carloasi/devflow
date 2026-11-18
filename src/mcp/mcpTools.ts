@@ -26,6 +26,12 @@ import {
 } from '@/components/CollectionRunner/runCollectionRequest';
 import { findNodeById } from '@/components/collection-tree/utils/tree.utils';
 import { cloneRequestNode, copyName } from './duplicateRequest';
+import { validateFlow } from './flowValidation';
+import { applyRequestPatch, moveItem } from './treeEdit';
+import { AUTH_BLOCKS, getFlowRecipe, getRawRecipe, listFlowRecipes, RECIPE_RULES } from './flowRecipes';
+import { numberedFlowName, planRecipe } from './flowRecipes/applyRecipe';
+import { buildFlowStep, type BuiltStep } from './flowSources';
+import { caseIdOf } from './suiteCase';
 import { loadLastRun, loadAllLastRuns } from '@/components/CollectionRunner/runHistory';
 import { buildEnvMap } from '@/lib/envMap';
 import { describeToken, isTokenStep, readOAuth2Config, requestOAuth2AccessToken } from '@/lib/oauth2Token';
@@ -72,6 +78,12 @@ export interface McpContext {
   // Grava uma variável num environment (token OAuth do get_oauth2_token).
   // Só local, e sem marcar o environment pra push: token não vai pro GitHub.
   setEnvironmentVariable: (environmentName: string, key: string, value: string) => Promise<void>;
+  // update_request / move_item / delete_item. Só local, como o resto: o push
+  // continua manual. As mudanças passam por updater (setCollections(prev => …)),
+  // nunca por um snapshot da árvore — duas chamadas seguidas não se atropelam.
+  updateCollectionItem: (id: string, item: CollectionItem) => Promise<void>;
+  moveCollectionItem: (id: string, targetFolderId: string | null, position?: number) => Promise<void>;
+  removeCollectionItem: (id: string) => Promise<void>;
   // Leva pro environment o que os scripts de uma execução gravaram — o mesmo
   // que o botão Send e o Collection Runner fazem. `before` é o mapa com que a
   // execução começou; só as keys que mudaram em relação a ele são escritas.
@@ -87,6 +99,18 @@ export interface McpToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * Dicas do protocolo MCP: só leitura, destrutiva, idempotente, fala com
+   * sistemas de fora. Um cliente pode, por exemplo, liberar sem perguntar só as
+   * de leitura pra uma IA menos confiável.
+   */
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 
@@ -197,7 +221,7 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: 'get_oauth2_token',
     description:
-      'Get a fresh OAuth 2.0 / MSAL (Azure AD) access token for a request whose Authorization is OAuth 2.0 — e.g. the first step of a group-booking flow — and store it in the environment variable that request\'s Access Token field points to ({{variable}}). These token steps normally have NO URL and NO body: they exist only to hold the OAuth 2.0 settings, so an empty URL there is correct and must not be "fixed" or deleted. This is how the token is obtained — never by sending the request with run_request. Reuses the current token when it is still valid for minValiditySeconds; otherwise runs the same sign-in as "Get New Access Token" (a Microsoft login window may open in DevFlow: tell the user to finish it if it does not sign in by itself). The token itself is NEVER returned — only expiry, user, audience and scopes. After this, requests and flows use {{variable}} as usual.',
+      'Get an OAuth 2.0 / MSAL access token for a token step (a request with OAuth 2.0 auth and NO URL — the empty URL is correct, never "fix" it) and store it in the variable its Access Token field names. Never send a token step with run_request. Reuses a token still valid for minValiditySeconds; otherwise signs in like "Get New Access Token" (a Microsoft login may open in DevFlow: ask the user to finish it). The token is NEVER returned — only expiry, user, audience and scopes. run_collection/run_request/run_load_test already do this for token steps; call it only to check validity or force a new one.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -242,7 +266,7 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: 'run_request',
     description:
-      'Execute one saved request through DevFlow, using the app\'s own engine (variable resolution, auth, and pre/post-response scripts all run exactly as they do when the user clicks Send). It runs the SAVED version of the request, not unsaved edits in an open tab. Variables the scripts set are saved to the environment, like Send does, so running step 1 and then step 2 of a flow works (savedToEnvironment lists them). Returns the HTTP status, timing, the response body, the pm.test results, console.log output and any variables the scripts set. Secret values (tokens, keys, passwords — by variable name, or anything shaped like a JWT) are never returned: wherever one appears, in the body, the logs or the URL, it shows as its "{{variable}}" name, and a secret variable that a script set comes back as hidden. That is on purpose — do not ask the user to paste it.',
+      'Run one SAVED request with the app\'s engine, exactly like Send (variables, auth, scripts). Variables the scripts set are saved to the environment (savedToEnvironment), so step 1 then step 2 of a flow works. Returns status, timing, response body, pm.test results, console.log and variables set. Secrets (by variable name, or JWT-shaped) never come back: they show as "{{variable}}" — on purpose; do not ask the user for them.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -262,7 +286,7 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: 'run_collection',
     description:
-      'Run every request inside a folder (subfolders included), in order, carrying environment variables from one step to the next (so a login step can feed the next request). Returns the per-step result (tests, logs, variables set) and a summary. Each step gets a verdict: when the request has pm.test assertions, THE TESTS decide — a 400 that a test expects is a pass (negative test cases). Without tests, a 4xx/5xx counts as a failure. Read summary.tests and summary.failedSteps, not the HTTP statuses, to judge a test suite. Secret values are hidden the same way as in run_request (shown as "{{variable}}").',
+      'Run every request inside a folder (subfolders included), in order, carrying environment variables from one step to the next (so a login step can feed the next request). Returns the per-step result (tests, logs, variables set) and a summary. Each step gets a verdict: when the request has pm.test assertions, THE TESTS decide — a 400 that a test expects is a pass (negative test cases). Without tests, a 4xx/5xx counts as a failure. Read summary.tests and summary.failedSteps, not the HTTP statuses, to judge a test suite. For a whole test suite run the suite folder ONCE with detail: "failures" — full detail only for failed steps, one line for the rest, a per-subfolder summary ("groups") and a ready case matrix ("matrix"). Secret values are hidden the same way as in run_request (shown as "{{variable}}").',
     inputSchema: {
       type: 'object',
       properties: {
@@ -275,6 +299,11 @@ export const MCP_TOOLS: McpToolDefinition[] = [
         stopOnFailure: {
           type: 'boolean',
           description: 'Stop at the first step whose verdict is "failed" (request/script error, a failing test, or 4xx/5xx in a step without tests). Defaults to false.',
+        },
+        detail: {
+          type: 'string',
+          enum: ['full', 'failures'],
+          description: '"full" (default): every step with tests, logs and body. "failures": full detail only for failed steps, plus "groups" and "matrix" — use it for test suites and long flows.',
         },
       },
       required: ['folderId'],
@@ -474,6 +503,257 @@ export const MCP_TOOLS: McpToolDefinition[] = [
     },
   },
 ];
+
+// Os campos de um passo do create_flow (e do update_request) são os do
+// create_request, menos a pasta. Mesmas chaves e tipos, tirados da própria
+// definição pra nunca divergirem — mas SEM as descrições longas, que já estão
+// no create_request: repetidas em três ferramentas eram ~7 KB a mais em todo
+// tools/list, e modelo pequeno paga isso em todo passo.
+const KEY_VALUE_LIST = {
+  type: 'array',
+  items: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' } }, required: ['key', 'value'] },
+};
+const REQUEST_STEP_PROPERTIES = (() => {
+  const full = (MCP_TOOLS.find(t => t.name === 'create_request')!.inputSchema.properties ?? {}) as Record<string, any>;
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(full)) {
+    if (key === 'folderId') continue;
+    if (key === 'auth') {
+      compact.auth = {
+        type: 'object',
+        description: 'As in create_request, e.g. {"type": "bearer", "token": "{{bearerToken}}"}.',
+        properties: {
+          type: { type: 'string', enum: ['none', 'bearer', 'basic', 'apikey', 'oauth2'] },
+          token: { type: 'string' }, username: { type: 'string' }, password: { type: 'string' },
+          key: { type: 'string' }, value: { type: 'string' }, oauth2: KEY_VALUE_LIST,
+        },
+      };
+      continue;
+    }
+    if (key === 'headers') {
+      compact.headers = { ...KEY_VALUE_LIST, description: 'The WHOLE header list.' };
+      continue;
+    }
+    const { description: _description, ...rest } = value;
+    compact[key] = rest;
+  }
+  return compact;
+})();
+
+MCP_TOOLS.push(
+  {
+    name: 'validate_flow',
+    description:
+      'Check a flow (a folder) WITHOUT running it: per step, the {{variables}} it uses and sets, and problems — missing-variable, produced-later, empty URL (outside a token step), script syntax, literal secret, JSON body without Content-Type. Only variable NAMES are read. create_flow already returns this as "check"; call it after editing a flow and fix every error before delivering. Example: {"folderId": "Method Flows Barramento B2B - Claude / Flow 08 - Reserva partida < 24h", "environment": "5by5"}',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        folderId: { type: 'string', description: 'Folder id or full path (as in list_folders).' },
+        environment: {
+          type: 'string',
+          description: 'Environment whose variable NAMES count as available. Defaults to the one selected in the app.',
+        },
+      },
+      required: ['folderId'],
+    },
+  },
+  {
+    name: 'create_flow',
+    description:
+      'Create a flow or a test suite in ONE call: a new folder with all its steps, in run order, plus the validate_flow check ("check"). Nothing is created if any step is invalid. With a recipe, prefer create_flow_from_recipe. A step is: (a) {"copyFrom": <id, path or recipe object>} — the app copies method, url, headers, auth and body (secrets included) without the source scripts; do NOT get_request just to retype it; fields you add replace the copied ones; (b) {"duplicateFrom": <id or path>} — faithful copy with scripts (OAuth 2.0 token step); (c) a new request (create_request fields). "scriptsFrom" copies a reference step\'s scripts. TEST CASE: copy the base request and send only what changes — "bodyPatch" {"path": value}, "bodyRemove" ["path"] — and "expect" {"status", "codes", "fields"}: the app generates the pm.test asserts. Steps are numbered "01 - "… unless the name starts with a number. Saves locally only. Example: {"name": "Flow 08 - Reserva", "parentFolderId": "Method Flows Barramento B2B - Claude", "environment": "5by5", "steps": [{"duplicateFrom": "Portal De Grupos - APIs / Gerar token MSAL"}, {"copyFrom": {"folder": "Order / v2", "request": "Order v2"}, "scriptsFrom": {"folder": "Method Flows Barramento B2B - Claude / Flow 01 - Fluxo Cancelamento com Reembolso", "step": "Order v1"}, "preRequestScript": "pm.environment.set(\\"recordLocator\\", \\"\\");"}, {"name": "Token Groups v1", "method": "POST", "url": "{{urlAuthorization}}/api/v1/token/groups", "headers": [{"key": "Ocp-Apim-Subscription-Key", "value": "{{apiKey}}"}], "auth": {"type": "bearer", "token": "{{msal}}"}, "postResponseScript": "pm.environment.set(\\"bearerToken\\", pm.response.json().data.token);"}]}',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Folder name, e.g. "Flow 08 - Reserva partida < 24h".' },
+        parentFolderId: {
+          type: 'string',
+          description: 'Parent folder id or full path (as in list_folders). Omit to create a top-level collection.',
+        },
+        environment: {
+          type: 'string',
+          description: 'Environment used by the check (variable names only). Defaults to the one selected in the app.',
+        },
+        numberSteps: { type: 'boolean', description: 'Prefix "01 - ", "02 - "… to step names. Default true.' },
+        steps: {
+          type: 'array',
+          description: 'The steps, in run order (1 to 60).',
+          items: {
+            type: 'object',
+            properties: {
+              copyFrom: {
+                description:
+                  'Copy this source request (id, path "Collection / Folder / Request", or {"collection", "folder", "request", "version", "search"} as in a recipe) without its scripts. Fields you send replace the copied ones.',
+              },
+              duplicateFrom: {
+                description: 'Faithful copy of this request (id or path), scripts and examples included. Fields you send replace the copied ones.',
+              },
+              scriptsFrom: {
+                description:
+                  'Copy the scripts of a reference flow step: {"folder": "<flow folder path>", "step": "<step name, without the number>"} or a request id. Scripts you send win.',
+              },
+              bodyPatch: {
+                type: 'object',
+                description: 'Test case: fields to set in the copied JSON body, by path — {"eventName": "Comemora-ção", "contact.phones[0].number": null}. Values are literal JSON (null = null).',
+              },
+              bodyRemove: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Test case: paths to delete from the body ("field absent"), e.g. ["contact.email"].',
+              },
+              expect: {
+                type: 'object',
+                description:
+                  'Test case: the asserts to generate — {"status": 400, "codes": ["EventName.Invalid"], "notificationsPath": "notifications", "fields": {"data.status": "Confirmed"}}. Test names start with the case id (the name prefix, e.g. "C-11"; or "caseId").',
+              },
+              caseId: { type: 'string', description: 'Case id for the test names. Default: the name prefix ("C-11 - Hífen" → "C-11").' },
+              ...REQUEST_STEP_PROPERTIES,
+            },
+          },
+        },
+      },
+      required: ['name', 'steps'],
+    },
+  }
+);
+
+MCP_TOOLS.push(
+  {
+    name: 'list_flow_recipes',
+    description:
+      'List the ready-made flow recipes this DevFlow ships: id, title, context (b2b, grupos), status (confirmed, or partial = some steps still need their details confirmed) and the words in a request that point to each. Start here when asked to create a flow; then call get_flow_recipe. Example: {}',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_flow_recipe',
+    description:
+      'One flow recipe, complete: the questions to ask the user ("ask"), the authentication block already as create_flow steps ("include"), the steps in order (where to copy each request from, what it consumes and produces, the exact scripts) and the rules to apply it ("rules"). Follow the rules, then create everything with one create_flow call. Example: {"id": "b2b-reserva-partida-24h"}',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Recipe id from list_flow_recipes.' } },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'create_flow_from_recipe',
+    description:
+      'The fastest way to build a flow from a recipe: send the recipe id and the user\'s answers to its "ask" questions; the app picks the auth block, drops the steps whose "when" does not match, fills route/pax/etc. in the scripts, copies every source request ("copyFrom") and the reference scripts ("scriptsFrom"), names the folder "Flow NN - …" with the next free number, creates everything and validates it. Nothing is created if a step cannot be resolved, an answer is missing, or a step has an unconfirmed CONFIRMAR block — the error says what to send. dryRun: true returns the plan (each step with its source) without creating. The result has a ready delivery table. Saves locally only, does not run. Example: {"id": "b2b-reserva-paga", "answers": {"route": "VCP → SDU", "pax": "1"}}',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Recipe id from list_flow_recipes.' },
+        answers: {
+          type: 'object',
+          description: 'Answer to each "ask" question, by its id — the option text or the user\'s words, e.g. {"payment": "hold", "route": "VCP → SDU", "pax": "1"}.',
+        },
+        overrides: {
+          type: 'object',
+          description:
+            'Per recipe step (by its name in the recipe, or its 1-based position): fields that replace the recipe ones — copyFrom (id/path, when the source is ambiguous), body, url, headers, preRequestScript, postResponseScript, scriptsFrom (null = none) or {"skip": true}.',
+        },
+        confirmed: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Recipe step names whose CONFIRMAR block (JSON paths) you have checked (get_example, get_last_run or the reference flow) and that are right as written.',
+        },
+        name: { type: 'string', description: 'Folder name. Default: the recipe folderName with the next free "Flow NN".' },
+        parentFolderId: { type: 'string', description: 'Where to create it. Default: the recipe parentFolder.' },
+        environment: { type: 'string', description: 'Environment for the check (names only). Default: the recipe one.' },
+        dryRun: { type: 'boolean', description: 'Only show the plan; create nothing.' },
+      },
+      required: ['id', 'answers'],
+    },
+  },
+  {
+    name: 'update_request',
+    description:
+      'Change fields of an existing request: method, url, pathParams, headers, body, bodyType, auth, preRequestScript, postResponseScript. Only the fields you send change; headers, pathParams and auth.oauth2, when sent, are the WHOLE list. A value equal to "[redacted — set in DevFlow]" (what get_request shows for a secret) KEEPS the real secret — so you can send back what you read. Changing auth.type starts that auth from scratch. Saves locally only — push to GitHub stays a manual action. Only edit requests you created in this task unless the user asks. Example: {"requestId": "<id>", "url": "{{urlOrderGroups}}/api/v1/order", "headers": [{"key": "Ocp-Apim-Subscription-Key", "value": "[redacted — set in DevFlow]"}, {"key": "Content-Type", "value": "application/json"}]}',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string', description: 'Request id (from list_requests or create_flow).' },
+        ...REQUEST_STEP_PROPERTIES,
+      },
+      required: ['requestId'],
+    },
+  },
+  {
+    name: 'move_item',
+    description:
+      'Move a request or folder into a folder, at a position — inside the same folder this reorders it, which is how you insert a step in the middle of a flow. position 1 = first; omit to put it last. Only folders can go to the top level (targetFolderId omitted). Saved Examples move with their request. Saves locally only. Example: {"itemId": "<id of the new step>", "targetFolderId": "<flow folder id>", "position": 3}',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        itemId: { type: 'string', description: 'Request or folder id.' },
+        targetFolderId: {
+          type: 'string',
+          description: 'Destination folder id or full path (as in list_folders). Omit to move a folder to the top level.',
+        },
+        position: { type: 'number', description: '1 = first. Omit to put it last.' },
+      },
+      required: ['itemId'],
+    },
+  },
+  {
+    name: 'delete_item',
+    description:
+      'Delete a request or folder (with everything inside it) from the local tree. To avoid deleting the wrong thing, confirmName must be EXACTLY the item name. It disappears from GitHub only on the next push of the workspace (manual). Only delete what you created in this task, or what the user explicitly asked to delete. Example: {"itemId": "<id>", "confirmName": "04 - POST Quote"}',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        itemId: { type: 'string', description: 'Request or folder id.' },
+        confirmName: { type: 'string', description: 'The exact current name of the item.' },
+      },
+      required: ['itemId', 'confirmName'],
+    },
+  }
+);
+
+// Exemplos de chamada nas ferramentas mais usadas: modelos menores acertam
+// muito mais os parâmetros com um exemplo do que só com o schema.
+const TOOL_EXAMPLES: Record<string, string> = {
+  list_requests: '{"folderId": "Method Flows Grupos - Claude / Flow 07 - Cotação até checkout", "search": "Quote"}',
+  list_folders: '{"search": "Method Flows"}',
+  get_request: '{"requestId": "<id from list_requests>"}',
+  search_requests: '{"query": "\\"contact\\"", "folderId": "Portal De Grupos - APIs / Quote.Groups / v1", "fields": ["body"]}',
+  run_request: '{"requestId": "<id>", "environment": "5by5"}',
+  run_collection: '{"folderId": "<flow folder id>", "environment": "5by5", "stopOnFailure": true}',
+  set_request_script: '{"requestId": "<id>", "phase": "postResponse", "code": "var data = pm.response.json().data;\\npm.environment.set(\\"quoteNumber\\", data.number);"}',
+  create_folder: '{"name": "Flow 08 - Reserva", "parentFolderId": "Method Flows Barramento B2B - Claude"}',
+  duplicate_request: '{"requestId": "<id of Gerar token MSAL>", "folderId": "<flow folder id>", "name": "01 - Gerar token MSAL"}',
+  create_request: '{"folderId": "<flow folder id>", "name": "04 - POST Quote", "method": "POST", "url": "{{urlGroupsQuoteApi}}/api/v1/quote", "headers": [{"key": "Ocp-Apim-Subscription-Key", "value": "{{apiKey}}"}, {"key": "Content-Type", "value": "application/json"}], "auth": {"type": "bearer", "token": "{{bearerToken}}"}, "body": "{\\"paxCount\\": 10}", "postResponseScript": "var data = pm.response.json().data;\\npm.environment.set(\\"quoteNumber\\", data.number);"}',
+  rename_item: '{"itemId": "<id>", "name": "05 - GET Quote"}',
+  get_oauth2_token: '{"requestId": "<id of Gerar token MSAL>", "environment": "5by5"}',
+  get_last_run: '{"folderId": "<flow folder id>", "onlyFailures": true}',
+};
+
+// Anotações MCP de cada ferramenta.
+const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const LOCAL_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const TOOL_ANNOTATIONS: Record<string, McpToolDefinition['annotations']> = {
+  list_requests: READ_ONLY, list_folders: READ_ONLY, get_request: READ_ONLY, list_examples: READ_ONLY,
+  get_example: READ_ONLY, search_requests: READ_ONLY, get_active_request: READ_ONLY, get_response: READ_ONLY,
+  list_environments: READ_ONLY, get_script_api: READ_ONLY, list_load_tests: READ_ONLY, get_console_logs: READ_ONLY,
+  get_last_run: READ_ONLY, validate_flow: READ_ONLY, list_flow_recipes: READ_ONLY, get_flow_recipe: READ_ONLY,
+  create_flow_from_recipe: LOCAL_WRITE,
+  // Chamam APIs de verdade, com as credenciais do usuário (e criam dados lá).
+  run_request: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  run_collection: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  run_load_test: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  get_oauth2_token: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  // Mexem só na árvore local.
+  create_folder: LOCAL_WRITE, create_request: LOCAL_WRITE, create_flow: LOCAL_WRITE, duplicate_request: LOCAL_WRITE,
+  move_item: LOCAL_WRITE,
+  rename_item: { ...LOCAL_WRITE, idempotentHint: true },
+  set_request_script: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: true },
+  update_request: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: true },
+  delete_item: { ...LOCAL_WRITE, destructiveHint: true },
+};
+for (const tool of MCP_TOOLS) {
+  tool.annotations = TOOL_ANNOTATIONS[tool.name];
+  const example = TOOL_EXAMPLES[tool.name];
+  // "Example: {" — não basta "Example:" (a descrição do get_example fala em "Saved Example: …").
+  if (example && !/Example: \{/.test(tool.description)) tool.description += ` Example: ${example}`;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -843,6 +1123,49 @@ function redactorFor(envBefore: Record<string, string>, outcomes: RunItemOutcome
     outcomes.flatMap(o => o.variablesSet ?? [])
   );
 }
+
+// Nomes das variáveis do environment — o que o validate_flow conta como
+// disponível. Só nomes: o valor nunca é lido.
+// Mesma regra do buildEnvMap (lib/envMap): só vale variável habilitada de
+// verdade. Com `enabled !== false`, uma entrada sem o campo (import de fora)
+// passava no validate e sumia na execução.
+// Alguns clientes (e modelos menores) mandam um objeto/lista como TEXTO JSON.
+// Sem isto, "answers": "{\"route\": …}" virava "todas as respostas faltando"
+// e "steps": "[…]" virava "steps is required".
+function jsonArg<T>(value: unknown, what: string): T | undefined {
+  if (typeof value !== 'string') return value as T | undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`"${what}" must be a JSON object/array, not text. Send it as JSON (e.g. {"route": "VCP → SDU"}).`);
+  }
+}
+
+function envVariableNames(env: Environment | undefined): string[] | null {
+  return env ? env.values.filter(v => !!v.enabled && !!v.key).map(v => v.key) : null;
+}
+
+// O que dizer sobre o check de um flow. Variável faltando no environment
+// (credencial, URL) é tarefa do USUÁRIO: antes ela entrava em "fix them
+// before delivering", e um agente menor tentava "consertar" com script ou
+// recriando o passo — ou ficava em loop. Só o resto é erro do agente.
+function checkNote(check: { steps: { problems: { level: string; code: string }[] }[]; missingVariables: string[] }): string {
+  const agentErrors = check.steps.reduce(
+    (n, s) => n + s.problems.filter(p => p.level === 'error' && p.code !== 'missing-variable').length,
+    0
+  );
+  return (
+    (agentErrors ? ` The check found ${agentErrors} error(s) in the steps: fix them (set_request_script, update_request, move_item) before delivering.` : '') +
+    (check.missingVariables.length
+      ? ` Variables to create in the app: ${check.missingVariables.join(', ')} — the user creates them; list them in the delivery and do NOT try to fix them.`
+      : '')
+  );
+}
+
+const NO_ENV_CHECK_NOTE =
+  'No environment selected: every variable that no step produces is reported as missing. Pass environment to check against it.';
 
 const ENV_NOT_SAVED_NOTE =
   'No environment is selected in DevFlow, so variables set by scripts were used only inside this call and not saved. Pass environment to keep them.';
@@ -1288,10 +1611,70 @@ export async function executeMcpTool(
       // bodies dos passos seguintes, então o redator precisa conhecer TODOS
       // os segredos do run antes de mascarar qualquer passo.
       const redact = redactorFor(envBefore, outcomes.map(o => o.outcome));
-      const steps = outcomes.map(({ name, outcome }) => summarizeOutcome(name, outcome, redact));
+      const fullSteps = outcomes.map(({ name, outcome }) => summarizeOutcome(name, outcome, redact));
+      const compact = args.detail === 'failures';
+      // Subpasta (grupo da suíte) de cada request, pelo id.
+      const groupOf = new Map<string, string>();
+      {
+        const found: { item: CollectionItem; path: FolderRef[] }[] = [];
+        walkWithPath(folder.item ?? [], [], found);
+        for (const entry of found) groupOf.set(entry.item.id, entry.path[0]?.name ?? '');
+      }
+      const groupNames = outcomes.map((_, index) => groupOf.get(requests[index].id) ?? '');
+      const steps = compact
+        ? fullSteps.map((st, index) =>
+            st.verdict === 'failed'
+              ? { ...st, ...(groupNames[index] ? { group: groupNames[index] } : {}) }
+              : {
+                  request: st.request,
+                  ...(groupNames[index] ? { group: groupNames[index] } : {}),
+                  verdict: st.verdict,
+                  httpStatus: st.httpStatus,
+                  tests: `${(st.tests ?? []).filter(x => x.passed).length}/${(st.tests ?? []).length}`,
+                }
+          )
+        : fullSteps;
 
-      const allTests = steps.flatMap(st => st.tests ?? []);
-      const failedSteps = steps.filter(st => st.verdict === 'failed');
+      const allTests = fullSteps.flatMap(st => st.tests ?? []);
+      const failedSteps = fullSteps.filter(st => st.verdict === 'failed');
+      const distinctGroups = [...new Set(groupNames)];
+      const groups =
+        distinctGroups.length > 1 || (distinctGroups.length === 1 && distinctGroups[0] !== '')
+          ? distinctGroups.map(group => {
+              const inGroup = fullSteps.filter((_, index) => groupNames[index] === group);
+              const failedInGroup = inGroup.filter(st => st.verdict === 'failed').length;
+              return { group: group || '(folder root)', steps: inGroup.length, passed: inGroup.length - failedInGroup, failed: failedInGroup };
+            })
+          : undefined;
+      // Matriz por caso: o id vem do nome ("C-11 - Hífen"); o esperado, dos nomes dos testes.
+      const matrix = compact
+        ? fullSteps
+            .map((st, index) => ({ st, group: groupNames[index] }))
+            .filter(({ st }) => (st.tests ?? []).length > 0)
+            .map(({ st, group }) => ({
+              case: caseIdOf(st.request),
+              request: st.request,
+              ...(group ? { group } : {}),
+              expected: (st.tests ?? []).map(x => x.name.replace(/^[^:]+:\s*/, '')).join('; '),
+              httpStatus: st.httpStatus,
+              result: st.verdict === 'passed' ? 'passou' : 'falhou',
+              ...((st.tests ?? []).some(x => !x.passed)
+                ? { failedTests: (st.tests ?? []).filter(x => !x.passed).map(x => `${x.name}: ${x.message ?? ''}`.trim()) }
+                : {}),
+            }))
+            // Parou antes (stopOnFailure): o resto entra como não executado —
+            // sumir da matriz fazia o relatório parecer completo.
+            .concat(
+              requests.slice(outcomes.length).map(item => ({
+                case: caseIdOf(item.name),
+                request: item.name,
+                ...(groupOf.get(item.id) ? { group: groupOf.get(item.id) } : {}),
+                expected: '',
+                httpStatus: undefined,
+                result: 'não executado',
+              }))
+            )
+        : undefined;
       return {
         folder: folder.name,
         environment: env?.name ?? null,
@@ -1313,6 +1696,8 @@ export async function executeMcpTool(
         httpErrorResponses: steps.filter(st => (st.httpStatus ?? 0) >= 400).length,
         stepsWithoutTests: steps.filter(st => (st.tests ?? []).length === 0).length,
         failedSteps: failedSteps.map(st => ({ request: st.request, reason: st.failureReason })),
+        ...(groups ? { groups } : {}),
+        ...(matrix ? { matrix } : {}),
         steps,
       };
     }
@@ -1477,6 +1862,11 @@ export async function executeMcpTool(
       }
       const item = findNodeById(ctx.collections, String(args.requestId));
       if (!item) throw new Error(`Request "${args.requestId}" not found.`);
+      // Sem isto, um id de pasta gravava `request.scripts` dentro da pasta —
+      // um campo estranho que ia junto pro GitHub.
+      if (item.type !== 'request') {
+        throw new Error(`"${item.name}" is a ${item.type}, not a request: scripts go on requests. Nothing was changed.`);
+      }
 
       // Sem "code" (ex.: o agente mandou "script"), antes isto gravava um
       // script VAZIO e respondia ok — apagando o que havia. Agora recusa; pra
@@ -1618,12 +2008,294 @@ export async function executeMcpTool(
         method: node.method,
         folder: folder.name,
         // Posição no fluxo: é a ordem em que run_collection vai executar.
-        position: flattenRequests(folder.item ?? []).length + 1,
+        // Entra no fim da pasta: depois dos itens DIRETOS dela (subpastas
+        // contam como um item; as requests dentro delas, não).
+        position: (folder.item ?? []).length + 1,
         note: 'Saved locally. Push to GitHub is still a manual action in the app.',
+      };
+    }
+
+    case 'list_flow_recipes':
+      return { recipes: listFlowRecipes(), rules: RECIPE_RULES };
+
+    case 'get_flow_recipe':
+      return getFlowRecipe(String(args?.id ?? ''));
+
+    case 'update_request': {
+      const item = findNodeById(ctx.collections, String(args?.requestId ?? ''));
+      if (!item) throw new Error(`Request "${args?.requestId}" not found.`);
+      const patch = { ...(args ?? {}) };
+      delete patch.requestId;
+      const { item: updated, changed } = applyRequestPatch(item, patch);
+      await ctx.updateCollectionItem(item.id, updated);
+      return {
+        ok: true,
+        requestId: item.id,
+        name: item.name,
+        changed,
+        // O que ficou, como o get_request mostraria (segredos mascarados).
+        request: redactRequestDetails(updated.request),
+        note: 'Saved locally. Push to GitHub is still a manual action in the app. Run validate_flow on the flow folder to re-check the chain.',
+      };
+    }
+
+    case 'move_item': {
+      const item = findNodeById(ctx.collections, String(args?.itemId ?? ''));
+      if (!item) throw new Error(`Item "${args?.itemId}" not found.`);
+      const target = args?.targetFolderId ? resolveTargetFolder(ctx, String(args.targetFolderId)) : null;
+      const position = args?.position === undefined ? undefined : Number(args.position);
+      // Confere tudo na árvore de agora antes de gravar.
+      const { index } = moveItem(ctx.collections, item.id, target?.id ?? null, position);
+      await ctx.moveCollectionItem(item.id, target?.id ?? null, position);
+      return {
+        ok: true,
+        itemId: item.id,
+        name: item.name,
+        folder: target?.name ?? null,
+        position: index + 1,
+        note: 'Saved locally. Push to GitHub is still a manual action in the app. In a flow, run order = tree order.',
+      };
+    }
+
+    case 'delete_item': {
+      const item = findNodeById(ctx.collections, String(args?.itemId ?? ''));
+      if (!item) throw new Error(`Item "${args?.itemId}" not found.`);
+      if (String(args?.confirmName ?? '') !== item.name) {
+        throw new Error(`confirmName must be exactly the item name ("${item.name}"). Nothing was deleted.`);
+      }
+      const requests = item.type === 'request' ? 1 : flattenRequests(item.item ?? []).length;
+      await ctx.removeCollectionItem(item.id);
+      return {
+        ok: true,
+        deleted: { id: item.id, name: item.name, type: item.type, requests },
+        note: 'Deleted locally. It is removed from GitHub only on the next push of the workspace (manual). The user can restore it from the GitHub history until then.',
+      };
+    }
+
+    case 'validate_flow': {
+      const folder = resolveTargetFolder(ctx, String(args?.folderId ?? ''));
+      const env = resolveEnvironment(ctx, args?.environment);
+      if (args?.environment && !env) throw new Error(`Environment "${args.environment}" not found.`);
+      const report = validateFlow(flattenRequests(folder.item ?? []), envVariableNames(env));
+      const note = (checkNote(report) + (env ? '' : ` ${NO_ENV_CHECK_NOTE}`)).trim();
+      return {
+        folder: folder.name,
+        environment: env?.name ?? null,
+        ...(note ? { note } : {}),
+        ...report,
+      };
+    }
+
+    case 'create_flow': {
+      const folderName = String(args?.name ?? '').trim();
+      if (!folderName) throw new Error('name is required.');
+      const stepsArg = jsonArg<unknown>(args?.steps, 'steps');
+      const specs: Record<string, unknown>[] = Array.isArray(stepsArg) ? (stepsArg as Record<string, unknown>[]) : [];
+      if (specs.length === 0) throw new Error('steps is required: at least one step.');
+      if (specs.length > 60) throw new Error(`Too many steps (${specs.length}). Split the flow: at most 60 steps per call.`);
+
+      const parent = args?.parentFolderId ? resolveTargetFolder(ctx, String(args.parentFolderId)) : null;
+      const env = resolveEnvironment(ctx, args?.environment);
+      if (args?.environment && !env) throw new Error(`Environment "${args.environment}" not found.`);
+      const numberSteps = args?.numberSteps !== false;
+      const numbered = (base: string, index: number) =>
+        numberSteps && !/^\d+\s*-/.test(base) ? `${String(index + 1).padStart(2, '0')} - ${base}` : base;
+
+      // Tudo montado e conferido ANTES de gravar: um passo inválido não deixa
+      // um flow pela metade na árvore.
+      const built = buildSteps(ctx, specs, numbered);
+      const nodes = built.map(step => step.node);
+
+      const folderNode: CollectionItem = { id: crypto.randomUUID(), name: folderName, type: 'folder', item: nodes };
+      await ctx.addCollectionItem(parent?.id ?? null, folderNode);
+
+      const check = validateFlow(nodes, envVariableNames(env));
+      const warnings = built.flatMap((step, index) => step.warnings.map(w => `Step ${index + 1}: ${w}`));
+      return {
+        ok: true,
+        folderId: folderNode.id,
+        name: folderName,
+        parent: parent?.name ?? null,
+        steps: built.map((step, index) => ({
+          position: index + 1,
+          id: step.node.id,
+          name: step.node.name,
+          ...(step.source ? { source: step.source } : {}),
+          ...(step.scriptsSource ? { scriptsFrom: step.scriptsSource } : {}),
+        })),
+        environment: env?.name ?? null,
+        check,
+        ...(check.missingVariables.length ? { variablesToCreate: check.missingVariables } : {}),
+        ...(warnings.length ? { warnings } : {}),
+        note:
+          'Saved locally. Push to GitHub is still a manual action in the app. Not executed.' +
+          checkNote(check) +
+          (env ? '' : ` ${NO_ENV_CHECK_NOTE}`),
+      };
+    }
+
+    case 'create_flow_from_recipe': {
+      const recipe = getRawRecipe(String(args?.id ?? ''));
+      const answers = Object.fromEntries(
+        Object.entries(jsonArg<Record<string, unknown>>(args?.answers, 'answers') ?? {}).map(([k, v]) => [k, String(v ?? '')])
+      );
+      const confirmedArg = jsonArg<unknown>(args?.confirmed, 'confirmed');
+      const plan = planRecipe(recipe, AUTH_BLOCKS, answers, {
+        overrides: jsonArg<Record<string, Record<string, unknown>>>(args?.overrides, 'overrides') ?? {},
+        confirmed: Array.isArray(confirmedArg) ? confirmedArg.map(String) : [],
+      });
+      const dryRun = args?.dryRun === true;
+
+      const blockers: string[] = [];
+      if (plan.missingAnswers.length) {
+        blockers.push(
+          'Missing answers — ask the user (ONE round) and send them in "answers": ' +
+            plan.missingAnswers
+              .map(q => `${q.id}: ${q.question}${q.options.length ? ` [${q.options.join(' | ')}]` : ''}`)
+              .join('; ')
+        );
+      }
+      if (plan.unresolved.length) {
+        blockers.push(
+          `The source of ${plan.unresolved.map(s => `"${s}"`).join(', ')} depends on a choice the recipe does not resolve: send overrides {"<step name>": {"copyFrom": "<id or path>"}} (list_requests / search_requests), or {"skip": true}.`
+        );
+      }
+      if (plan.needsConfirmation.length) {
+        blockers.push(
+          `Confirm the CONFIRMAR block (JSON paths) of ${plan.needsConfirmation.map(s => `"${s}"`).join(', ')} with get_example / get_last_run / the reference flow, then send them in "confirmed" (or a corrected postResponseScript in overrides). "Use the recommended" does not confirm a JSON path.`
+        );
+      }
+
+      const parentRef = String(args?.parentFolderId ?? recipe.parentFolder ?? '');
+      let parent: CollectionItem | null = null;
+      if (parentRef) {
+        try {
+          parent = resolveTargetFolder(ctx, parentRef);
+        } catch (e) {
+          blockers.push(
+            `Where to create it: ${(e as Error).message} Create that folder in the app, or send "parentFolderId" with another one (ask the user which).`
+          );
+        }
+      }
+      const env = resolveEnvironment(ctx, String(args?.environment ?? recipe.environment ?? '') || undefined);
+      const folderName = String(args?.name ?? '').trim() ||
+        numberedFlowName(String(recipe.folderName ?? recipe.title ?? 'Flow NN'), (parent?.item ?? []).map(i => i.name));
+      const numbered = (base: string, index: number) =>
+        /^\d+\s*-/.test(base) ? base : `${String(index + 1).padStart(2, '0')} - ${base}`;
+
+      // Resolve cada origem mesmo no dryRun: o plano mostra de onde cada passo vem.
+      const resolved = plan.steps.map((planned, index) => {
+        try {
+          return { planned, step: buildSteps(ctx, [planned.spec], base => numbered(base, index), true)[0] };
+        } catch (e) {
+          return { planned, error: (e as Error).message.replace(/^Step 1: /, '').replace(/ Nothing was created\.$/, '') };
+        }
+      });
+      const failures = resolved.filter(r => 'error' in r && r.error);
+      const recipeWorkspace = String(recipe.workspace ?? '').trim();
+      if (failures.length && recipeWorkspace && recipeWorkspace.toLowerCase() !== String(ctx.workspace ?? '').trim().toLowerCase()) {
+        blockers.unshift(
+          `This recipe is for the workspace "${recipeWorkspace}", but "${ctx.workspace}" is open in DevFlow: its source requests are not here. Ask the user to open "${recipeWorkspace}" in the app and call again.`
+        );
+      }
+      for (const f of failures) {
+        blockers.push(
+          `Step "${f.planned.recipeName}": ${(f as { error: string }).error} Fix it with overrides {"${f.planned.recipeName}": {...}} — copyFrom (id or path), or scriptsFrom: null plus the scripts — or {"skip": true}.`
+        );
+      }
+
+      const review = plan.steps
+        .filter(s => s.status && !/^confirmad/i.test(s.status) && s.notes)
+        .map(s => ({ step: s.recipeName, notes: s.notes }));
+      if (plan.unusedAnswers.length) {
+        review.push({
+          step: '(answers)',
+          notes:
+            `Not applied automatically: ${plan.unusedAnswers.map(id => `${id} = "${answers[id]}"`).join(', ')}. ` +
+            'Put them where the step notes say (e.g. route and passengers in the search body) with update_request on the created step.',
+        });
+      }
+      const planRows = resolved.map((r, index) => ({
+        position: index + 1,
+        name: r.step?.node.name ?? numbered(r.planned.recipeName, index),
+        source: r.step?.source ?? (r.step ? 'new request' : null),
+        scriptsFrom: r.step?.scriptsSource,
+        status: r.planned.status,
+        ...('error' in r && r.error ? { error: r.error } : {}),
+      }));
+
+      if (dryRun || blockers.length) {
+        return {
+          ok: false,
+          created: false,
+          ...(dryRun ? { dryRun: true } : {}),
+          folderName,
+          parent: parent?.name ?? null,
+          plan: planRows,
+          ...(blockers.length ? { blockers } : {}),
+          ...(review.length ? { review } : {}),
+          note: blockers.length
+            ? 'Nothing was created. Resolve the blockers and call again.'
+            : 'Dry run: nothing was created. Call again without dryRun to create it.',
+        };
+      }
+
+      const built = resolved.map(r => r.step as BuiltStep);
+      const nodes = built.map(b => b.node);
+      const folderNode: CollectionItem = { id: crypto.randomUUID(), name: folderName, type: 'folder', item: nodes };
+      await ctx.addCollectionItem(parent?.id ?? null, folderNode);
+      const check = validateFlow(nodes, envVariableNames(env));
+      const warnings = built.flatMap((b, index) => b.warnings.map(w => `Step ${index + 1}: ${w}`));
+      const table = [
+        '| Passo | Origem | Consome | Produz |',
+        '|---|---|---|---|',
+        ...check.steps.map((s, index) =>
+          `| ${s.name} | ${built[index].source ?? 'nova'} | ${s.consumes.join(', ') || '—'} | ${s.produces.join(', ') || '—'} |`
+        ),
+      ].join('\n');
+      return {
+        ok: true,
+        folderId: folderNode.id,
+        name: folderName,
+        parent: parent?.name ?? null,
+        environment: env?.name ?? null,
+        recipe: String(recipe.id ?? ''),
+        answers,
+        steps: planRows.map((row, index) => ({ ...row, id: nodes[index].id })),
+        check,
+        deliveryTable: table,
+        ...(check.missingVariables.length ? { variablesToCreate: check.missingVariables } : {}),
+        ...(review.length ? { review } : {}),
+        ...(warnings.length ? { warnings } : {}),
+        note:
+          'Created locally, NOT executed. Push to GitHub is still a manual action in the app.' +
+          checkNote(check) +
+          (review.length ? ' Steps in "review" are not confirmed yet: check them with get_request on the created step.' : '') +
+          (env ? '' : ` ${NO_ENV_CHECK_NOTE}`),
       };
     }
 
     default:
       throw new Error(`Unknown tool "${name}".`);
   }
+}
+
+// Passos do create_flow montados (ainda fora da árvore). Erro em qualquer um
+// = nada é criado, e a mensagem diz qual passo.
+function buildSteps(
+  ctx: McpContext,
+  specs: Record<string, unknown>[],
+  numbered: (base: string, index: number) => string,
+  fromRecipe = false
+): BuiltStep[] {
+  return specs.map((spec, index) => {
+    try {
+      return buildFlowStep(ctx.collections, spec ?? {}, base => numbered(base, index), {
+        buildNew: buildRequestNode,
+        mergeReferencePreRequest: fromRecipe,
+      });
+    } catch (e) {
+      throw new Error(`Step ${index + 1}: ${(e as Error).message} Nothing was created.`);
+    }
+  });
 }

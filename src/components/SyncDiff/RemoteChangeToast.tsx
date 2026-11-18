@@ -7,6 +7,7 @@ import { useLanguage } from '@/lib/i18n/language'
 import { initialsOf, type RemoteChangeItem, type RemoteChangePreview } from '@/lib/sync/remoteChangeAlert'
 import { TextDiffView } from './TextDiffView'
 import { openMergeDiff } from '@/lib/sync/mergeDiffStore'
+import { openSyncCenter } from '@/lib/sync/syncCenterStore'
 
 // ─────────────────────────────────────────────────────────────────────────
 // O aviso "alguém mudou isto no GitHub", como card (toast.custom do sonner).
@@ -80,7 +81,10 @@ function ItemRow({ item, open, onToggle, onViewDiff }: { item: RemoteChangeItem;
       <button
         type="button"
         onClick={canPreview ? onToggle : undefined}
-        className={`w-full flex items-center gap-1.5 px-1.5 py-1 text-left rounded-md ${canPreview ? 'hover:bg-pm-hover cursor-pointer' : 'cursor-default'}`}
+        // pr-7 com prévia: o botão de diferença (absoluto, à direita) aparece
+        // no hover por cima da lista de campos ("auth", "body") — sem a folga
+        // ele a cobria.
+        className={`w-full flex items-center gap-1.5 px-1.5 py-1 text-left rounded-md ${canPreview ? 'pr-7 hover:bg-pm-hover cursor-pointer' : 'cursor-default'}`}
         title={item.path.join(' / ')}
       >
         {canPreview ? (
@@ -246,7 +250,19 @@ export function RemoteChangeToast({ workspace, commits, otherFiles, preview, onP
                 />
               ))}
             </div>
-            {hiddenItems > 0 && <div className="px-1.5 pt-1 text-[10.5px] text-pm-text-muted">{t.rcMoreItems(hiddenItems)}</div>}
+            {/* O texto manda ver todos na revisão — então leva até ela. */}
+            {hiddenItems > 0 &&
+              (canViewDiff ? (
+                <button
+                  type="button"
+                  onClick={() => viewDiff()}
+                  className="px-1.5 pt-1 text-left text-[10.5px] text-[#9fd3f7] hover:underline cursor-pointer"
+                >
+                  {t.rcMoreItems(hiddenItems)}
+                </button>
+              ) : (
+                <div className="px-1.5 pt-1 text-[10.5px] text-pm-text-muted">{t.rcMoreItems(hiddenItems)}</div>
+              ))}
             {preview.environments.length > 0 && (
               <div className="mt-1.5 px-1.5 text-[10.5px] text-pm-text-secondary">
                 <span className="font-semibold text-pm-text-muted">{t.rcEnvironments}: </span>
@@ -263,40 +279,59 @@ export function RemoteChangeToast({ workspace, commits, otherFiles, preview, onP
         )}
       </div>
 
-      {/* Ações */}
-      <div className="flex items-center justify-end gap-2 border-t border-pm-border px-3 py-2">
-        {canViewDiff && (
-          <button
-            type="button"
-            onClick={() => viewDiff()}
-            title={t.rcViewDiffTitle}
-            className="mr-auto h-7 px-2 flex items-center gap-1 rounded-md text-[11.5px] text-[#9fd3f7] hover:bg-pm-hover cursor-pointer"
-          >
-            <Columns3 size={12} />
-            {t.rcViewDiff}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={onDismiss}
-          className="h-7 px-2.5 rounded-md text-[11.5px] text-pm-text-secondary hover:bg-pm-hover cursor-pointer"
-        >
-          {t.rcLater}
-        </button>
-        {onPull && (
+      {/* Ações — dois grupos que nunca quebram o texto por dentro (botão de
+          altura fixa com rótulo em duas linhas virava "Depoi / s"). Com os
+          quatro botões em 420px não cabe tudo numa linha; aí o grupo da
+          direita (Depois + ação principal) desce inteiro, alinhado à direita. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-pm-border px-3 py-2">
+        <div className="flex items-center gap-1">
+          {canViewDiff && (
+            <button
+              type="button"
+              onClick={() => viewDiff()}
+              title={t.rcViewDiffTitle}
+              className="h-7 px-2 flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md text-[11.5px] text-[#9fd3f7] hover:bg-pm-hover cursor-pointer"
+            >
+              <Columns3 size={12} />
+              {t.rcViewDiff}
+            </button>
+          )}
+          {/* A Central mostra isto junto do resto: o que vai, o que vem, os
+              conflitos — e dali se recebe, envia ou resolve. */}
           <button
             type="button"
             onClick={() => {
               onDismiss()
-              onPull()
+              openSyncCenter({ tab: conflicts > 0 ? 'conflicts' : 'incoming' })
             }}
-            className={`h-7 px-3 rounded-md text-[11.5px] font-semibold text-white cursor-pointer ${
-              conflicts > 0 ? 'bg-amber-600 hover:bg-amber-600/90' : 'bg-[#f26b3a] hover:bg-[#f26b3a]/90'
-            }`}
+            className="h-7 px-2 shrink-0 whitespace-nowrap rounded-md text-[11.5px] text-[#9fd3f7] hover:bg-pm-hover cursor-pointer"
           >
-            {conflicts > 0 ? t.rcResolve : t.rcPull}
+            {t.scViewInSync}
           </button>
-        )}
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="h-7 px-2.5 shrink-0 whitespace-nowrap rounded-md text-[11.5px] text-pm-text-secondary hover:bg-pm-hover cursor-pointer"
+          >
+            {t.rcLater}
+          </button>
+          {onPull && (
+            <button
+              type="button"
+              onClick={() => {
+                onDismiss()
+                onPull()
+              }}
+              className={`h-7 px-3 shrink-0 whitespace-nowrap rounded-md text-[11.5px] font-semibold text-white cursor-pointer ${
+                conflicts > 0 ? 'bg-amber-600 hover:bg-amber-600/90' : 'bg-[#f26b3a] hover:bg-[#f26b3a]/90'
+              }`}
+            >
+              {conflicts > 0 ? t.rcResolve : t.rcPull}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

@@ -1,5 +1,6 @@
 'use client';
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import dynamic from 'next/dynamic';
 import { loader } from '@monaco-editor/react';
 import type { OnChange, OnMount, Monaco } from '@monaco-editor/react';
@@ -23,7 +24,7 @@ const MonacoEditor = dynamic(
     ssr: false,
     loading: () => (
       <div className="flex h-full items-center justify-center">
-       Loading...
+        <DevFlowSpinner size={28} />
       </div>
     ),
   }

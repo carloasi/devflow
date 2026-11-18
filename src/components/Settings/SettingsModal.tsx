@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Bot, Bug, Database, Globe, Languages, Palette, Puzzle, Shield, X } from 'lucide-react';
+import { Bot, Bug, Database, Globe, Languages, Palette, Puzzle, Shield, SlidersHorizontal, X } from 'lucide-react';
 import { SecuritySettingsSection } from './SecuritySettingsSection';
 import { DataSettingsSection } from './DataSettingsSection';
 import type { CollectionItem } from '@/app/types/CollectionItem';
@@ -11,12 +11,16 @@ import { LanguageSettingsSection } from './LanguageSettingsSection';
 import { NetworkSettingsSection } from './NetworkSettingsSection';
 import { McpSettingsSection } from './McpSettingsSection';
 import { ExtensionsSettingsSection } from './ExtensionsSettingsSection';
+import { AdvancedSettingsSection } from './AdvancedSettingsSection';
+import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings';
 import { UseMcpServerResult } from '@/mcp/useMcpServer';
 import { UseExtensionHostResult } from '@/extensions/useExtensionHost';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  // Abre direto nesta seção (atalho de fora, ex. o indicador MCP da barra).
+  requestedSection?: SectionId;
   // O servidor MCP vive no AppLayout (precisa das collections e do
   // engine de execução), então o estado dele chega por prop.
   mcp?: UseMcpServerResult;
@@ -32,9 +36,12 @@ interface SettingsModalProps {
   // Clique num achado do scanner: fecha este modal e abre o item na árvore
   // (ver handleJumpToItem em AppLayout.tsx).
   onJumpToItem?: (requestId: string) => void;
+  // Avançado → zona de perigo: "Baixar tudo e substituir" (GitHubSync).
+  // Ausente = sincronização do GitHub não configurada.
+  onReplaceAllFromGitHub?: () => Promise<void>;
 }
 
-type SectionId = 'appearance' | 'language' | 'security' | 'network' | 'mcp' | 'extensions' | 'data' | 'report';
+export type SectionId = 'appearance' | 'language' | 'security' | 'network' | 'mcp' | 'extensions' | 'data' | 'advanced' | 'report';
 
 const LAST_SECTION_KEY = 'devflow_settings_section';
 
@@ -50,8 +57,17 @@ function loadLastSection(): SectionId {
 // um modal de 440px com as 7 seções empilhadas numa rolagem só — tudo ficava
 // espremido (botões quebrando linha, descrições apertadas ao lado dos
 // botões) e achar uma opção exigia rolar bastante.
-export function SettingsModal({ isOpen, onClose, mcp, extensionHost, collections, onApplySecrets, onJumpToItem }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose, requestedSection, mcp, extensionHost, collections, onApplySecrets, onJumpToItem, onReplaceAllFromGitHub }: SettingsModalProps) {
   const [active, setActive] = useState<SectionId>(loadLastSection);
+  // Ajuste durante o render (sem efeito): ao abrir com uma seção pedida, ela
+  // vira a ativa uma vez; depois o usuário navega livre.
+  const openKey = isOpen ? requestedSection ?? '' : null;
+  const [seenOpenKey, setSeenOpenKey] = useState<string | null>(null);
+  if (openKey !== seenOpenKey) {
+    setSeenOpenKey(openKey);
+    if (isOpen && requestedSection) setActive(requestedSection);
+  }
+  const syncText = useSyncDiffStrings();
 
   if (!isOpen) return null;
 
@@ -67,6 +83,12 @@ export function SettingsModal({ isOpen, onClose, mcp, extensionHost, collections
       ? [{ id: 'extensions' as const, label: 'Extensions', icon: <Puzzle size={14} />, render: () => <ExtensionsSettingsSection host={extensionHost} /> }]
       : []),
     { id: 'data', label: 'Data', icon: <Database size={14} />, render: () => <DataSettingsSection /> },
+    {
+      id: 'advanced',
+      label: syncText.scAdvanced,
+      icon: <SlidersHorizontal size={14} />,
+      render: () => <AdvancedSettingsSection onReplaceAllFromGitHub={onReplaceAllFromGitHub} />,
+    },
     { id: 'report', label: 'Report a problem', icon: <Bug size={14} />, render: () => <ErrorReportSettingsSection /> },
   ];
 

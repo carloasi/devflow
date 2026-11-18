@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import { nodeHashes } from '@/lib/syncBase';
-import { rebaseCollections } from './rebase';
+import { applyRemoteMoves, rebaseCollections } from './rebase';
+import { applySelectedChanges } from '@/lib/applyDiff';
+import { diffTrees } from '@/lib/collectionDiff';
 
 const req = (id: string, body = ''): CollectionItem => ({
   id,
@@ -259,5 +261,71 @@ describe('rebaseCollections', () => {
   it('nothing different means nothing to do', () => {
     const r = rebaseCollections(synced(), synced(), base, pending);
     expect(r).toMatchObject({ conflicts: [], incoming: 0, outgoing: 0 });
+  });
+});
+
+describe('revisão com item movido no GitHub', () => {
+  const folder = (id: string, item: CollectionItem[]): CollectionItem => ({ id, name: id, type: 'folder', item });
+  const where = (tree: CollectionItem[], id: string, parent = ''): { parent: string; body?: string } | null => {
+    for (const n of tree) {
+      if (n.id === id) return { parent, body: n.request?.body };
+      const inner = where(n.item ?? [], id, n.id);
+      if (inner) return inner;
+    }
+    return null;
+  };
+
+  it('aplica a mudança de pasta (e a edição) do colega, e o push seguinte não a desfaz', () => {
+    const synced = [folder('root', [folder('A', [req('x', 'old')]), folder('B', [])])];
+    const local = structuredClone(synced);
+    const remote = [folder('root', [folder('A', []), folder('B', [req('x', 'new')])])];
+    const base = nodeHashes(synced);
+
+    // A revisão: o diff nem lista o item movido.
+    const merged = structuredClone(applySelectedChanges(local, remote, new Set(diffTrees(local, remote).map(n => n.id))));
+    applyRemoteMoves(merged, local, remote, base);
+    expect(where(merged, 'x')).toEqual({ parent: 'B', body: 'new' });
+
+    // Depois da revisão a base é o GitHub; o push leva o mesmo que está lá.
+    const push = rebaseCollections(merged, remote, nodeHashes(remote), new Set(['root']));
+    expect(where(push.merged, 'x')).toEqual({ parent: 'B', body: 'new' });
+  });
+
+  it('sem base, não move nada', () => {
+    const local = [folder('root', [folder('A', [req('x')]), folder('B', [])])];
+    const remote = [folder('root', [folder('A', []), folder('B', [req('x')])])];
+    const merged = structuredClone(local);
+    applyRemoteMoves(merged, local, remote, null);
+    expect(where(merged, 'x')?.parent).toBe('A');
+  });
+});
+
+describe('mover e apagar a pasta de origem', () => {
+  const folder = (id: string, item: CollectionItem[]): CollectionItem => ({ id, name: id, type: 'folder', item });
+  const parentOf = (tree: CollectionItem[], id: string, parent = ''): string | null => {
+    for (const n of tree) {
+      if (n.id === id) return parent;
+      const inner = parentOf(n.item ?? [], id, n.id);
+      if (inner !== null) return inner;
+    }
+    return null;
+  };
+
+  it('o colega tirou x de A e apagou A: x fica, na pasta nova', () => {
+    const synced = [folder('root', [folder('A', [req('x', 'v1')]), folder('B', [])])];
+    const local = structuredClone(synced);
+    const remote = [folder('root', [folder('B', [req('x', 'v1')])])];
+    const res = rebaseCollections(local, remote, nodeHashes(synced), new Set());
+    expect(parentOf(res.merged, 'x')).toBe('B');
+    expect(parentOf(res.merged, 'A')).toBeNull();
+  });
+
+  it('eu tirei x de A e o colega apagou A (com x): vira decisão, e x fica por padrão', () => {
+    const synced = [folder('root', [folder('A', [req('x')]), folder('B', [])])];
+    const local = [folder('root', [folder('A', []), folder('B', [req('x')])])];
+    const remote = [folder('root', [folder('B', [])])];
+    const res = rebaseCollections(local, remote, nodeHashes(synced), new Set(['root']));
+    expect(res.conflicts).toContain('x');
+    expect(parentOf(res.merged, 'x')).toBe('B');
   });
 });

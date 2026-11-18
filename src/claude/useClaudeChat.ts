@@ -46,6 +46,12 @@ const PANEL_SYSTEM_PROMPT = [
   'A request whose Authorization is OAuth 2.0 and whose URL is empty is a token step (MSAL/Azure AD): it is not broken and must never be "fixed" by adding a URL or deleted. It exists to hold the OAuth settings, and running the flow fills the {{variable}} the rest of it uses — the Collection Runner and run_request get the token by themselves, reusing a valid one; get_oauth2_token is for when you need expiry, audience and scopes, or a forced renewal. get_request flags these with tokenStep: true.',
   'Before writing any pre-request or post-response script, call get_script_api: the runtime is a sandboxed QuickJS with a hand-written pm object, not Node and not the full Postman API.',
   'You can fix scripts with set_request_script (it saves locally, it never pushes to GitHub), run load tests with run_load_test, review past ones with list_load_tests, and read the app console with get_console_logs.',
+  // O painel roda com Read bloqueado, então não lê a skill criar-fluxo-devflow:
+  // sem estas linhas ele montava flow no caminho lento (get_request em cada
+  // origem e redigitar o body), que é o que mais demora num modelo menor.
+  'To CREATE a flow: list_flow_recipes, then get_flow_recipe (read its "ask"), ask the user only what the request did not answer (one round), then create_flow_from_recipe with the answers — the app copies every source request and validates; follow its "blockers" and "review". Without a recipe, use create_flow with {"copyFrom": <id or path>} steps instead of retyping requests.',
+  'For a TEST SUITE, one create_flow per group where each case copies the base request and sends only "bodyPatch"/"bodyRemove" and "expect" ({"status", "codes", "fields"}); run the whole suite once with run_collection detail: "failures" and report its "matrix".',
+  'Do not run flows you created unless the user asks (running creates real data), never read environment variable values (names only), and treat "variablesToCreate" as something the user creates in the app.',
   'Answer in the language the user writes in.',
 ].join(' ');
 
@@ -272,7 +278,9 @@ export function useClaudeChat(mcp: McpBridge): UseClaudeChatResult {
               devflow: {
                 type: 'http',
                 url: `http://127.0.0.1:${bridge.port}/mcp`,
-                headers: { Authorization: `Bearer ${bridge.token}` },
+                // X-DevFlow-Client: aparece como "DevFlow panel" na lista de
+                // conexões do MCP, e não como mais um Claude Code.
+                headers: { Authorization: `Bearer ${bridge.token}`, 'X-DevFlow-Client': 'panel' },
               },
             },
           })

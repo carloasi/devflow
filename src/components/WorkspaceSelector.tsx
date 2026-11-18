@@ -1,7 +1,10 @@
 'use client';
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { ArrowDownUp } from 'lucide-react';
+import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings';
 import {
   listWorkspaces,
   createWorkspace,
@@ -59,32 +62,6 @@ const TrashIcon = () => (
   </svg>
 );
 
-// Pull de um único workspace (baixar do GitHub) — usado no menu de troca de
-// workspace, pra atualizar só o item selecionado sem baixar todos os outros.
-const PullDownIcon = () => (
-  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-    <path d="M8 2.5v8M8 10.5L5 7.5M8 10.5l3-3M3 13.5h10" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-// Push de um único workspace (enviar pro GitHub) — mesma ideia do PullDownIcon,
-// só que na direção contrária.
-const PushUpIcon = () => (
-  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-    <path d="M8 13.5v-8M8 5.5L5 8.5M8 5.5l3 3M3 2.5h10" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-// Anel girando, mostrado no lugar da seta enquanto o pull/push daquela linha
-// está rodando. Girar a própria seta não lia como "carregando" — parecia um
-// glitch do ícone.
-const BusySpinner = () => (
-  <span className="relative block w-3 h-3">
-    <span className="absolute inset-0 border-[1.5px] border-pm-border rounded-full" />
-    <span className="absolute inset-0 border-[1.5px] border-transparent border-t-current rounded-full animate-spin" />
-  </span>
-);
-
 // "…" — abre o menu com as ações menos frequentes (histórico, renomear,
 // excluir). Só Pull e Push ficam inline; com 5 ícones na linha o nome do
 // workspace era espremido pra ~80px e aparecia truncado em toda linha.
@@ -118,12 +95,10 @@ interface WorkspaceSelectorProps {
   onRenameWorkspace: (oldPath: string, newWorkspace: WorkspaceInfo) => void | Promise<void>;
   // Exclui o workspace local por completo (dados salvos + registro na lista).
    onDeleteWorkspace?: (path: string) => void | Promise<void>;
-  // Baixa (Pull) só esse workspace do GitHub, sobrescrevendo os dados locais
-  // dele — sem afetar os outros workspaces da lista.
-  onPullWorkspace?: (path: string) => void | Promise<void>;
-  // Envia (Push) só esse workspace pro GitHub, sem mexer nos outros —
-  // funciona mesmo se esse workspace não for o selecionado no momento.
-  onPushWorkspace?: (path: string) => void | Promise<void>;
+  // Abre a Central de Sincronização desse workspace (trocando pra ele se
+  // não for o aberto). Era um par de setas Pull/Push por linha; receber e
+  // enviar agora são pela Central, com o que entra e o que sai à vista.
+  onSyncWorkspace?: (path: string) => void | Promise<void>;
   // Abre a janela de histórico de commits desse workspace no GitHub, onde
   // dá pra escolher qual versão baixar (em vez de sempre a mais recente).
   onOpenCommitHistory?: (path: string) => void;
@@ -136,17 +111,15 @@ export default function WorkspaceSelector({
   onCreateWorkspace,
   onRenameWorkspace,
     onDeleteWorkspace,
-  onPullWorkspace,
-  onPushWorkspace,
+  onSyncWorkspace,
   onOpenCommitHistory,
 }: WorkspaceSelectorProps) {
+  const syncText = useSyncDiffStrings();
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [confirmClearId, setConfirmClearId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [pullingId, setPullingId] = useState<string | null>(null);
-  const [pushingId, setPushingId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
@@ -262,25 +235,6 @@ export default function WorkspaceSelector({
     await onSelectWorkspace(path);
   }, [selectedWorkspace, onSelectWorkspace]);
 
-  const handlePullClick = useCallback(async (path: string) => {
-    if (!onPullWorkspace || pullingId) return;
-    setPullingId(path);
-    try {
-      await onPullWorkspace(path);
-    } finally {
-      setPullingId(null);
-    }
-  }, [onPullWorkspace, pullingId]);
-
-  const handlePushClick = useCallback(async (path: string) => {
-    if (!onPushWorkspace || pushingId) return;
-    setPushingId(path);
-    try {
-      await onPushWorkspace(path);
-    } finally {
-      setPushingId(null);
-    }
-  }, [onPushWorkspace, pushingId]);
 
   // Fecha o menu "…" ao clicar fora, apertar Esc ou fechar o dropdown.
   useEffect(() => {
@@ -421,7 +375,7 @@ export default function WorkspaceSelector({
               className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap"
               title={loading ? undefined : selectedLabel}
             >
-            {loading ? 'Loading...' : selectedLabel}
+            {loading ? <span className="inline-flex items-center gap-1.5"><DevFlowSpinner size={13} /> Loading...</span> : selectedLabel}
             </span>
 
             <span className="flex text-pm-text-muted shrink-0">
@@ -505,13 +459,9 @@ export default function WorkspaceSelector({
                     // Ações só existem no DOM da linha sob o mouse (ou da que
                     // está com o menu "…" aberto) — nas demais o nome ocupa a
                     // linha inteira.
-                    // ...e também enquanto houver um pull/push em curso nela,
-                    // senão tirar o mouse da linha desmontava o botão no meio
-                    // da operação e levava junto o indicador de progresso.
-                    const wsBusy = pullingId === ws.path || pushingId === ws.path;
                     const showActions =
                       !isConfirmingClear &&
-                      (hoveredPath === ws.path || overflowMenu?.path === ws.path || wsBusy);
+                      (hoveredPath === ws.path || overflowMenu?.path === ws.path);
 
                     return (
                       <div
@@ -548,33 +498,19 @@ export default function WorkspaceSelector({
                           </span>
                         )}
 
-                        {showActions && onPullWorkspace && wsSynced && (
+                        {showActions && onSyncWorkspace && (
                           <button
                             type="button"
-                            disabled={pullingId === ws.path}
-                            className="shrink-0 w-5 h-5 flex items-center justify-center rounded text-pm-text-muted cursor-pointer transition-all hover:bg-[#007acc]/20 hover:text-[#3c9be0] disabled:cursor-wait"
-                            title="Pull updates for this workspace from GitHub"
+                            className="shrink-0 w-5 h-5 flex items-center justify-center rounded text-pm-text-muted cursor-pointer transition-all hover:bg-[#007acc]/20 hover:text-[#9fd3f7]"
+                            title={syncText.scWorkspaceSyncTitle}
+                            aria-label={syncText.scWorkspaceSyncTitle}
                             onClick={(e) => {
                               e.stopPropagation();
-                              handlePullClick(ws.path);
+                              setMenuOpen(false);
+                              void onSyncWorkspace(ws.path);
                             }}
                           >
-                            {pullingId === ws.path ? <BusySpinner /> : <PullDownIcon />}
-                          </button>
-                        )}
-
-                        {showActions && onPushWorkspace && (
-                          <button
-                            type="button"
-                            disabled={pushingId === ws.path}
-                            className="shrink-0 w-5 h-5 flex items-center justify-center rounded text-pm-text-muted cursor-pointer transition-all hover:bg-emerald-500/20 hover:text-emerald-400 disabled:cursor-wait"
-                            title="Push this workspace's content to GitHub"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handlePushClick(ws.path);
-                            }}
-                          >
-                            {pushingId === ws.path ? <BusySpinner /> : <PushUpIcon />}
+                            <ArrowDownUp size={12} />
                           </button>
                         )}
 

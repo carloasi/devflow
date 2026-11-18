@@ -1,5 +1,6 @@
 'use client';
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import type { Monaco } from '@monaco-editor/react';
@@ -331,7 +332,7 @@ export function GrpcRequestPanel({
             title="Ask the server for its services (gRPC reflection)"
             className="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-pm-border bg-pm-hover/60 px-2.5 text-[11px] font-medium text-pm-text transition-colors hover:bg-pm-hover disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <RefreshCw size={12} className={loadingSchema === 'reflection' ? 'animate-spin' : ''} />
+            {loadingSchema === 'reflection' ? <DevFlowSpinner size={13} /> : <RefreshCw size={12} />}
             Load from server
           </button>
           <button

@@ -1,5 +1,6 @@
 import type { DiffNode } from './collectionDiff';
 import { changedInSubtree, changedSinceBase, type NodeHashes } from './syncBase';
+import { fieldHashKey, PARENT_FIELD } from './sync/fieldMerge';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Estado das caixinhas da tela de comparação.
@@ -84,7 +85,12 @@ export function conflictingIds(
     // abaixo dele — mudou aqui. Sem base não há como saber se foi apagado lá
     // ou se é novo aqui: fica, em vez de apostar na exclusão.
     if (node.change === 'removed') {
-      if (!base || changedSinceBase(base, node.id, node.local) !== false || changedInSubtree(base, node.local)) {
+      if (
+        !base ||
+        changedSinceBase(base, node.id, node.local) !== false ||
+        changedInSubtree(base, node.local) ||
+        movedSinceBase(base, node)
+      ) {
         out.add(node.id);
       }
       continue;
@@ -117,6 +123,19 @@ export function conflictingIds(
   }
 
   return out;
+}
+
+/**
+ * O item mudou de pasta AQUI desde a base? O hash do item não inclui a
+ * pasta: sem olhar o pai, "você tirou a request da pasta que o colega
+ * apagou" passava por "intocado aqui", e aceitar a exclusão apagava a
+ * request que você tinha salvado de lá.
+ */
+function movedSinceBase(base: NodeHashes, node: DiffNode): boolean {
+  const recorded = base[fieldHashKey(node.id, PARENT_FIELD)];
+  if (recorded === undefined) return false;
+  const parent = node.ancestorIds.length > 0 ? node.ancestorIds[node.ancestorIds.length - 1] : '';
+  return recorded !== parent;
 }
 
 export interface SelectionSummary {

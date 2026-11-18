@@ -1,0 +1,280 @@
+{
+  "id": "b2b-pos-venda",
+  "title": "Pós-venda (Barramento B2B)",
+  "context": "b2b",
+  "workspace": "Barramento B2B - Dev",
+  "environment": "5by5",
+  "parentFolder": "Sprints / Sprint 121 / User Story 1345299: [Sales.B2B.Api] Migrar os Métodos de Change e Cancel para V4",
+  "folderName": "Flow NN - <ação de pós-venda>",
+  "ask": [
+    {
+      "id": "route",
+      "question": "Qual rota (origem e destino)? Precisa ter voo no ambiente de dev na data da busca.",
+      "options": [
+        "VCP → SDU (Recomendado)",
+        "outra (digite)"
+      ]
+    },
+    {
+      "id": "pax",
+      "question": "Quantos passageiros adultos?",
+      "options": [
+        "1 (Recomendado)",
+        "2",
+        "outro (digite)"
+      ]
+    },
+    {
+      "id": "action",
+      "question": "Qual ação de pós-venda? (várias ações: o bloco ação → Calculate → Checkout v2 → Order v3 se repete para cada uma)",
+      "options": [
+        "cancelamento com reembolso (Recomendado — Delete Journey v2)",
+        "assento",
+        "bagagem ou serviço",
+        "outra (digite)"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "name": "Token v1",
+      "tool": "create_request",
+      "copyFrom": "0cd95190-444d-47ea-9194-7dee99209573",
+      "source": "POST Barramento B2B - Dev / Authentication / v1 / Token v1",
+      "auth": {
+        "type": "bearer",
+        "token": "{{tokenB2b}}"
+      },
+      "consumes": [
+        "urlAuthorization",
+        "apiKey",
+        "tokenB2b"
+      ],
+      "produces": [
+        "bearerToken"
+      ],
+      "postResponseScript": "var jsonData = pm.response.json();\npm.environment.set(\"bearerToken\", jsonData.data.token);",
+      "status": "confirmado",
+      "notes": "POST {{urlAuthorization}}/api/v1/token, header Ocp-Apim-Subscription-Key: {{apiKey}}, SEMPRE auth bearer {{tokenB2b}} (a origem tem um token literal: a receita troca). copyFrom pela id: na mesma pasta há Token v1 GET e DELETE com o mesmo nome. data.token confirmado no run de 13/11/2026."
+    },
+    {
+      "name": "Authenticate v1",
+      "tool": "create_request",
+      "copyFrom": "eb465345-14f8-41ff-b6f7-2ced2dbb7071",
+      "source": "POST Barramento B2B - Dev / User / v1 / Authenticate v1",
+      "url": "{{urlUser}}/api/v1/authenticate",
+      "body": "{\n  \"username\": \"{{b2bUsername}}\",\n  \"password\": \"{{b2bPassword}}\"\n}",
+      "consumes": [
+        "urlUser",
+        "bearerToken",
+        "b2bUsername",
+        "b2bPassword"
+      ],
+      "produces": [
+        "currencyCode"
+      ],
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"currencyCode\", response.data.sessionContext.pointOfSale.currencyCode);",
+      "status": "confirmado",
+      "notes": "copyFrom pela id (na pasta há Authenticate v1 DELETE). A origem tem logins comentados e {{username}}/{{password}} no body e \"{{ urlUser }}\" com espaços na URL: a receita usa o body com {{b2bUsername}}/{{b2bPassword}} e a URL limpa, como no Flow 01. Headers: os da origem (apiKey, Subscription-Email/Id, True-Client-IP). Grava só currencyCode (data.sessionContext.pointOfSale.currencyCode, visto no run de 13/11/2026); o 2FA não consome nada dela."
+    },
+    {
+      "name": "2FA",
+      "tool": "create_request",
+      "copyFrom": "55cc9e3c-1cb9-4f10-9d8b-daaf0150a3aa",
+      "source": "PUT Barramento B2B - Dev / User / v1 / 2FA (interno) v1 (AzulCorp)",
+      "consumes": [
+        "urlUser",
+        "bearerToken"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "PUT {{urlUser}}/api/v1/user/2FA, sem body. copyFrom pela id (há o GET com o mesmo nome). Sem scripts: no Flow 01 o post-response só tem pm.test, e flow não valida retorno por padrão. Visto nos runs: em 13/11/2026 (env-tst) respondeu 404 e o AirSearch seguinte passou; em 05/11/2026 respondeu 2xx mas o AirSearch deu 401 \"User not authorized by 2-factor authentication\" — se acontecer, é o usuário de {{b2bUsername}} que exige 2FA, não o flow."
+    },
+    {
+      "name": "AirSearch v3",
+      "tool": "create_request",
+      "copyFrom": "eb293af8-94b3-40d0-bc20-61d8e0078680",
+      "source": "POST Barramento B2B - Dev / Shopping / V3 / AirSearch V3",
+      "body": "{\n  \"passengers\": [\n    {\n      \"type\": \"ADT\",\n      \"count\": <<pax.number>>\n    }\n  ],\n  \"journeys\": [\n    {\n      \"origin\": \"<<route.origin>>\",\n      \"destination\": \"<<route.destination>>\",\n      \"departure\": \"{{flowDeparture}}\"\n    }\n  ],\n  \"criteria\": {\n    \"baggageAllowance\": \"All\",\n    \"directFlightsOnly\": false\n  }\n}",
+      "consumes": [
+        "urlShopping",
+        "bearerToken",
+        "flowDeparture"
+      ],
+      "produces": [
+        "journeyKeyIda",
+        "fareKeyIda"
+      ],
+      "preRequestScript": "// Data de partida calculada na hora (nunca fixa). O DevFlow resolve os {{...}} do body\n// DEPOIS do pre-request, então {{flowDeparture}} já vale nesta mesma request.\nvar moment = require(\"moment\");\npm.environment.set(\"flowDeparture\", moment().add(90, \"days\").format(\"YYYY-MM-DD\"));\n// Começa vazio: sem voo nesta busca, o Order não usa o voo de outra execução.\npm.environment.set(\"journeyKeyIda\", \"\");\npm.environment.set(\"fareKeyIda\", \"\");",
+      "postResponseScript": "// 1º voo da ida com tarifa; usa a 1ª tarifa dele (regra do Flow 01).\n// Caminhos confirmados no run de 13/11/2026: data.airResult.offers[] → offersAvailableByMarket[] → value[] (voo: key, fares[].key).\nvar response = pm.response.json();\nvar offers = (response.data && response.data.airResult && response.data.airResult.offers) || [];\nvar markets = offers.length ? (offers[0].offersAvailableByMarket || []) : [];\nvar journey = null;\nfor (var m = 0; m < markets.length && !journey; m++) {\n  var values = markets[m].value || [];\n  for (var v = 0; v < values.length; v++) {\n    if (values[v].fares && values[v].fares.length) { journey = values[v]; break; }\n  }\n}\nif (journey) {\n  pm.environment.set(\"journeyKeyIda\", journey.key);\n  pm.environment.set(\"fareKeyIda\", journey.fares[0].key);\n} else {\n  console.log(\"Nenhum voo com tarifa nesta busca.\");\n}",
+      "status": "confirmado",
+      "notes": "Body da receita: rota e passageiros das respostas (<<route.origin>>, <<route.destination>>, <<pax.number>>) e partida {{flowDeparture}} (D+90, do pre-request) — o mesmo formato do body da origem, que tem SDU→REC e data fixa. Produz journeyKeyIda/fareKeyIda, os nomes que o body do Order (origem) usa. Caminhos do JSON vistos no run de 13/11/2026 do flow \"Flows - DevFlow AI / Reserva 24h - Hold - VCP-SDU - 1A\"."
+    },
+    {
+      "name": "Order v1",
+      "tool": "create_request",
+      "copyFrom": "bb203ba7-09ed-41bd-9a82-43bff92de115",
+      "source": "POST Barramento B2B - Dev / Order / v1 / Order v1",
+      "consumes": [
+        "urlOrder",
+        "bearerToken",
+        "journeyKeyIda",
+        "fareKeyIda"
+      ],
+      "produces": [
+        "orderTotalAmount"
+      ],
+      "preRequestScript": "// Zera o que este passo produz: se ele falhar, o seguinte não usa o valor de outra execução.\n[\"orderTotalAmount\"].forEach(function (name) { pm.environment.set(name, \"\"); });",
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"orderTotalAmount\", response.data.order.totals.amount);",
+      "status": "confirmado",
+      "notes": "Paga: SEMPRE Order v1 (Order v2 + Payments não fecha o Checkout). copyFrom pela id (há Order v1 GET e DELETE). O body da origem já usa {{journeyKeyIda}}/{{fareKeyIda}} e 1 passageiro ADT sintético (CPF com dígito válido, e-mail @example.com); os comentários // do body saem no envio. Com pax > 1, acrescente passageiros sintéticos no body (override \"body\") — a receita não gera. Produz orderTotalAmount (data.order.totals.amount: script da própria origem e do Flow 01), que o Payments usa; NÃO produz recordLocator (quem produz é o Checkout v1). O pre-request do Flow 01 aqui é só pm.test das chaves do AirSearch: não entra (flow não valida por padrão), por isso o pre-request é só o reset."
+    },
+    {
+      "name": "Payments v1",
+      "tool": "create_request",
+      "copyFrom": "39de420c-8816-486e-b34b-df2d397fbc5d",
+      "source": "POST Barramento B2B - Dev / Order.Payments / v1 / Payments",
+      "body": "{\n    \"methodCode\": \"VI\",\n    \"amount\": {{orderTotalAmount}},\n    \"installments\": 1,\n    \"account\": \"4111111111111111\",\n    \"expirationMonth\": 3,\n    \"expirationYear\": 2030,\n    \"holderName\": \"JOHN SMITH\",\n    \"verificationCode\": \"737\"\n}",
+      "consumes": [
+        "urlOrderPayments",
+        "bearerToken",
+        "orderTotalAmount"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "POST {{urlOrderPayments}}/api/v1/order/payments. copyFrom pela id (há Payments GET). O body da origem é só exemplos comentados (vazio no envio): a receita usa o do Flow 01 — cartão de TESTE VI 4111 1111 1111 1111 (a opção \"Cartão Regular\" da própria origem), 1 parcela, amount = {{orderTotalAmount}} do Order v1. Nunca cartão real. Sem scripts: no Flow 01 são só pm.test e console.log."
+    },
+    {
+      "name": "Checkout v1",
+      "tool": "create_request",
+      "copyFrom": "749f1045-05d2-4cac-baff-c662350dbb2a",
+      "source": "POST Barramento B2B - Dev / Order / v1 / Checkout v1",
+      "consumes": [
+        "urlOrder",
+        "bearerToken"
+      ],
+      "produces": [
+        "recordLocator"
+      ],
+      "preRequestScript": "// Zera o que este passo produz: se ele falhar, o seguinte não usa o valor de outra execução.\n[\"recordLocator\"].forEach(function (name) { pm.environment.set(name, \"\"); });",
+      "postResponseScript": "var response = pm.response.json();\npm.environment.set(\"recordLocator\", response.data.recordLocator);",
+      "status": "confirmado",
+      "notes": "POST {{urlOrder}}/api/v1/checkout, body {\"notifyContacts\": \"Customer\"}; fica em Order / v1 (não há pasta Checkout). Fecha a order da SESSÃO (a do Order anterior): não lê {{recordLocator}}, só produz (data.recordLocator — script da origem e do Flow 01). Por isso o reset do recordLocator é aqui. \"Conforme a order\": hold → depois do Order v2; paga → depois do Payments v1."
+    },
+    {
+      "name": "Order v3 (depois do checkout)",
+      "tool": "create_request",
+      "copyFrom": "5d353efc-27b7-4bdd-8472-0aec0350cc1a",
+      "source": "GET Barramento B2B - Dev / Order.Management / v3 / Order/{recordLocator} v3",
+      "consumes": [
+        "urlOrderManagement",
+        "bearerToken",
+        "recordLocator"
+      ],
+      "produces": [
+        "bookedJourneyKey"
+      ],
+      "postResponseScript": "var code = pm.response.code;\nif (code === 200) {\n  var order = pm.response.json().data.order;\n  // journeyKey da 1ª jornada reservada, usada no Delete Journey\n  var j = (order.journeys || [])[0];\n  if (j) { pm.environment.set(\"bookedJourneyKey\", j.journeyKey || j.key); }\n} else if (code >= 500) {\n  // Nunca logar o corpo do 500: ele traz o token de sessão do backend\n  var corr = \"\";\n  try { corr = pm.response.json().correlation; } catch (e) {}\n  console.log(\"Order v3 retornou \" + code + \", correlation \" + corr);\n}",
+      "status": "A LEVANTAR",
+      "notes": "GET {{urlOrderManagement}}/api/v3/order/{{recordLocator}}; copyFrom pela id (Order.Management / v3). Script = o do Flow 01 sem os pm.test. FALTA: nenhum run guardado com 200 deste passo (no Flow 01, 05/11/2026, deu 401 de 2FA), então o caminho data.order.journeys[0].journeyKey|key do bookedJourneyKey vem só do Flow 01 — que tenta os dois nomes. Confirme com um run e troque por um caminho só."
+    },
+    {
+      "name": "Order/{recordLocator} v2",
+      "tool": "create_request",
+      "copyFrom": "6d0b7c5d-752e-4437-81ac-3affd092038e",
+      "source": "GET Barramento B2B - Dev / Order.Management / v2 / Order/{recordLocator} v2",
+      "url": "{{urlOrderManagement}}/api/v2/order/{{recordLocator}}",
+      "consumes": [
+        "urlOrderManagement",
+        "bearerToken",
+        "recordLocator"
+      ],
+      "produces": [],
+      "status": "A LEVANTAR",
+      "notes": "NÃO está no Flow 01. Entrou porque, no run do Flow 01 de 05/11/2026, Delete Journey, Calculate e Checkout v2 responderam 409 \"Get Order V2 has not been executed.\" — e o flow \"Barramento B2B - Dev / Flows / Booking Flow Checkout Customer OrderManagement\" faz este GET logo antes do Calculate. A origem tem o localizador fixo na URL (ESDZQR): a receita troca por {{recordLocator}}. Sem script (o da origem regrava recordLocator/journeyKey/fareKey, que ninguém depois consome). FALTA: um run com sucesso para saber se ele basta (ou se o Order v3 sozinho já serve) e se precisa repetir antes de cada Calculate quando há várias ações."
+    },
+    {
+      "name": "Delete Journey v2",
+      "tool": "create_request",
+      "copyFrom": "fd1976c6-14d7-42fa-92d7-778824ff6693",
+      "source": "DELETE Barramento B2B - Dev / Order.Management / v2 / Delete Journey v2",
+      "when": "action == cancelamento",
+      "pathParams": {
+        "journeyKey": "{{bookedJourneyKey}}"
+      },
+      "consumes": [
+        "urlOrderManagement",
+        "bearerToken",
+        "recordLocator",
+        "bookedJourneyKey"
+      ],
+      "produces": [],
+      "postResponseScript": "if (pm.response.code >= 500) {\n  // Nunca logar o corpo do 500: ele traz o token de sessão do backend\n  var corr = \"\";\n  try { corr = pm.response.json().correlation; } catch (e) {}\n  console.log(\"Delete Journey retornou \" + pm.response.code + \", correlation \" + corr);\n} else {\n  console.log(pm.response.text());\n}",
+      "status": "confirmado",
+      "notes": "Ação \"cancelamento com reembolso\": DELETE {{urlOrderManagement}}/api/v2/order/{{recordLocator}}/journeys/:journeyKey (Order.Management / v2, a única Delete Journey v2 da collection). A origem tem uma journeyKey fixa no path param: a receita usa {{bookedJourneyKey}}, como o Flow 01 (que vem do Order v3 — ver o status dele). Script = o do Flow 01 sem os pm.test."
+    },
+    {
+      "name": "<ação> (assento, bagagem, serviço…)",
+      "tool": "create_request",
+      "copyFrom": {
+        "collection": "Barramento B2B - Dev",
+        "folder": "(da resposta \"action\")",
+        "request": "(da resposta \"action\")"
+      },
+      "when": "action != cancelamento",
+      "consumes": [
+        "bearerToken",
+        "recordLocator"
+      ],
+      "produces": [],
+      "status": "A LEVANTAR",
+      "notes": "Só o cancelamento com reembolso foi levantado. Referências na mesma User Story do Flow 01 (Sprints / Sprint 121 / User Story 1345299…): \"Flow 07 - Reserva + Assento (add e remove)\", \"Flow 08 - Reserva + Serviço (add e remove)\", \"Flow 09 - Reserva + Bagagem (add e remove)\". Mande overrides {\"<ação> (assento, bagagem, serviço…)\": {\"copyFrom\": \"<id>\", ...}} depois de ler o passo equivalente nesses flows; confira também o body do Checkout v2 (refundType)."
+    },
+    {
+      "name": "Order Calculate v2",
+      "tool": "create_request",
+      "copyFrom": "fb766784-49a0-4447-a2d6-a6bfd63084e6",
+      "source": "POST Barramento B2B - Dev / Order.Management / v2 / Order Calculate v2",
+      "consumes": [
+        "urlOrderManagement",
+        "bearerToken",
+        "recordLocator"
+      ],
+      "produces": [],
+      "postResponseScript": "if (pm.response.code >= 500) {\n  // Nunca logar o corpo do 500: ele traz o token de sessão do backend\n  var corr = \"\";\n  try { corr = pm.response.json().correlation; } catch (e) {}\n  console.log(\"Calculate retornou \" + pm.response.code + \", correlation \" + corr);\n} else {\n  console.log(pm.response.text());\n}",
+      "status": "confirmado",
+      "notes": "POST {{urlOrderManagement}}/api/v2/order/{{recordLocator}}/calculate, sem body. Script = o do Flow 01 sem os pm.test (não grava nada)."
+    },
+    {
+      "name": "Checkout v2",
+      "tool": "create_request",
+      "copyFrom": "e2d4f2c6-383a-4bd3-a6b1-8333f1aa4688",
+      "source": "POST Barramento B2B - Dev / Order.Management / v2 / Checkout v2",
+      "body": "{\n  \"refundType\": \"Payment\",\n  \"notifyContacts\": \"None\"\n}",
+      "consumes": [
+        "urlOrderManagement",
+        "bearerToken",
+        "recordLocator"
+      ],
+      "produces": [],
+      "postResponseScript": "if (pm.response.code >= 500) {\n  // Nunca logar o corpo do 500: ele traz o token de sessão do backend\n  var corr = \"\";\n  try { corr = pm.response.json().correlation; } catch (e) {}\n  console.log(\"Checkout v2 retornou \" + pm.response.code + \", correlation \" + corr);\n} else {\n  console.log(pm.response.text());\n}",
+      "status": "confirmado",
+      "notes": "POST {{urlOrderManagement}}/api/v2/order/{{recordLocator}}/checkout. O body da origem é só opções comentadas (vazio no envio): a receita usa o do Flow 01, refundType \"Payment\" (reembolso no pagamento = cancelamento com reembolso) e notifyContacts \"None\". Outra ação: confira o refundType no flow de referência dela."
+    },
+    {
+      "name": "Order v3 (final)",
+      "tool": "create_request",
+      "copyFrom": "5d353efc-27b7-4bdd-8472-0aec0350cc1a",
+      "source": "GET Barramento B2B - Dev / Order.Management / v3 / Order/{recordLocator} v3",
+      "consumes": [
+        "urlOrderManagement",
+        "bearerToken",
+        "recordLocator"
+      ],
+      "produces": [],
+      "status": "confirmado",
+      "notes": "O mesmo GET Order/{recordLocator} v3, como último passo (estado final da reserva). Sem script: nada depois dele consome."
+    }
+  ],
+  "notes": "Reserva paga (01–07) + pós-venda, como o \"Sprints / Sprint 121 / User Story 1345299: [Sales.B2B.Api] Migrar os Métodos de Change e Cancel para V4 / Flow 01 - Fluxo Cancelamento com Reembolso\" (ação = Delete Journey v2). O Order v3 vem logo depois do Checkout v1 E como último passo. Pendente: o caminho do bookedJourneyKey no Order v3 e o GET Order v2 antes da ação (ver os dois passos); outras ações além do cancelamento."
+}

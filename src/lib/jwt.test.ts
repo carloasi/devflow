@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isSessionToken, withoutSessionTokens } from './jwt'
+import { isSessionToken, sameForSync, withoutSessionTokens } from './jwt'
 
 const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl'
 
@@ -37,5 +37,26 @@ describe('withoutSessionTokens', () => {
   it('returns the same object when there is nothing to remove', () => {
     const env = { id: 'e1', values: [{ key: 'baseUrl', value: 'https://x' }] }
     expect(withoutSessionTokens([env])[0]).toBe(env)
+  })
+})
+
+const syncEnv = (vals: Record<string, string>, isDirty = false) => ({
+  id: 'e1',
+  name: 'Dev',
+  isDirty,
+  values: Object.entries(vals).map(([key, value]) => ({ key, value, enabled: true, type: 'default' })),
+})
+
+describe('sameForSync', () => {
+  it('token de sessão novo não conta como mudança', () => {
+    expect(sameForSync(syncEnv({ url: 'a', bearerToken: '' }), syncEnv({ url: 'a', bearerToken: JWT }))).toBe(true)
+  })
+  it('qualquer outra mudança conta', () => {
+    expect(sameForSync(syncEnv({ url: 'a' }), syncEnv({ url: 'b' }))).toBe(false)
+    // JWT numa variável sem nome de token não é token de sessão: conta.
+    expect(sameForSync(syncEnv({ serviceKey: '' }), syncEnv({ serviceKey: JWT }))).toBe(false)
+  })
+  it('ignora o isDirty', () => {
+    expect(sameForSync(syncEnv({ url: 'a' }, true), syncEnv({ url: 'a' }, false))).toBe(true)
   })
 })

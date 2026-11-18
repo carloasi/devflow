@@ -7,6 +7,7 @@ import {
   matchEnvironments,
 } from '@/lib/environmentDiff';
 import type { NodeHashes } from '@/lib/syncBase';
+import { isSessionToken, withoutSessionTokens } from '@/lib/jwt';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Merge dos ENVIRONMENTS no push, variável a variável.
@@ -115,6 +116,24 @@ export interface EnvRebaseResult {
   incomingNames: string[];
   /** O que é seu e segue no push. */
   outgoingNames: string[];
+  /**
+   * Tokens de sessão ("environment › variável") que diferem do GitHub e
+   * ficam de fora: são de cada pessoa e sobem vazios (lib/jwt). Só pra Central
+   * dizer por que não aparecem em "Para enviar".
+   */
+  sessionTokenNames: string[];
+  /**
+   * O valor de cada lado, por nome ("environment › variável") — o que a
+   * Central mostra no diff de cada linha. Environment inteiro (só de um lado)
+   * vem como "chave = valor", uma variável por linha. Sem tokens de sessão.
+   */
+  values: Record<string, { local?: string; remote?: string }>;
+}
+
+/** O conteúdo de um environment como texto, pro diff de um environment inteiro. */
+function envAsText(env: Environment | undefined): string | undefined {
+  if (!env) return undefined;
+  return [...enabledByKey(env.values)].map(([key, v]) => `${key} = ${v.value ?? ''}`).join('\n');
 }
 
 export function rebaseEnvironments(
@@ -123,18 +142,39 @@ export function rebaseEnvironments(
   base: NodeHashes | null
 ): EnvRebaseResult {
   const localEnvs = local ?? [];
-  const remoteEnvs = remote ?? [];
-  const nodes = diffEnvironments(localEnvs, remoteEnvs);
-  if (nodes.length === 0) return { merged: localEnvs, incoming: 0, keptMine: 0, keptMineNames: [], incomingNames: [], outgoingNames: [] };
-  // O que é seu: o mesmo critério da revisão (envKeepMineIds), menos o que
-  // mudou dos dois lados (esse vai em keptMineNames).
-  const mineIds = envKeepMineIds(localEnvs, remoteEnvs, base);
+  // O lado do GitHub sem token de sessão: um arquivo de antes de eles subirem
+  // vazios ainda pode ter o token de alguém. Assim a variável que só existe
+  // lá chega aqui (vazia) em vez de ser ignorada inteira — e nunca com o
+  // token de outra pessoa.
+  const remoteEnvs = withoutSessionTokens(remote ?? []);
 
   // Os dois lados de cada environment, pelo id que o diff usa (o local).
   const pairs = new Map<string, EnvPair>();
   for (const pair of matchEnvironments(localEnvs, remoteEnvs)) {
     pairs.set(pair.local?.id ?? pair.remote!.id, pair);
   }
+
+  // Token de sessão não entra no merge: o push o sobe VAZIO (lib/jwt), então
+  // "aqui tem o token, no GitHub está vazio" é o estado normal depois de todo
+  // envio. Comparado, ele aparecia pra sempre em "Para enviar" (e como
+  // "mantive a sua" a cada push), por mais que se enviasse.
+  const sessionTokenNames: string[] = [];
+  const nodes = diffEnvironments(localEnvs, remoteEnvs).filter(node => {
+    if (node.kind !== 'variable') return true;
+    const pair = pairs.get(node.rootId);
+    const key = node.path[node.path.length - 1];
+    const localValue = pair?.local ? enabledByKey(pair.local.values).get(key)?.value : undefined;
+    const remoteValue = pair?.remote ? enabledByKey(pair.remote.values).get(key)?.value : undefined;
+    if (!isSessionToken(key, localValue) && !isSessionToken(key, remoteValue)) return true;
+    sessionTokenNames.push(node.path.join(' › '));
+    return false;
+  });
+  if (nodes.length === 0) {
+    return { merged: localEnvs, incoming: 0, keptMine: 0, keptMineNames: [], incomingNames: [], outgoingNames: [], sessionTokenNames, values: {} };
+  }
+  // O que é seu: o mesmo critério da revisão (envKeepMineIds), menos o que
+  // mudou dos dois lados (esse vai em keptMineNames).
+  const mineIds = envKeepMineIds(localEnvs, remoteEnvs, base);
 
   // Alguma variável deste environment mudou aqui desde a base?
   const changedHere = (env: Environment, baseId: string) =>
@@ -217,8 +257,26 @@ export function rebaseEnvironments(
   const outgoingNames = nodes
     .filter(n => !accepted.has(n.id) && (mineIds.has(n.id) || n.change === 'removed') && !keptSet.has(label(n)))
     .map(label);
+  // Os dois lados de cada linha listada, pro diff da Central. Os tokens de
+  // sessão já saíram (dos dois lados) lá em cima.
+  const values: EnvRebaseResult['values'] = {};
+  for (const node of nodes) {
+    const pair = pairs.get(node.rootId);
+    if (node.kind === 'variable') {
+      const key = node.path[node.path.length - 1];
+      values[label(node)] = {
+        local: pair?.local ? enabledByKey(withoutSessionTokens([pair.local])[0].values).get(key)?.value : undefined,
+        remote: pair?.remote ? enabledByKey(pair.remote.values).get(key)?.value : undefined,
+      };
+    } else {
+      values[label(node)] = {
+        local: envAsText(pair?.local ? withoutSessionTokens([pair.local])[0] : undefined),
+        remote: envAsText(pair?.remote),
+      };
+    }
+  }
   return {
     merged: applyEnvironmentChanges(localEnvs, remoteEnvs, accepted),
-    incoming, keptMine, keptMineNames, incomingNames, outgoingNames,
+    incoming, keptMine, keptMineNames, incomingNames, outgoingNames, sessionTokenNames, values,
   };
 }

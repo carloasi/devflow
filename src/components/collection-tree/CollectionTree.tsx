@@ -99,8 +99,8 @@ interface Props {
   onRunItem?: (item: CollectionItem) => void
   onLoadTestItem?: (item: CollectionItem) => void
   onPushCollection?: (item: CollectionItem) => void
-  onPullCollection?: (item: CollectionItem) => void
-  onCheckUpdates?: (item: CollectionItem) => void
+  // Abre a Central de Sincronização filtrada na collection do item.
+  onOpenSync?: (item: CollectionItem) => void
   onAddExampleItem?: (item: CollectionItem) => void
   // Modo "escolher pasta" (ver TreeNode.tsx) — usado pelo fluxo de
   // Tab Group -> Flow.
@@ -211,8 +211,7 @@ export function CollectionTree({
   onRunItem,
   onLoadTestItem,
   onPushCollection,
-  onPullCollection,
-  onCheckUpdates,
+  onOpenSync,
   onAddExampleItem,
   folderPickMode,
   onPickFolder,
@@ -690,8 +689,7 @@ export function CollectionTree({
     run: onRunItem ? (item: CollectionItem) => onRunItem(item) : undefined,
     loadTest: onLoadTestItem ? (item: CollectionItem) => onLoadTestItem(item) : undefined,
     pushCollection: onPushCollection ? (item: CollectionItem) => onPushCollection(item) : undefined,
-    pullCollection: onPullCollection ? (item: CollectionItem) => onPullCollection(item) : undefined,
-    checkUpdates: onCheckUpdates ? (item: CollectionItem) => onCheckUpdates(item) : undefined,
+    openSync: onOpenSync ? (item: CollectionItem) => onOpenSync(item) : undefined,
     addExample: onAddExampleItem
       ? (item: CollectionItem) => onAddExampleItem(actions.createExample(item))
       : undefined,

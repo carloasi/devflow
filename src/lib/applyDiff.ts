@@ -132,12 +132,18 @@ function reorderLike(
     if (pair.local && pair.remote) positionByLocalId.set(pair.local.id, pair.remoteIndex ?? 0);
   }
 
-  // Estável: quem não tem posição remota guarda a sua, e o sort só move quem
-  // tem referência dos dois lados.
-  return [...merged].sort((a, b) => {
-    const pa = positionByLocalId.get(a.id);
-    const pb = positionByLocalId.get(b.id);
-    if (pa === undefined || pb === undefined) return 0;
-    return pa - pb;
+  // Por "lugares": quem não tem posição remota (só existe aqui) fica no
+  // mesmo índice, e só os lugares de quem tem posição são reordenados entre
+  // si. Antes era um sort com comparador que devolvia 0 pra quem não tinha
+  // posição — "empatado" com todo mundo não é uma ordem, e com um item só
+  // daqui no meio (a, x, b) a ordem do GitHub (b, a) simplesmente não entrava.
+  const slots = merged.map((item, i) => (positionByLocalId.has(item.id) ? i : -1)).filter(i => i >= 0);
+  const sorted = slots
+    .map(i => merged[i])
+    .sort((a, b) => positionByLocalId.get(a.id)! - positionByLocalId.get(b.id)!);
+  const out = [...merged];
+  slots.forEach((slot, k) => {
+    out[slot] = sorted[k];
   });
+  return out;
 }

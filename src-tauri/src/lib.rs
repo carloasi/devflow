@@ -18,7 +18,7 @@ mod load_test;
 use load_test::{start_load_test, stop_load_test, LoadTestRegistry};
 
 mod mcp_server;
-use mcp_server::{start_mcp_server, stop_mcp_server, mcp_respond, mcp_heartbeat};
+use mcp_server::{start_mcp_server, stop_mcp_server, mcp_respond, mcp_heartbeat, mcp_end_session};
 
 mod claude_cli;
 use claude_cli::{
@@ -905,6 +905,7 @@ pub fn run() {
             stop_mcp_server,
             mcp_respond,
             mcp_heartbeat,
+            mcp_end_session,
             claude_available,
             claude_send,
             claude_cancel,
@@ -1075,19 +1076,31 @@ pub(crate) async fn perform_http_request(
     body: Option<String>,
     headers_input: Option<HashMap<String, String>>,
 ) -> Result<HttpResponse, String> {
-    let start_time = Instant::now();
-
-    let verify_ssl = state.0.load(Ordering::Relaxed);
-    // 0 = sem timeout (configurável em Settings > Network) — mantém o
-    // comportamento antigo de esperar indefinidamente se o usuário zerar.
-    let timeout_ms = timeout_state.0.load(Ordering::Relaxed);
-
     // Clona só o Arc: o pote em si é o mesmo entre as requests, que é o
     // ponto. O lock é solto antes do await — guard de Mutex não é Send.
     let jar = {
         let guard = cookies.0.lock().map_err(|e| e.to_string())?;
         guard.clone()
     };
+    perform_http_request_with_jar(state, timeout_state, jar, method, url, body, headers_input).await
+}
+
+/// O envio em si, com o pote de cookies recebido.
+pub(crate) async fn perform_http_request_with_jar(
+    state: tauri::State<'_, SslVerifyState>,
+    timeout_state: tauri::State<'_, RequestTimeoutState>,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
+    method: String,
+    url: String,
+    body: Option<String>,
+    headers_input: Option<HashMap<String, String>>,
+) -> Result<HttpResponse, String> {
+    let start_time = Instant::now();
+
+    let verify_ssl = state.0.load(Ordering::Relaxed);
+    // 0 = sem timeout (configurável em Settings > Network) — mantém o
+    // comportamento antigo de esperar indefinidamente se o usuário zerar.
+    let timeout_ms = timeout_state.0.load(Ordering::Relaxed);
 
     let mut client_builder = reqwest::Client::builder()
         .danger_accept_invalid_certs(!verify_ssl)

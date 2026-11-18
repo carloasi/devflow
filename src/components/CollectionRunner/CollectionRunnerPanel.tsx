@@ -1,12 +1,13 @@
 'use client'
 
+import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { buildJUnitXml } from '@/lib/junitReport'
 import { buildRunReport } from '@/lib/runReport'
 import { acceptTestExpectation } from '@/lib/acceptTestExpectation'
 import { toast } from 'sonner'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Pause, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer, RotateCw, BadgeCheck, ExternalLink, Sparkles, WandSparkles, Undo2, Pencil } from 'lucide-react'
+import { Play, Pause, Square, X, CheckCircle2, XCircle, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer, RotateCw, BadgeCheck, ExternalLink, Sparkles, WandSparkles, Undo2, Pencil } from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CollectionItem } from '@/app/types/CollectionItem'
 import { useEnvironment } from '@/components/EnvironmentContext'
@@ -1283,7 +1284,7 @@ export function CollectionRunnerPanel({
                             <div className="w-3.5 h-3.5 rounded-full border border-pm-border shrink-0" />
                           )}
                           {entry.state === 'running' && (
-                            <Loader2 size={14} className="animate-spin text-[#097bed] shrink-0" />
+                            <DevFlowSpinner size={14} />
                           )}
                           {entry.state === 'success' && !failed && (
                             <CheckCircle2 size={14} className="text-[#4ff09d] shrink-0" />
@@ -1620,7 +1621,7 @@ export function CollectionRunnerPanel({
                                         </button>
                                       )}
                                       {stepRunningId === entry.id && (
-                                        <Loader2 size={12} className="animate-spin text-[#097bed]" />
+                                        <DevFlowSpinner size={12} />
                                       )}
                                     </div>
                                   )}

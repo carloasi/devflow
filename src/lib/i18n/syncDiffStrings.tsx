@@ -56,6 +56,13 @@ const en = {
   undo: 'Undo',
   undoDone: 'Back to how it was before the pull.',
   undoExpired: 'Too late to undo — it only lasts 10 minutes.',
+  tabsReloaded: (n: number, name: string) =>
+    n === 1 ? `"${name}" was open and got the merged version` : `${n} open tabs got the merged version`,
+  tabsDirtyChanged: (n: number, name: string) =>
+    n === 1
+      ? `"${name}" changed in the merge, but the tab has unsaved edits — it still shows your version.`
+      : `${n} open tabs changed in the merge, but have unsaved edits — they still show your version.`,
+  tabsReload: 'Reload (discard edits)',
   undoLosesEdits: 'You edited things after the pull. Undoing goes back to before the pull and discards those edits too.',
   undoAnyway: 'Undo anyway',
   historyButton: 'History',
@@ -177,6 +184,160 @@ const en = {
   rcAlreadyHere: 'You already have these changes here — nothing to pull for them.',
   rcEnvironments: 'Environment variables',
   rcHere: 'Here',
+  // Central de Sincronização
+  scTitle: 'Sync',
+  scReceive: 'Receive',
+  scSend: 'Send',
+  scConflict: 'Conflict',
+  scTabIncoming: 'Incoming',
+  scTabOutgoing: 'To send',
+  scTabConflicts: 'Conflicts',
+  scIncomingHint: 'Changed on GitHub only — comes in on its own.',
+  scOutgoingHint: 'Changed here only — goes up with your next send.',
+  scConflictsHint: 'Changed here and on GitHub — needs your decision.',
+  scEmptyIncoming: 'Nothing new on GitHub.',
+  scEmptyOutgoing: 'Nothing waiting to be sent.',
+  scEmptyConflicts: 'No conflicts.',
+  scLoading: 'Checking GitHub…',
+  loadingApp: 'Loading DevFlow…',
+  loadingAppSub: 'Opening your workspace, tabs and environments.',
+  switchingWorkspace: (name: string) => `Opening the workspace "${name}"…`,
+  switchingWorkspaceSub: 'Saving the open tabs and loading the collections and environments.',
+  sendingRequest: 'Sending request…',
+  scCancelling: 'Cancelling…',
+  scCancelTitle: 'Stops at the next safe point — whatever already finished stays, and nothing is left half-applied',
+  scLoadCancelled: 'Reading GitHub was cancelled.',
+  scTryAgain: 'Try again',
+  scCancelledResult: 'Cancelled — what had not been applied yet was left as it was.',
+  scLoadingSub: 'Reading and decrypting the workspace files — you can keep working in the app meanwhile.',
+  scRefreshing: 'Updating from GitHub…',
+  mvColumnsResize: 'Drag to resize the columns — double-click to split them evenly',
+  scItemsResize: 'Drag to resize the list — double-click to restore',
+  scReadFailed: 'Could not read GitHub. Try again.',
+  scRefresh: 'Refresh',
+  scNoWorkspace: 'Open a workspace with GitHub sync set up to see what to sync.',
+  scKeptMine: 'changed on both sides — yours is kept',
+  scFilteredBy: (label: string) => `Only "${label}"`,
+  scShowAll: 'Show all',
+  scLastChange: (author: string, when: string) => `last change by ${author}${when ? ` · ${when}` : ''}`,
+  scReceiveOnly: 'Receive only',
+  scSendOnly: 'Send only',
+  scSyncAll: 'Sync all',
+  scResolve: 'Resolve conflicts',
+  scRunning: 'Syncing…',
+  scSyncAllHint: 'Sync all receives, merges and sends — it only stops at a real conflict.',
+  scResolveHint: 'Opens the review with only the conflicts: pick Mine, GitHub or Merge for each.',
+  scWholeWorkspace: 'The buttons act on the whole workspace.',
+  scSendOnlyScoped: (label: string) => `Send only "${label}"`,
+  scScopedHint: 'Send acts only on this item; Receive and Sync all act on the whole workspace.',
+  scMarkers: 'Markers',
+  scBehindOnly: (n: number) =>
+    `${n} file(s) changed on GitHub but already match what you have here — Receive marks them as read.`,
+  scResultDismiss: 'Dismiss',
+  scAllSynced: 'Everything is in sync with GitHub',
+  scContent: 'Content',
+  scInsideRequests: (n: number) => `Requests inside (${n})`,
+  scShowFullRequest: 'Show the full request (with the payload)',
+  scHideFullRequest: 'Hide the full request',
+  scOpenInTab: 'Open',
+  scDiscard: 'Discard',
+  scDiscardAll: 'Discard all',
+  scDiscardCancel: 'Cancel',
+  scRemoveHere: 'Delete here',
+  scDeleteDialogTitle: (label: string) => `Delete "${label}" from this computer?`,
+  scDiscardDialogTitle: (label: string) => `Discard your changes to "${label}"?`,
+  scDiscardAllDialogTitle: (label: string, createdHere: boolean) =>
+    createdHere ? `Delete the collection "${label}" from this computer?` : `Discard every change to "${label}"?`,
+  scDiscardEnvDialogTitle: (label: string) => `Discard the change to "${label}"?`,
+  scDeleteNotJustCommit:
+    'This does not just leave it out of the push (the commit): the item is deleted from your collection on this computer. It is not on GitHub, so there is no other copy — only "Undo", right after.',
+  scDiscardNotJustCommit:
+    'This does not just leave it out of the push (the commit): the item itself changes on this computer, and your changes to it are lost. "Undo" is available right after.',
+  scSendWithoutHint: 'To push without it, use "Push" only on the items you want to send.',
+  scDiscardTitle: 'Make it like the GitHub version — nothing is sent',
+  // `inside`: quantas requests há dentro da pasta (na versão que será
+  // apagada, restaurada ou trocada). Cada caso diz o que de fato acontece —
+  // pasta nova é APAGADA com tudo dentro, não "volta".
+  scDiscardConfirm: (change: string, label: string, folder: boolean, inside = 0) =>
+    (change === 'new'
+      ? folder
+        ? `"${label}" was created here and is not on GitHub — it will be deleted here${inside ? `, with the ${inside} request(s) inside it` : ''}.`
+        : `"${label}" was created here and is not on GitHub — it will be deleted here.`
+      : change === 'deleted'
+        ? folder
+          ? `"${label}" comes back from GitHub${inside ? `, with the ${inside} request(s) it has there` : ''}.`
+          : `"${label}" comes back, with the GitHub content.`
+        : change === 'moved' || change === 'reordered'
+          ? `"${label}" goes back to where it is on GitHub, with the GitHub content${folder ? ' (and what it has inside there)' : ''}.`
+          : folder
+            ? `Your changes inside "${label}" will be lost — the folder goes back to the GitHub version.`
+            : `Your changes to "${label}" will be lost — it goes back to the GitHub version.`) +
+    ' Nothing is sent.',
+  scDiscardAllConfirm: (label: string, createdHere = false, inside = 0) =>
+    createdHere
+      ? `"${label}" was created here and is not on GitHub — the whole collection will be deleted here${inside ? `, with the ${inside} request(s) inside it` : ''}. Nothing is sent.`
+      : `All your unsent changes in "${label}" will be lost — the collection goes back to the GitHub version. Nothing is sent.`,
+  scDiscardNeedsParent: (label: string, parent: string) =>
+    `"${label}" was inside "${parent}", which was also deleted here — the folder comes back with only this item.`,
+  scDiscardEnvConfirm: (label: string) => `"${label}" goes back to the GitHub value. Nothing is sent.`,
+  scDiscarded: (label: string) => `"${label}" now matches GitHub. Nothing was sent.`,
+  scDiscardNothing: (label: string) => `"${label}" already matches GitHub — nothing to discard.`,
+  scDiscardStale: 'Refresh Sync and try again.',
+  scMovedFromTo: (from: string, to: string) => `Moved: ${from} → ${to}`,
+  scBadgeHint: (change: string, tab: string): string => {
+    if (change === 'conflict' || tab === 'conflicts') return 'Changed here and on GitHub — needs your decision.'
+    const out = tab === 'outgoing'
+    const hints: Record<string, [string, string]> = {
+      new: ['Created here — not on GitHub yet.', 'Created on GitHub — comes in here.'],
+      changed: ['Changed here since the last sync.', 'Changed on GitHub since the last sync.'],
+      deleted: ['Deleted here — it will be deleted on GitHub when you send.', 'Deleted on GitHub — it will be deleted here.'],
+      moved: ['Moved here — it will move on GitHub when you send.', 'Moved on GitHub — it will move here.'],
+      reordered: ['Reordered here.', 'Reordered on GitHub.'],
+    }
+    return (hints[change] ?? ['', ''])[out ? 0 : 1]
+  },
+  scCountNew: (n: number) => `${n} new`,
+  scCountChanged: (n: number) => `${n} changed`,
+  scCountDeleted: (n: number) => `${n} deleted`,
+  scCountMoved: (n: number) => `${n} moved`,
+  scCountConflicts: (n: number) => `${n} conflict(s)`,
+  scCountEnv: (n: number) => `${n} environment variable(s)`,
+  scCountMarkers: (n: number) => `${n} marker(s)`,
+  scIndicatorSynced: 'In sync with GitHub — click to open Sync',
+  scSyncedItem: (label: string) => `"${label}" is in sync with GitHub`,
+  scCheckedAt: (time: string) => `Checked at ${time}`,
+  scSessionTokensNote: (n: number) =>
+    `${n} session token(s) stay on this machine only — they are never sent to GitHub.`,
+  scSentSummary: (items: number, envs: number) =>
+    `Sent to GitHub: ${[items ? `${items} collection item(s)` : '', envs ? `${envs} environment variable(s)` : ''].filter(Boolean).join(' and ')}.`,
+  scSentItem: (label: string) => `"${label}" sent to GitHub.`,
+  scOpen: 'Open Sync',
+  scOpenItem: 'Sync…',
+  scOpenItemTitle: 'Open Sync showing only this collection',
+  scSendOnlyFolder: 'Send this folder…',
+  scSendOnlyRequest: 'Send this request…',
+  scSendThis: 'Send',
+  scSendThisTitle: 'Send only this item',
+  scViewInSync: 'View in Sync',
+  scEnvOpenTitle: 'Open Sync showing only this environment',
+  scWorkspaceSyncTitle: 'Open Sync for this workspace',
+  // Configurações → Avançado
+  scDangerTitle: 'Danger zone',
+  scReplaceAllTitle: 'Download all and replace',
+  scReplaceAllBody:
+    'Downloads every workspace in the repository and REPLACES the local copies — no review, no merge. Workspaces with unsent changes are skipped. Use Sync for the normal flow.',
+  scReplaceAllButton: 'Download all and replace…',
+  scReplaceAllConfirm: 'Replace all local workspaces with GitHub? This cannot be undone.',
+  scReplaceAllConfirmButton: 'Replace all',
+  scCancel: 'Cancel',
+  scAdvanced: 'Advanced',
+  scReplaceAllUnavailable: 'Set up GitHub sync first.',
+  scIndicatorTitle: (incoming: number | null, outgoing: number, conflicts: number | null) =>
+    [
+      incoming === null ? null : `${incoming} file(s) to receive`,
+      `${outgoing} to send`,
+      conflicts === null ? null : `${conflicts} conflict(s)`,
+    ].filter(Boolean).join(' · ') + ' — open Sync',
   rcPreview: 'Preview',
   rcHide: 'Hide',
   rcNoPreview: 'Open the review to see what changed in this file.',
@@ -190,6 +351,9 @@ const en = {
   mdNoFields: 'Nothing to compare line by line: the item was created, deleted or moved.',
   mdEnvNote: 'Environment variables are listed by name only — their values are often tokens.',
   mdItems: (n: number) => (n === 1 ? '1 item' : `${n} items`),
+  scBackToList: 'Back to the list',
+  scOpenInWindow: 'Open in a separate window',
+  scDiffViewTitle: 'Show the differences side by side, here in this window',
   rcBadge: { new: 'new', deleted: 'deleted', changed: 'changed', moved: 'moved', reordered: 'reordered', conflict: 'conflict' } as Record<
     'new' | 'deleted' | 'changed' | 'moved' | 'reordered' | 'conflict',
     string
@@ -346,6 +510,13 @@ const ptBR: SyncDiffStrings = {
   undo: 'Desfazer',
   undoDone: 'Voltou ao estado de antes do pull.',
   undoExpired: 'Não dá mais para desfazer — vale por 10 minutos.',
+  tabsReloaded: (n: number, name: string) =>
+    n === 1 ? `"${name}" estava aberta e foi atualizada com a versão do merge` : `${n} abas abertas foram atualizadas com a versão do merge`,
+  tabsDirtyChanged: (n: number, name: string) =>
+    n === 1
+      ? `"${name}" mudou no merge, mas a aba tem edições não salvas — ela continua com a sua versão.`
+      : `${n} abas abertas mudaram no merge, mas têm edições não salvas — continuam com a sua versão.`,
+  tabsReload: 'Recarregar (descarta edições)',
   undoLosesEdits: 'Você editou coisas depois do pull. Desfazer volta ao estado de antes dele e descarta essas edições também.',
   undoAnyway: 'Desfazer mesmo assim',
   historyButton: 'Histórico',
@@ -463,6 +634,155 @@ const ptBR: SyncDiffStrings = {
   rcAlreadyHere: 'Você já tem essas mudanças aqui — não há nada delas para puxar.',
   rcEnvironments: 'Variáveis de environment',
   rcHere: 'Aqui',
+  scTitle: 'Sincronização',
+  scReceive: 'Receber',
+  scSend: 'Enviar',
+  scConflict: 'Conflito',
+  scTabIncoming: 'Recebidos',
+  scTabOutgoing: 'Para enviar',
+  scTabConflicts: 'Conflitos',
+  scIncomingHint: 'Mudou só no GitHub — entra sozinho.',
+  scOutgoingHint: 'Mudou só aqui — sobe no próximo envio.',
+  scConflictsHint: 'Mudou aqui e no GitHub — precisa da sua decisão.',
+  scEmptyIncoming: 'Nada novo no GitHub.',
+  scEmptyOutgoing: 'Nada esperando para enviar.',
+  scEmptyConflicts: 'Nenhum conflito.',
+  scLoading: 'Verificando o GitHub…',
+  loadingApp: 'Carregando o DevFlow…',
+  loadingAppSub: 'Abrindo o workspace, as abas e os environments.',
+  switchingWorkspace: (name: string) => `Abrindo o workspace "${name}"…`,
+  switchingWorkspaceSub: 'Salvando as abas abertas e carregando as collections e os environments.',
+  sendingRequest: 'Enviando a request…',
+  scCancelling: 'Cancelando…',
+  scCancelTitle: 'Para no próximo ponto seguro — o que já terminou fica, e nada fica aplicado pela metade',
+  scLoadCancelled: 'A leitura do GitHub foi cancelada.',
+  scTryAgain: 'Tentar de novo',
+  scCancelledResult: 'Cancelado — o que ainda não tinha sido aplicado ficou como estava.',
+  scLoadingSub: 'Lendo e descriptografando os arquivos do workspace — dá para continuar usando o app enquanto isso.',
+  scRefreshing: 'Atualizando a partir do GitHub…',
+  mvColumnsResize: 'Arraste para mudar a largura das colunas — clique duas vezes para dividir ao meio',
+  scItemsResize: 'Arraste para mudar a largura da lista — clique duas vezes para voltar ao padrão',
+  scReadFailed: 'Não foi possível ler o GitHub. Tente de novo.',
+  scRefresh: 'Atualizar',
+  scNoWorkspace: 'Abra um workspace com a sincronização do GitHub configurada para ver o que sincronizar.',
+  scKeptMine: 'mudou dos dois lados — fica a sua',
+  scFilteredBy: (label: string) => `Só "${label}"`,
+  scShowAll: 'Mostrar tudo',
+  scLastChange: (author: string, when: string) => `última mudança de ${author}${when ? ` · ${when}` : ''}`,
+  scReceiveOnly: 'Só receber',
+  scSendOnly: 'Só enviar',
+  scSyncAll: 'Sincronizar tudo',
+  scResolve: 'Resolver conflitos',
+  scRunning: 'Sincronizando…',
+  scSyncAllHint: 'Sincronizar tudo recebe, mescla e envia — só para em conflito de verdade.',
+  scResolveHint: 'Abre a revisão só com os conflitos: escolha Minha, GitHub ou Merge em cada um.',
+  scWholeWorkspace: 'Os botões valem para o workspace inteiro.',
+  scSendOnlyScoped: (label: string) => `Enviar só "${label}"`,
+  scScopedHint: 'Enviar vale só para este item; Receber e Sincronizar tudo valem para o workspace inteiro.',
+  scMarkers: 'Marcadores',
+  scBehindOnly: (n: number) =>
+    `${n} arquivo(s) mudaram no GitHub, mas já estão iguais aos daqui — Receber os marca como lidos.`,
+  scResultDismiss: 'Fechar',
+  scAllSynced: 'Tudo sincronizado com o GitHub',
+  scContent: 'Conteúdo',
+  scInsideRequests: (n: number) => `Requests dentro (${n})`,
+  scShowFullRequest: 'Ver a request completa (com o payload)',
+  scHideFullRequest: 'Esconder a request completa',
+  scOpenInTab: 'Abrir',
+  scDiscard: 'Descartar',
+  scDiscardAll: 'Descartar tudo',
+  scDiscardCancel: 'Cancelar',
+  scRemoveHere: 'Apagar daqui',
+  scDeleteDialogTitle: (label: string) => `Apagar "${label}" deste computador?`,
+  scDiscardDialogTitle: (label: string) => `Descartar suas mudanças em "${label}"?`,
+  scDiscardAllDialogTitle: (label: string, createdHere: boolean) =>
+    createdHere ? `Apagar a collection "${label}" deste computador?` : `Descartar todas as mudanças de "${label}"?`,
+  scDiscardEnvDialogTitle: (label: string) => `Descartar a mudança em "${label}"?`,
+  scDeleteNotJustCommit:
+    'Isto não tira o item só do envio (do commit): ele é apagado da sua collection neste computador. Ele não existe no GitHub, então não há outra cópia — só o "Desfazer", logo em seguida.',
+  scDiscardNotJustCommit:
+    'Isto não tira o item só do envio (do commit): o próprio item muda neste computador, e as suas mudanças nele são perdidas. O "Desfazer" fica disponível logo em seguida.',
+  scSendWithoutHint: 'Para enviar sem ele, use o "Enviar" só nos itens que quiser mandar.',
+  scDiscardTitle: 'Volta à versão do GitHub — nada é enviado',
+  scDiscardConfirm: (change: string, label: string, folder: boolean, inside = 0) =>
+    (change === 'new'
+      ? folder
+        ? `"${label}" foi criada aqui e não existe no GitHub — será apagada daqui${inside ? `, com as ${inside} request(s) que tem dentro` : ''}.`
+        : `"${label}" foi criado aqui e não existe no GitHub — será apagado daqui.`
+      : change === 'deleted'
+        ? folder
+          ? `"${label}" volta do GitHub${inside ? `, com as ${inside} request(s) que tem lá` : ''}.`
+          : `"${label}" volta, com o conteúdo do GitHub.`
+        : change === 'moved' || change === 'reordered'
+          ? `"${label}" volta para onde está no GitHub, com o conteúdo de lá${folder ? ' (e o que tem dentro lá)' : ''}.`
+          : folder
+            ? `Suas mudanças dentro de "${label}" serão perdidas — a pasta volta à versão do GitHub.`
+            : `Suas mudanças em "${label}" serão perdidas — ele volta à versão do GitHub.`) +
+    ' Nada é enviado.',
+  scDiscardAllConfirm: (label: string, createdHere = false, inside = 0) =>
+    createdHere
+      ? `"${label}" foi criada aqui e não existe no GitHub — a collection inteira será apagada daqui${inside ? `, com as ${inside} request(s) que tem dentro` : ''}. Nada é enviado.`
+      : `Todas as mudanças não enviadas de "${label}" serão perdidas — a collection volta à versão do GitHub. Nada é enviado.`,
+  scDiscardNeedsParent: (label: string, parent: string) =>
+    `"${label}" estava dentro de "${parent}", que também foi apagada aqui — a pasta volta só com este item.`,
+  scDiscardEnvConfirm: (label: string) => `"${label}" volta ao valor do GitHub. Nada é enviado.`,
+  scDiscarded: (label: string) => `"${label}" voltou à versão do GitHub. Nada foi enviado.`,
+  scDiscardNothing: (label: string) => `"${label}" já está igual ao GitHub — nada a descartar.`,
+  scDiscardStale: 'Atualize a Sincronização e tente de novo.',
+  scMovedFromTo: (from: string, to: string) => `Movido: ${from} → ${to}`,
+  scBadgeHint: (change: string, tab: string): string => {
+    if (change === 'conflict' || tab === 'conflicts') return 'Mudou aqui e no GitHub — precisa da sua decisão.'
+    const out = tab === 'outgoing'
+    const hints: Record<string, [string, string]> = {
+      new: ['Criado aqui — ainda não existe no GitHub.', 'Criado no GitHub — vai entrar aqui.'],
+      changed: ['Alterado aqui desde a última sincronização.', 'Alterado no GitHub desde a última sincronização.'],
+      deleted: ['Apagado aqui — será apagado no GitHub ao enviar.', 'Apagado no GitHub — será apagado aqui.'],
+      moved: ['Movido aqui — vai mudar de lugar no GitHub ao enviar.', 'Movido no GitHub — vai mudar de lugar aqui.'],
+      reordered: ['Reordenado aqui.', 'Reordenado no GitHub.'],
+    }
+    return (hints[change] ?? ['', ''])[out ? 0 : 1]
+  },
+  scCountNew: (n: number) => `${n} nova(s)`,
+  scCountChanged: (n: number) => `${n} alterada(s)`,
+  scCountDeleted: (n: number) => `${n} apagada(s)`,
+  scCountMoved: (n: number) => `${n} movida(s)`,
+  scCountConflicts: (n: number) => `${n} conflito(s)`,
+  scCountEnv: (n: number) => `${n} variável(is) de environment`,
+  scCountMarkers: (n: number) => `${n} marcador(es)`,
+  scIndicatorSynced: 'Sincronizado com o GitHub — clique para abrir a Sincronização',
+  scSyncedItem: (label: string) => `"${label}" está sincronizado com o GitHub`,
+  scCheckedAt: (time: string) => `Verificado às ${time}`,
+  scSessionTokensNote: (n: number) =>
+    `${n} token(s) de sessão ficam só nesta máquina — nunca sobem para o GitHub.`,
+  scSentSummary: (items: number, envs: number) =>
+    `Enviado ao GitHub: ${[items ? `${items} item(ns) de collection` : '', envs ? `${envs} variável(is) de environment` : ''].filter(Boolean).join(' e ')}.`,
+  scSentItem: (label: string) => `"${label}" enviado ao GitHub.`,
+  scOpen: 'Abrir Sincronização',
+  scOpenItem: 'Sincronização…',
+  scOpenItemTitle: 'Abrir a Sincronização só com esta collection',
+  scSendOnlyFolder: 'Enviar esta pasta…',
+  scSendOnlyRequest: 'Enviar esta request…',
+  scSendThis: 'Enviar',
+  scSendThisTitle: 'Enviar só este item',
+  scViewInSync: 'Ver na Sincronização',
+  scEnvOpenTitle: 'Abrir a Sincronização só com este environment',
+  scWorkspaceSyncTitle: 'Abrir a Sincronização deste workspace',
+  scDangerTitle: 'Zona de perigo',
+  scReplaceAllTitle: 'Baixar tudo e substituir',
+  scReplaceAllBody:
+    'Baixa todos os workspaces do repositório e SUBSTITUI as cópias daqui — sem revisão, sem mescla. Workspaces com alteração não enviada são pulados. Para o dia a dia, use a Sincronização.',
+  scReplaceAllButton: 'Baixar tudo e substituir…',
+  scReplaceAllConfirm: 'Substituir todos os workspaces daqui pelos do GitHub? Não dá para desfazer.',
+  scReplaceAllConfirmButton: 'Substituir tudo',
+  scCancel: 'Cancelar',
+  scAdvanced: 'Avançado',
+  scReplaceAllUnavailable: 'Configure a sincronização do GitHub antes.',
+  scIndicatorTitle: (incoming: number | null, outgoing: number, conflicts: number | null) =>
+    [
+      incoming === null ? null : `${incoming} arquivo(s) para receber`,
+      `${outgoing} para enviar`,
+      conflicts === null ? null : `${conflicts} conflito(s)`,
+    ].filter(Boolean).join(' · ') + ' — abrir Sincronização',
   rcPreview: 'Prévia',
   rcHide: 'Ocultar',
   rcNoPreview: 'Abra a revisão para ver o que mudou neste arquivo.',
@@ -476,6 +796,9 @@ const ptBR: SyncDiffStrings = {
   mdNoFields: 'Nada para comparar linha a linha: o item foi criado, apagado ou movido.',
   mdEnvNote: 'Variáveis de environment aparecem só pelo nome — o valor costuma ser token.',
   mdItems: (n: number) => (n === 1 ? '1 item' : `${n} itens`),
+  scBackToList: 'Voltar à lista',
+  scOpenInWindow: 'Abrir em outra janela',
+  scDiffViewTitle: 'Ver as diferenças lado a lado, aqui nesta janela',
   rcBadge: { new: 'novo', deleted: 'apagado', changed: 'alterado', moved: 'movido', reordered: 'reordenado', conflict: 'conflito' },
   authMaskedResult: 'Valores sensíveis ocultos. Clique em Mostrar para ver e editar o resultado.',
   escapeArmed: 'Aperte Esc de novo para fechar e descartar suas escolhas e merges.',

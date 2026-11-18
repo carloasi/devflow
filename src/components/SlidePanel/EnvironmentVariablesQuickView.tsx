@@ -5,7 +5,6 @@ import { findAmbiguousKeys } from '@/lib/envMap'
 import {
   Plus,
   Download,
-  DownloadCloud,
   Lock,
   Search,
   Trash2,
@@ -13,7 +12,7 @@ import {
   Copy,
   Check,
   RotateCcw,
-  UploadCloud,
+  ArrowDownUp,
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
@@ -22,6 +21,7 @@ import {
   Minus,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 
 import { Environment, EnvironmentValue } from '@/app/types/Environment'
 import { useEnvironment } from '../EnvironmentContext'
@@ -209,15 +209,15 @@ function TableCheckbox({
 interface QuickViewProps {
   activeEnv: Environment
   onClose: () => void
-  onSave?: (env: Environment) => Promise<void> | void
-  /** Abre a comparação com o GitHub. Ausente = painel sem sync. */
-  onPull?: () => void
+  /** Abre a Central de Sincronização filtrada neste environment. Ausente = painel sem sync. */
+  onOpenSync?: () => void
   /** Path do workspace selecionado agora — "Copy to environment..." usa isso
    *  como workspace de DESTINO por padrão, antes de deixar escolher outro. */
   currentWorkspace: string
 }
 
-export function EnvironmentVariablesQuickView({ activeEnv, onClose, onSave, onPull, currentWorkspace }: QuickViewProps) {
+export function EnvironmentVariablesQuickView({ activeEnv, onClose, onOpenSync, currentWorkspace }: QuickViewProps) {
+  const syncText = useSyncDiffStrings()
   const {
   environments,
   updateEnvironment,
@@ -279,7 +279,6 @@ export function EnvironmentVariablesQuickView({ activeEnv, onClose, onSave, onPu
   // até 5 entradas por variável agora, então precisa saber qual linha
   // mostrar o ícone de "copiado".
   const [copiedHistoryKey, setCopiedHistoryKey] = useState<string | null>(null)
-  const [isSaving, setIsSaving] = useState(false)
 
   // ── Histórico "um passo atrás", por variável (chave = id) ───────────────
 
@@ -569,17 +568,6 @@ const handleRevertToPrevious = (
     }
   }
 
-  const handleSaveToGitHub = async () => {
-    if (!onSave || isSaving || !activeEnv.isDirty) return
-    setIsSaving(true)
-    try {
-      await onSave(activeEnv)
-    } catch (err) {
-      console.error('Falha ao sincronizar environment com GitHub:', err)
-    } finally {
-      setIsSaving(false)
-    }
-  }
 
   return (
     <div className="flex flex-col h-full bg-pm-bg text-pm-text">
@@ -923,38 +911,21 @@ const handleRevertToPrevious = (
               {activeVariablesNormalized.length} variables
             </span>
 
-            {onSave && (
+            {/* "Save to GitHub" e "Pull" viraram um atalho: enviar e
+                receber este environment é pela Central de Sincronização,
+                com o que entra e o que sai à vista antes de aplicar. */}
+            {onOpenSync && (
               <button
-                onClick={handleSaveToGitHub}
-                disabled={!activeEnv.isDirty || isSaving}
-                title={activeEnv.isDirty ? "Save changes to GitHub" : "No pending changes"}
+                onClick={onOpenSync}
+                title={syncText.scEnvOpenTitle}
                 className={`h-9 px-3 rounded-xl text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm shrink-0 ${
                   activeEnv.isDirty
                     ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                    : 'bg-pm-hover border border-pm-border text-pm-text-muted cursor-not-allowed'
+                    : 'border border-pm-border bg-pm-hover/50 hover:bg-pm-hover text-pm-text-secondary'
                 }`}
               >
-                {isSaving ? (
-                  <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <UploadCloud size={13} />
-                )}
-                <span>{isSaving ? 'Sending...' : 'Save to GitHub'}</span>
-              </button>
-            )}
-
-            {/* Par do "Save to GitHub": traz o que mudou lá, mas passando
-                pela tela de comparação em vez de substituir tudo — num
-                environment de 155 variáveis, aceitar em bloco é o que faz
-                perder um valor local sem perceber. */}
-            {onPull && (
-              <button
-                onClick={onPull}
-                title="Pull from GitHub — review each change before applying"
-                className="h-9 px-3 rounded-xl border border-pm-border bg-pm-hover/50 hover:bg-pm-hover text-xs text-pm-text-secondary flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
-              >
-                <DownloadCloud size={13} />
-                <span>Pull</span>
+                <ArrowDownUp size={13} />
+                <span>{syncText.scOpenItem}</span>
               </button>
             )}
 

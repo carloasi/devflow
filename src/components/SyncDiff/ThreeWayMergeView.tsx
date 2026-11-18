@@ -10,6 +10,7 @@ import {
   type MergeChunk,
 } from '@/lib/sync/mergeChunks'
 import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
+import { useSplitRatio } from '@/components/helper/useSplitRatio'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Editor de merge de um campo de texto, no layout do merge do Visual Studio:
@@ -89,6 +90,9 @@ function Line({ n, text, tone = '', gutter }: { n?: number; text?: string; tone?
 
 export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly, crlf, onPicks, onManualText, onBackToBoxes, simulation = false }: Props) {
   const t = useSyncDiffStrings()
+  // Largura de cada coluna (GitHub | sua versão), guardada entre aberturas.
+  const split = useSplitRatio('devflow_merge_columns', 0.5, { minLeft: 140, minRight: 140 })
+  const columns = { gridTemplateColumns: `minmax(0, ${split.ratio}fr) minmax(0, ${1 - split.ratio}fr)` }
   const manual = picks === null
   const current = picks ?? chunks.map(() => NONE)
   const blocks = useMemo(() => blocksOf(chunks), [chunks])
@@ -165,7 +169,7 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
   )
 
   return (
-    <div className="rounded-md border border-pm-border overflow-hidden">
+    <div className={`rounded-md border border-pm-border overflow-hidden ${split.dragging ? 'select-none' : ''}`}>
       {/* Barra: contagem, navegação e "aceitar" nos conflitos */}
       <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border-b border-pm-border bg-pm-hover/40 text-[10.5px]">
         <span
@@ -210,8 +214,16 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
 
       {twoWay && <div className="px-2 py-1 border-b border-pm-border text-[10px] text-amber-300/90">{t.mvTwoWay}</div>}
 
-      {/* GitHub | Sua versão — uma grade só, linha a linha */}
-      <div className="grid grid-cols-2 border-b border-pm-border text-[10px]">
+      {/* GitHub | Sua versão — uma grade só, linha a linha. A divisória entre
+          as duas colunas arrasta (duplo clique volta ao meio). */}
+      <div ref={split.containerRef} className="relative">
+      <div
+        {...split.handleProps}
+        title={t.mvColumnsResize}
+        style={{ left: `calc(${split.ratio * 100}% - 3px)` }}
+        className={`absolute top-0 bottom-0 z-10 w-1.5 cursor-col-resize outline-none hover:bg-[#007acc]/40 focus-visible:bg-[#007acc]/40 ${split.dragging ? 'bg-[#007acc]/50' : ''}`}
+      />
+      <div className="grid border-b border-pm-border text-[10px]" style={columns}>
         <div className="flex items-center gap-1.5 px-2 py-1 border-r border-pm-border">
           <span className="rounded px-1 bg-[#4ff09d]/10 text-[#4ff09d] font-semibold">{t.github}</span>
           <span className="text-pm-text-muted">{t.mvIncomingSub}</span>
@@ -226,7 +238,7 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
           if (block.type === 'stable') {
             const { head, hidden, tail } = visibleStable(block)
             const row = (i: number) => (
-              <div key={i} className="grid grid-cols-2 text-pm-text-muted">
+              <div key={i} className="grid text-pm-text-muted" style={columns}>
                 <div className="border-r border-pm-border"><Line n={numbers[i].left} text={chunks[i].theirs[0]} /></div>
                 <Line n={numbers[i].right} text={chunks[i].mine[0]} />
               </div>
@@ -253,7 +265,7 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
               className={focus === i ? 'outline outline-1 -outline-offset-1 outline-amber-400/70' : ''}
             >
               {Array.from({ length: height }, (_, r) => (
-                <div key={r} className="grid grid-cols-2">
+                <div key={r} className="grid" style={columns}>
                   <div className="border-r border-pm-border">
                     <Line
                       n={r < chunk.theirs.length ? numbers[i].left + r : undefined}
@@ -273,6 +285,7 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
             </div>
           )
         })}
+      </div>
       </div>
 
       {/* Resultado */}

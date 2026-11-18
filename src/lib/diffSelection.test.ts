@@ -155,7 +155,8 @@ describe('conflictingIds com base de três vias', () => {
   });
 
   // A base é o estado da última sincronização.
-  const base = nodeHashes([req('a', 'base'), req('b', 'base')]);
+  // Os itens dentro da collection c1, como nos diffNode abaixo (o pai conta: ver movedSinceBase).
+  const base = nodeHashes([{ id: 'c1', name: 'C', type: 'folder', item: [req('a', 'base'), req('b', 'base')] }]);
   const todaAcollectionPendente = new Set(['c1']);
 
   // O caso que motivou a mudança: a collection inteira pendente marcava os

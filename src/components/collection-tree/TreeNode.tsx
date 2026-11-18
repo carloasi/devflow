@@ -79,8 +79,7 @@ interface Props {
     run?: (item: CollectionItem) => void
     loadTest?: (item: CollectionItem) => void
     pushCollection?: (item: CollectionItem) => void
-    pullCollection?: (item: CollectionItem) => void
-    checkUpdates?: (item: CollectionItem) => void
+    openSync?: (item: CollectionItem) => void
     addExample?: (item: CollectionItem) => void
     copyUrl?: (item: CollectionItem) => void
     copyCurl?: (item: CollectionItem) => void
@@ -808,15 +807,13 @@ export const TreeNode = memo(function TreeNode({
               onExportHtml={isFolder && actions.exportHtml ? () => void actions.exportHtml!(item) : undefined}
               onRun={actions.run ? () => actions.run!(item) : undefined}
               onLoadTest={actions.loadTest ? () => actions.loadTest!(item) : undefined}
-              // Na raiz, envia a collection; numa subpasta ou request, envia SÓ
-              // esse item — o arquivo da collection sobe com o GitHub de agora
-              // e esse item trocado (AppLayout.handlePushItem).
-              onPushCollection={(isFolder || item.type === 'request') && actions.pushCollection ? () => actions.pushCollection!(item) : undefined}
-              // Em QUALQUER pasta, não só na raiz: o remoto guarda um arquivo
-              // por collection, mas a escolha do que trazer não precisa ter
-              // essa granularidade — o diff é recortado pela subárvore.
-              onPullCollection={isFolder && actions.pullCollection ? () => actions.pullCollection!(item) : undefined}
-              onCheckUpdates={isFolder && actions.checkUpdates ? () => actions.checkUpdates!(item) : undefined}
+              // Numa subpasta ou request, envia SÓ esse item — o arquivo da
+              // collection sobe com o GitHub de agora e esse item trocado
+              // (AppLayout.handlePushItem). A collection inteira é pela
+              // Central de Sincronização.
+              onPushCollection={depth > 0 && (isFolder || item.type === 'request') && actions.pushCollection ? () => actions.pushCollection!(item) : undefined}
+              // Receber, enviar e conflitos: a Central, filtrada na collection.
+              onOpenSync={isFolder && actions.openSync ? () => actions.openSync!(item) : undefined}
               onAddExample={actions.addExample ? () => actions.addExample!(item) : undefined}
               onToggleStar={canToggleStar && actions.toggleStar ? () => actions.toggleStar!(item.id) : undefined}
               onCopyUrl={actions.copyUrl ? () => actions.copyUrl!(item) : undefined}

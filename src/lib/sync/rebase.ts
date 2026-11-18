@@ -268,18 +268,64 @@ export function rebaseCollections(
 
   // ── Ordem ────────────────────────────────────────────────────────────
   const placeOf = (tree: CollectionItem[]) => indexTree(tree);
-  let mergedIndex = placeOf(merged);
+  const mergedIndex = placeOf(merged);
   for (const [folderId, order] of orders) {
     const folder = mergedIndex.get(folderId)?.node;
     if (!folder?.item) continue;
     folder.item = sortLike(folder.item, order.decision === 'remote' ? order.remote : order.local);
   }
 
-  // ── Itens movidos de pasta ───────────────────────────────────────────
+  // ── Itens movidos de pasta (applyRemoteMoves) ─────────────────────────
+  const moves = applyRemoteMoves(merged, localTree, remoteTree, base);
+  incoming += moves.incoming;
+  keptMine += moves.keptMine;
+  keptMineNames.push(...moves.keptMineNames);
+  incomingDetails.push(...moves.incomingDetails);
+  outgoingDetails.push(...moves.outgoingDetails);
+
+  return {
+    merged, nodes, conflicts, incoming, outgoing, fieldMerged, keptMine, keptMineNames,
+    incomingDetails, outgoingDetails, conflictDetails,
+  };
+}
+
+export interface MovesResult {
+  incoming: number;
+  keptMine: number;
+  keptMineNames: string[];
+  incomingDetails: ChangeDetail[];
+  outgoingDetails: ChangeDetail[];
+}
+
+/**
+ * Itens que mudaram de pasta — aplicados em `merged` (no lugar).
+ *
+ * O diff não os mostra (ver diffTrees: mudar de pasta não é apagar e
+ * criar), então a mescla os deixa onde estão AQUI, com o conteúdo daqui.
+ * Exportada porque a REVISÃO (applySelectedChanges) tem o mesmo ponto cego:
+ * sem isto, o que o colega moveu (e editou) ficava aqui no lugar antigo, a
+ * base passava a dizer "está na pasta nova", e o push seguinte lia o lugar
+ * antigo como mudança SUA — e desfazia a mudança dele no GitHub.
+ *
+ * Sem base, não move nada (não há como saber quem moveu).
+ */
+export function applyRemoteMoves(
+  merged: CollectionItem[],
+  localTree: CollectionItem[],
+  remoteTree: CollectionItem[],
+  base: NodeHashes | null
+): MovesResult {
+  let incoming = 0;
+  let keptMine = 0;
+  const keptMineNames: string[] = [];
+  const incomingDetails: ChangeDetail[] = [];
+  const outgoingDetails: ChangeDetail[] = [];
   // O diff não os mostra (ver diffTrees: mudar de pasta não é apagar e
   // criar), então o merge acima manteve cada um onde está AQUI, com o
   // conteúdo daqui. Sem isto, mover uma request enquanto alguém a editava
   // descartava a edição de lá, e o que outra pessoa moveu voltava pro lugar.
+  const placeOf = (tree: CollectionItem[]) => indexTree(tree);
+  let mergedIndex = placeOf(merged);
   const localIndex = indexTree(localTree);
   const remoteIndex = indexTree(remoteTree);
   for (const [id, mine] of localIndex) {
@@ -287,7 +333,32 @@ export function rebaseCollections(
     if (!theirs || theirs.parentId === mine.parentId) continue;
     mergedIndex = placeOf(merged);
     const current = mergedIndex.get(id);
-    if (!current) continue;
+    if (!current) {
+      // Saiu da mescla junto com a pasta antiga daqui: o colega o tirou da
+      // pasta e APAGOU a pasta, e aceitar a exclusão levava o item junto —
+      // ele sumia daqui, e o push seguinte o apagava do GitHub. Volta, no
+      // lugar novo, com o conteúdo pela mesma regra de quem mexeu.
+      const target = theirs.parentId ? mergedIndex.get(theirs.parentId)?.node : null;
+      if (theirs.parentId && !target) continue;
+      const changedHere = changedSinceBase(base, id, mine.node) === true;
+      const changedThere = changedSinceBase(base, id, theirs.node) === true;
+      let node: CollectionItem = structuredClone(theirs.node);
+      if (changedHere && !changedThere) node = withOwnContentOf(node, mine.node);
+      else if (changedHere && changedThere) {
+        const plan = fieldMergePlan(mine.node, theirs.node, base);
+        if (plan) node = applyOverrides(node, plan);
+        else {
+          node = withOwnContentOf(node, mine.node);
+          keptMine++;
+          keptMineNames.push(mine.node.name);
+        }
+      }
+      const into = target ? (target.item ??= []) : merged;
+      into.splice(Math.min(theirs.index, into.length), 0, node);
+      incoming++;
+      incomingDetails.push({ id, path: [mine.node.name], change: 'moved', fields: [] });
+      continue;
+    }
 
     // Conteúdo próprio: vale quem mexeu; dos dois lados, campo a campo.
     const ownLocal = { ...mine.node, item: undefined };
@@ -334,8 +405,5 @@ export function rebaseCollections(
     incomingDetails.push({ id, path: [mine.node.name], change: 'moved', fields: [] });
   }
 
-  return {
-    merged, nodes, conflicts, incoming, outgoing, fieldMerged, keptMine, keptMineNames,
-    incomingDetails, outgoingDetails, conflictDetails,
-  };
+  return { incoming, keptMine, keptMineNames, incomingDetails, outgoingDetails };
 }

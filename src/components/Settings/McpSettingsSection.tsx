@@ -3,20 +3,31 @@
 import { useState } from 'react';
 import { Check, Copy, RefreshCw } from 'lucide-react';
 import { UseMcpServerResult } from '@/mcp/useMcpServer';
+import { McpConnectionsList } from './McpConnectionsList';
 
 interface McpSettingsSectionProps {
   mcp: UseMcpServerResult;
 }
 
+/** O comando como aparece na tela: com o token escondido, e sem nada enquanto
+ *  o token não carregou (antes, replace("") punha as bolinhas na frente do comando). */
+export function displayedCommand(command: string, token: string, showToken: boolean): string {
+  if (!token) return 'Loading the token…';
+  return showToken ? command : command.split(token).join('•'.repeat(12));
+}
+
 export function McpSettingsSection({ mcp }: McpSettingsSectionProps) {
-  const [copied, setCopied] = useState<'command' | 'token' | null>(null);
+  const [copied, setCopied] = useState<'command' | 'remove' | 'token' | null>(null);
   const [showToken, setShowToken] = useState(false);
 
   const addCommand = mcp.port
-    ? `claude mcp add --transport http devflow http://127.0.0.1:${mcp.port}/mcp --header "Authorization: Bearer ${mcp.token}"`
+    ? `claude mcp add -s user --transport http devflow http://127.0.0.1:${mcp.port}/mcp --header "Authorization: Bearer ${mcp.token}"`
     : '';
+  // Sem -s user o registro vale só pra pasta onde o comando rodou; e um
+  // "devflow" já registrado faz o add falhar com "already exists".
+  const removeCommand = 'claude mcp remove devflow -s user';
 
-  const copy = async (value: string, what: 'command' | 'token') => {
+  const copy = async (value: string, what: 'command' | 'remove' | 'token') => {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(what);
@@ -41,6 +52,19 @@ export function McpSettingsSection({ mcp }: McpSettingsSectionProps) {
             </p>
           </div>
 
+          <div className="flex shrink-0 items-center gap-2">
+          {mcp.enabled && (
+            <button
+              type="button"
+              disabled={mcp.starting}
+              onClick={mcp.restart}
+              title="Stop and start the server again, same port and token. Calls in progress get an error, but a flow or load test already running keeps hitting the API inside DevFlow until it ends. Clients keep working on their next call."
+              className="flex h-8 items-center gap-1.5 rounded-md border border-pm-border bg-pm-hover px-3 text-xs font-semibold text-pm-text transition-colors hover:bg-pm-row-active cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+            >
+              <RefreshCw size={12} />
+              Restart
+            </button>
+          )}
           <button
             type="button"
             disabled={mcp.starting}
@@ -53,6 +77,7 @@ export function McpSettingsSection({ mcp }: McpSettingsSectionProps) {
           >
             {mcp.starting ? 'Starting…' : mcp.enabled ? 'Turn off' : 'Turn on'}
           </button>
+          </div>
         </div>
 
         {mcp.error && (
@@ -68,19 +93,19 @@ export function McpSettingsSection({ mcp }: McpSettingsSectionProps) {
 
             {mcp.portChanged && (
               <p className="text-[11px] text-amber-400/90 max-w-[52ch]">
-                The previous port was no longer available, so the server moved to a new one.
-                If you had already connected Claude Code, run the command below again to
-                point it at the new address.
+                The server moved to a new port (the saved one was unavailable or in the range
+                Windows reshuffles on every boot). Clients added with the old address can&apos;t
+                connect: remove and add the server again with the commands below.
               </p>
             )}
 
             <div>
               <p className="text-[11px] text-pm-text-muted mb-1">
-                Run this once in your terminal to connect Claude Code:
+                Run this once in your terminal to connect Claude Code (works in every folder):
               </p>
               <div className="flex items-start gap-2">
                 <code className="flex-1 rounded-md border border-pm-border bg-pm-hover px-2.5 py-2 font-mono text-[11px] text-pm-text break-all">
-                  {showToken ? addCommand : addCommand.replace(mcp.token, '•'.repeat(12))}
+                  {displayedCommand(addCommand, mcp.token, showToken)}
                 </code>
                 <button
                   type="button"
@@ -89,6 +114,24 @@ export function McpSettingsSection({ mcp }: McpSettingsSectionProps) {
                   className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded text-pm-text-muted transition-colors hover:bg-pm-hover hover:text-pm-text cursor-pointer"
                 >
                   {copied === 'command' ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                </button>
+              </div>
+
+              <p className="mt-2 text-[11px] text-pm-text-muted mb-1">
+                Already added before, or the port changed? Remove the old entry first, then run
+                the command above and restart the Claude Code session:
+              </p>
+              <div className="flex items-start gap-2">
+                <code className="flex-1 rounded-md border border-pm-border bg-pm-hover px-2.5 py-2 font-mono text-[11px] text-pm-text break-all">
+                  {removeCommand}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => copy(removeCommand, 'remove')}
+                  title="Copy command"
+                  className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded text-pm-text-muted transition-colors hover:bg-pm-hover hover:text-pm-text cursor-pointer"
+                >
+                  {copied === 'remove' ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
                 </button>
               </div>
 
@@ -111,6 +154,8 @@ export function McpSettingsSection({ mcp }: McpSettingsSectionProps) {
                 </button>
               </div>
             </div>
+
+            <McpConnectionsList connections={mcp.connections} onEndSession={mcp.endSession} />
 
             <p className="text-[11px] text-amber-400/90">
               While this is on, Claude Code can call your APIs with the credentials stored in

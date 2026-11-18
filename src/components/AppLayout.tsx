@@ -23,13 +23,16 @@ import { getMonacoThemeName, registerDevflowMonacoThemes } from '@/lib/monacoThe
 import {  ResizableHandle,  ResizablePanel,  ResizablePanelGroup} from "@/components/ui/resizable";
 import { useGroupRef } from "react-resizable-panels";
 import Sidebar from "@/components/collection-tree/Sidebar";
-import { addNode, renameNode, findNodeById, findParentId, patchNode, pasteNodesBeside, backfillExampleRequests, collectStarMarks, applyStarMarks, findRequestsByName, partitionExisting, setRequestScript, setRequestUrl, type NamedMatch } from "@/components/collection-tree/utils/tree.utils";
+import { addNode, removeNode, renameNode, findNodeById, findParentId, patchNode, pasteNodesBeside, backfillExampleRequests, collectStarMarks, applyStarMarks, findRequestsByName, partitionExisting, setRequestScript, setRequestUrl, type NamedMatch } from "@/components/collection-tree/utils/tree.utils";
 import { useAppZoom } from '@/lib/useAppZoom';
 import type { SnippetRequest } from '@/lib/codeSnippets';
 import { ZoomControl } from '@/components/ZoomControl';
 import { useMcpServer } from '@/mcp/useMcpServer';
+import { McpStatusIndicator } from './McpStatusIndicator';
 import { McpContext } from '@/mcp/mcpTools';
+import { moveItem as moveTreeItem } from '@/mcp/treeEdit';
 import { isSessionToken, withoutSessionTokens } from '@/lib/jwt';
+import { expectedBehaviorTests, withExpectedBehavior } from '@/lib/exampleExpectations';
 import { useClaudeChat } from '@/claude/useClaudeChat';
 import { ClaudeChatPanel } from '@/claude/ClaudeChatPanel';
 import { useExtensionHost } from '@/extensions/useExtensionHost';
@@ -41,7 +44,6 @@ import { Tab } from '@/app/types/Tab';
 import { sanitizeJsonBodyForSend } from '@/lib/sanitizeJsonBody';
 import { buildRequestHeaders, requestHasBody } from '@/lib/defaultHeaders';
 import { resolveAfterPreRequest } from '@/lib/preRequestResolution';
-import { MissingPassphraseError } from '@/lib/syncCrypto';
 import { ExampleResponseEditor, STATUS_TEXT } from './ExampleResponseEditor';
 import { normalizeExampleLanguage } from '@/lib/exampleLanguage';
 import { listen } from '@tauri-apps/api/event';
@@ -110,7 +112,7 @@ import { changedFieldLabels, describeChanges } from '@/lib/unsavedChanges';
 import { stripTabsForSession, sameSessionTabs } from '@/lib/tabSessions';
 import { safeSetItem, sweepDeadKeys } from '@/lib/safeStorage';
 import { loadWorkspaceLocalData, loadWorkspaceMarkers, saveWorkspaceCollections, saveWorkspaceEnvironments, saveWorkspaceMarkers } from '@/storage/localSyncStore';
-import { type Marker, MARKER_BASE_PREFIX, markerBaseHashes, mergeCatalogs, purgeOrphans, remapMarkers } from '@/lib/markers';
+import { type Marker, MARKER_BASE_PREFIX, markerBaseHashes, markerChangeCount, markerChangesFromRemote, mergeCatalogs, purgeOrphans, remapMarkers } from '@/lib/markers';
 import {
   markCollectionsPendingPush,
   markEnvironmentsPendingPush,
@@ -137,10 +139,17 @@ import { pruneEmptyGroups, type TabGroup } from '@/lib/tabGroups';
 import { applySelectedChanges } from '@/lib/applyDiff';
 import { diffEnvironments, applyEnvironmentChanges } from '@/lib/environmentDiff';
 import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, type NodeHashes } from '@/lib/syncBase';
-import { rebaseCollections } from '@/lib/sync/rebase';
+import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
+import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
+import { exampleNameFor } from '@/lib/exampleName';
+import { withLocalOnlyValues } from '@/lib/sync/pulledEnvironments';
+import { buildSyncOverview, namePathTo, withContentPreviews, type SyncOverview } from '@/lib/sync/syncOverview';
+import { discardEnvironmentChange, discardLocalChange } from '@/lib/sync/discardChange';
+import { asCancelled, isSyncCancelRequested, requestSyncCancel, resetSyncCancel, SYNC_CANCELLED_MESSAGE, throwIfSyncCancelled, captureSyncStatus, withoutActions, markResumeAfterReview, openSyncCenter, reportSyncStatus, setKnownConflicts, setSyncCenterBusy, takeResumeAfterReview, type SyncAction, type SyncActionResult, type SyncActionScope, type SyncCenterTab } from '@/lib/sync/syncCenterStore';
+import { SyncCenter } from '@/components/SyncCenter/SyncCenter';
 import { isInSubtree, withSubtreeFrom } from '@/lib/sync/subtreePush';
-import { ENV_BASE_PREFIX, envKeepMineIds, environmentHashes, rebaseEnvironments } from '@/lib/sync/envMerge';
+import { ENV_BASE_PREFIX, environmentHashes, rebaseEnvironments } from '@/lib/sync/envMerge';
 import type { RebaseOutcome } from '@/components/GitHubStorageClient';
 import type { OverrideMap } from '@/lib/diffFields';
 import { SyncDiffDialog } from '@/components/SyncDiff/SyncDiffDialog';
@@ -154,6 +163,7 @@ import {
   WorkspaceInfo,
 } from '@/storage/workspaceStore';
 import WorkspaceSelector from './WorkspaceSelector';
+import { DevFlowFullScreenLoader, DevFlowLoader, DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { Environment } from '@/app/types/Environment';
 
 
@@ -898,6 +908,8 @@ export default function AppLayout() {
   }, []);
   const [importOpen, setImportOpen] = useState(false);
   const [hydrated,           setHydrated]           = useState(false);
+  // Workspace sendo aberto (o carregamento por cima do app).
+  const [switchingWorkspace, setSwitchingWorkspace] = useState<string | null>(null);
   const [collections,        setCollections]        = useState<CollectionItem[]>([]);
   // Catalogo de marcadores do workspace (ver lib/markers.ts). Vive aqui, e
   // nao dentro da arvore, porque vale pra TODAS as collections do workspace.
@@ -1031,6 +1043,10 @@ export default function AppLayout() {
   // do item recomeça (via pushItemRef — handlePushItem é declarado depois).
   const [pushItemAfterDiff, setPushItemAfterDiff] = useState<CollectionItem | null>(null);
   const pushItemRef = useRef<((item: CollectionItem) => Promise<void>) | null>(null);
+  // Envio de item que a revisão dispara no próximo tick (ver handleApplyDiff).
+  const deferredPushRef = useRef<Promise<void> | null>(null);
+  // O GitHub que a Central leu por último (ver handleSyncDiscard).
+  const lastSyncPeekRef = useRef<{ workspace: string; remoteTree: CollectionItem[]; remoteEnvs: Environment[] } | null>(null);
   // Mesma ideia, pro push de UM environment (handleSaveEnvironmentToGitHub).
   const [pushEnvAfterDiff, setPushEnvAfterDiff] = useState<Environment | null>(null);
   // Conflito ao enviar um workspace que pode não ser o selecionado agora (menu
@@ -1041,6 +1057,13 @@ export default function AppLayout() {
   // está em conflito — sem isso a mescla usaria a árvore errada.
   const [diffLocalOverride, setDiffLocalOverride] = useState<{ collections: CollectionItem[]; environments: Environment[] } | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
+  // Uma ação da Central de Sincronização abriu a revisão? Marcado na hora
+  // (não espera o render), pra quem chamou saber que parou num conflito.
+  const reviewRequestedRef = useRef(false);
+  const openReviewDialog = useCallback(() => {
+    reviewRequestedRef.current = true;
+    setDiffOpen(true);
+  }, []);
   // A revisão aberta faz parte de um push (algum envio espera a mescla)? Muda
   // o que os botões dizem: aplicar ali também ENVIA, e "não aceitar nada"
   // sobrescreve o GitHub com a versão daqui.
@@ -1161,6 +1184,9 @@ export default function AppLayout() {
   // persiste collections não interprete aquilo como alteração local.
   const suppressPendingMarkRef = useRef(false);
   const suppressEnvPendingMarkRef = useRef(false);
+  // A árvore que o efeito de collections viu por último — o "antes" de uma
+  // sincronização, pra saber quais abas abertas o merge mudou.
+  const treeSeenRef = useRef<{ workspace: string; tree: CollectionItem[] } | null>(null);
 
   // "Fixar janela sobre as outras" (always on top) — botão no title bar,
   // ao lado do de Settings.
@@ -1269,6 +1295,8 @@ export default function AppLayout() {
   // a nova pasta com os requests desse grupo (ver handlePickFlowFolder).
   const [flowPickerSession, setFlowPickerSession] = useState<TabSession | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Seção a abrir quando o Settings é aberto por um atalho (ex. o MCP da barra).
+  const [settingsSection, setSettingsSection] = useState<'mcp' | undefined>(undefined);
   // "Abre onde está X" pedido de fora da árvore — hoje só o scanner de
   // segredos (Settings → Security), que não tem acesso nenhum ao estado
   // interno do CollectionTree. Repassado como prop (ver focusRequest lá).
@@ -1638,6 +1666,9 @@ const handleSelectWorkspace = useCallback(async (path: string) => {
   if (path === selectedWorkspaceRef.current) return;
 
   isSwitchingWorkspaceRef.current = true;
+  // O carregamento aparece só se a troca demorar (workspace grande): numa
+  // troca instantânea ele só piscaria.
+  const showLoader = setTimeout(() => setSwitchingWorkspace(path), 150);
   try {
     const previousWorkspace = selectedWorkspaceRef.current;
 
@@ -1683,6 +1714,8 @@ const handleSelectWorkspace = useCallback(async (path: string) => {
     console.error(`Erro ao carregar o workspace "${path}":`, err);
     toast.error(`Não foi possível abrir o workspace "${path}". Os dados dele podem estar corrompidos.`);
   } finally {
+    clearTimeout(showLoader);
+    setSwitchingWorkspace(null);
     isSwitchingWorkspaceRef.current = false;
   }
 }, [setEnvironments, setSelectedEnvId]);
@@ -2757,6 +2790,37 @@ useEffect(() => {
   setPendingPush(readPendingPush(selectedWorkspace));
 }, [environments, selectedWorkspace]);
 
+// Depois de um merge/pull: recarrega as abas abertas cujo item mudou. As
+// que têm edição não salva ficam como estão, com um aviso que oferece
+// recarregar (descartando a edição).
+const refreshOpenTabsAfterSync = (before: CollectionItem[], after: CollectionItem[]) => {
+  const { reloaded, dirty } = tabsAfterSync(tabsRef.current, before, after, buildTabFromItem);
+  if (reloaded.length > 0) {
+    const byId = new Map(reloaded.map(t => [t.id, t]));
+    // Por id e só se continuar sem edição: entre o cálculo e o render a
+    // pessoa pode ter digitado na aba.
+    setTabs(prev => prev.map(t => (!t.isDirty && byId.has(t.id) ? byId.get(t.id)! : t)));
+    toast.info(syncText.tabsReloaded(reloaded.length, reloaded[0].name));
+  }
+  if (dirty.length > 0) {
+    const ids = new Set(dirty.map(t => t.id));
+    toast.warning(syncText.tabsDirtyChanged(dirty.length, dirty[0].name), {
+      duration: 20000,
+      action: {
+        label: syncText.tabsReload,
+        onClick: () =>
+          setTabs(prev =>
+            prev.map(t => {
+              if (!ids.has(t.id)) return t;
+              const item = findNodeById(collectionsRef.current, t.id);
+              return item ? reloadedTab(t, item, buildTabFromItem) : t;
+            })
+          ),
+      },
+    });
+  }
+};
+
 useEffect(() => {
   if (!tabsHydrated.current || isSwitchingWorkspaceRef.current) return;
   saveWorkspaceCollections(selectedWorkspace, collections)
@@ -2768,6 +2832,8 @@ useEffect(() => {
   // mutação — e evita que uma delas, esquecida, vire alteração que nunca é
   // enviada.
   const nextPrints = fingerprintRoots(collections);
+  const previousTree = treeSeenRef.current;
+  treeSeenRef.current = { workspace: selectedWorkspace, tree: collections };
 
   // Pull acabou de substituir a árvore pelo remoto: não há nada pendente, só
   // a referência a atualizar pra que a PRÓXIMA edição seja medida contra o
@@ -2775,6 +2841,12 @@ useEffect(() => {
   if (suppressPendingMarkRef.current) {
     suppressPendingMarkRef.current = false;
     rootPrintsRef.current = nextPrints;
+    // Abas abertas de itens que a sincronização mudou passam a mostrar a
+    // versão nova (lib/sync/openTabsRefresh). Só no MESMO workspace: na
+    // troca de workspace as abas já são as dele.
+    if (previousTree && previousTree.workspace === selectedWorkspace && previousTree.tree !== collections) {
+      refreshOpenTabsAfterSync(previousTree.tree, collections);
+    }
     return;
   }
 
@@ -3658,13 +3730,29 @@ const buildSnippetRequest = useCallback((keepBodyComments = false): SnippetReque
 
     const newExample: CollectionItem = {
       id:   crypto.randomUUID(),
-      name: `${activeTab.response.status} ${getStatusText(activeTab.response.status)}`,
+      // Status + a mensagem da notificação do body (lib/exampleName): é o
+      // que diferencia um cenário de erro do outro na árvore.
+      name: exampleNameFor(activeTab.response.status, getStatusText(activeTab.response.status), activeTab.response.parsedBody),
       type: 'example',
       method: requestNode.method,
       // Snapshot da request original no momento do save — mesmo padrão que
       // createExample (useCollectionTree.ts) usa pro "Add Example" vazio, e
-      // o que o Postman de verdade guarda em cada Saved Example.
-      request: requestNode.request ? { ...requestNode.request } : undefined,
+      // o que o Postman de verdade guarda em cada Saved Example. O body (e o
+      // tipo dele) vêm da ABA, não do que está salvo na árvore: é o body que
+      // gerou esta resposta, mesmo que a edição ainda não tenha sido salva.
+      // O Post-response ganha os testes de que esta resposta é o esperado
+      // (status e formato do body), que o "Try" do example roda.
+      request: applyTabUpdatesToItem(requestNode, {
+        requestBodyValue: activeTab.requestBodyValue ?? '',
+        bodyType: activeTab.bodyType,
+        scripts: {
+          preRequest: requestNode.request?.scripts?.preRequest ?? '',
+          postResponse: withExpectedBehavior(
+            requestNode.request?.scripts?.postResponse,
+            expectedBehaviorTests(activeTab.response.status, activeTab.response.parsedBody, activeTab.response.isBinary)
+          ),
+        },
+      }).request,
       example: exampleFromResponse(activeTab.response),
     };
 
@@ -3820,16 +3908,20 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         _postman_variable_scope: 'environment',
       }));
 
-      // ✅ dedup por id — mantém a última ocorrência
-      const deduped = Array.from(
-        new Map(incoming.map(env => [env.id, env])).values()
+      // ✅ dedup por id — mantém a última ocorrência. Token de sessão (sobe
+      // vazio) e cor continuam os daqui (lib/sync/pulledEnvironments).
+      const deduped = withLocalOnlyValues(
+        Array.from(new Map(incoming.map(env => [env.id, env])).values()),
+        environmentsRef.current
       );
 
       setEnvironments(deduped);
 
       await saveWorkspaceEnvironments(workspace, deduped);
       setEnvVersion(v => v + 1);
-      void recordSyncBase(workspace, environmentHashes(deduped), [ENV_BASE_PREFIX]);
+      // Base sem o token: é o que está lá, e com ele o merge seguinte leria
+      // o vazio de lá como "mudou no GitHub" e apagaria o daqui.
+      void recordSyncBase(workspace, environmentHashes(withoutSessionTokens(deduped)), [ENV_BASE_PREFIX]);
     } else {
       // Workspace sem environments válidos no GitHub: o pull substitui pelo
       // que veio de lá, que é nada.
@@ -3890,7 +3982,15 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       environments = Array.from(new Map(incoming.map(env => [env.id, env])).values());
     }
 
-    const { collections: existingCollections } = await loadWorkspaceLocalData(workspaceName);
+    const { collections: existingCollections, environments: existingEnvironments } = await loadWorkspaceLocalData(workspaceName);
+    const localEnvironments = (Array.isArray(existingEnvironments) ? existingEnvironments : []) as Environment[];
+    // Nenhum arquivo de environment lá: os daqui ficam (o workspace pode
+    // nunca ter enviado os seus). Antes virava lista vazia e os apagava —
+    // o Pull do painel (performPull) já tratava assim.
+    const keepLocalEnvironments = rawEnvironments.length === 0;
+    if (keepLocalEnvironments) environments = localEnvironments;
+    // Token de sessão (sobe vazio) e cor são desta máquina (lib/sync/pulledEnvironments).
+    else environments = withLocalOnlyValues(environments, localEnvironments);
 
     // Pelo mesmo motivo dos ambientes locais: favoritar é marca pessoal e não
     // sobe pro GitHub, então nunca volta num pull. Como o pull substitui a
@@ -3907,16 +4007,21 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     ]);
 
     // O local desse workspace acabou de ser substituído pelo remoto, então
-    // não há mais nada "salvo mas não enviado" nele.
+    // não há mais nada "salvo mas não enviado" nele — menos os environments
+    // daqui que ficaram (nenhum lá): esses continuam esperando o push.
+    const envPendingBefore = readPendingPush(workspaceName).environments;
     clearWorkspacePendingPush(workspaceName);
+    if (keepLocalEnvironments && envPendingBefore.length > 0) markEnvironmentsPendingPush(workspaceName, envPendingBefore);
 
     // E o que veio vira a base (substituindo a anterior) — senão o merge
     // seguinte lia como "alterado aqui" o que só tinha vindo de lá.
+    // A base dos environments: sem os tokens de sessão (o que está lá), e
+    // intocada quando eles não vieram de lá.
     if (!options?.fromCommit) {
       void recordSyncBase(
         workspaceName,
-        { ...nodeHashes(collections), ...environmentHashes(environments) },
-        [ENV_BASE_PREFIX],
+        { ...nodeHashes(collections), ...(keepLocalEnvironments ? {} : environmentHashes(withoutSessionTokens(environments))) },
+        keepLocalEnvironments ? [] : [ENV_BASE_PREFIX],
         'all'
       );
     }
@@ -3927,24 +4032,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       setCollections(collections);
       setEnvironments(environments);
       setEnvVersion(v => v + 1);
-      setPendingPush(EMPTY_PENDING);
+      setPendingPush(readPendingPush(workspaceName));
     }
   }, [importData, setEnvironments]);
-
-  // Pull de um workspace só, disparado pelo ícone no menu de workspaces —
-  // delega pro GitHubSync (que baixa/descriptografa e chama
-  // handlePullWorkspaceData acima pra persistir).
-  const handlePullSingleWorkspace = useCallback(async (workspaceName: string) => {
-    await githubSyncRef.current?.pullWorkspace(workspaceName);
-  }, []);
-
-  // Push de um workspace só (não necessariamente o selecionado agora),
-  // disparado pelo ícone ao lado do Pull no menu de workspaces — delega pro
-  // GitHubSync, que carrega os dados locais desse workspace direto do
-  // storage e envia só eles, sem afetar os outros workspaces.
-  const handlePushSingleWorkspace = useCallback(async (workspaceName: string) => {
-    await githubSyncRef.current?.pushWorkspace(workspaceName);
-  }, []);
 
   // Abre a janela de histórico de commits do workspace (ícone de relógio no
   // menu de workspaces) — de lá dá pra baixar o estado dos arquivos em um
@@ -3959,9 +4049,10 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // mais seria enviada).
   const handlePushCompleted = useCallback((
     workspaceName: string,
-    pushed?: { collections: unknown[]; environments: unknown[] }
+    pushed?: { collections: unknown[]; environments: unknown[]; keptStale?: boolean }
   ) => {
     const isCurrent = workspaceName === selectedWorkspaceRef.current;
+    const keptStale = pushed?.keptStale === true;
     const sentCollections = (pushed?.collections as CollectionItem[] | undefined) ?? (isCurrent ? collectionsRef.current : undefined);
     const sentEnvironments = (pushed?.environments as Environment[] | undefined) ?? (isCurrent ? environmentsRef.current : undefined);
 
@@ -3978,18 +4069,28 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         .filter(env => sentEnvById.get(env.id) !== JSON.stringify(withoutSessionTokens([env])[0].values))
         .map(env => env.id);
       if (changedEnvs.length > 0) markEnvironmentsPendingPush(workspaceName, changedEnvs);
-      setPendingPush(readPendingPush(workspaceName));
+      // O "não sincronizado" do seletor de environment: só o envio de UM
+      // environment o zerava; enviar o workspace (agora o caminho da
+      // Central) deixava o aviso aceso.
+      for (const env of sentEnvironments ?? []) if (!changedEnvs.includes(env.id)) markEnvironmentSynced(env.id);
     }
+    // Arquivos apagados aqui que a pessoa manteve no GitHub: a exclusão
+    // continua esperando um push.
+    if (keptStale) markFullPushRequired(workspaceName);
+    if (isCurrent) setPendingPush(readPendingPush(workspaceName));
 
     // O que subiu vira o estado comum, SUBSTITUINDO o anterior (collections
     // e environments): o push leva o workspace inteiro, então o que não está
     // nele deixou de existir — e não pode ficar na base (ver dropReplaced).
+    // Mantendo no GitHub o que foi apagado aqui (keptStale), a base do que
+    // ficou lá não sai: sem ela, o pull leria aquilo como "novo no GitHub" e
+    // traria de volta o que a pessoa apagou. Substitui só o que subiu.
     if (sentCollections) {
       void recordSyncBase(
         workspaceName,
         { ...nodeHashes(sentCollections), ...(sentEnvironments ? environmentHashes(sentEnvironments) : {}) },
-        sentEnvironments ? [ENV_BASE_PREFIX] : [],
-        'all'
+        sentEnvironments && !keptStale ? [ENV_BASE_PREFIX] : [],
+        keptStale ? sentCollections.map(c => c.id) : 'all'
       );
     }
 
@@ -4009,7 +4110,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         },
       });
     }
-  }, [syncText]);
+  }, [syncText, markEnvironmentSynced]);
 
   // Compara o remoto recém-buscado com o que está na tela, sem aplicar nada.
   //
@@ -4041,14 +4142,23 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     setDiffRemoteTree(remoteTree);
     setDiffTarget('collections');
     setDiffReviewScope('collections');
-    void loadSyncBase(selectedWorkspaceRef.current).then(setDiffBase);
     if (nodes.length > 0) {
       // Veio de um conflito de push (não do "Check remote updates" manual):
       // marca pra handleApplyDiff reenviar o push inteiro depois da mescla.
       // Só aqui dentro — sem diferença nenhuma pra mostrar, a tela nem abre,
       // e a flag ficaria presa esperando uma mescla que nunca vai rolar.
       if (isPushConflict) setPushAllAfterDiff(true);
-      setDiffOpen(true);
+      // Abre só com a base certa carregada: a seleção inicial (o que já vem
+      // marcado) sai dela e não é refeita depois — aberta antes, usava a base
+      // da revisão anterior (ou de outro workspace). A marca de "abriu a
+      // revisão" vai já: quem chamou (Central) não espera a base carregar.
+      reviewRequestedRef.current = true;
+      void loadSyncBase(selectedWorkspaceRef.current).then(base => {
+        setDiffBase(base);
+        openReviewDialog();
+      });
+    } else {
+      void loadSyncBase(selectedWorkspaceRef.current).then(setDiffBase);
     }
 
     if (nodes.length === 0) return { summary, hasChanges: false };
@@ -4085,7 +4195,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     setDiffBase(null);
     setDiffLocalOverride({ collections: localTree, environments: (localEnvironments as Environment[]) ?? [] });
     setPushWorkspaceAfterDiff(workspaceName);
-    setDiffOpen(true);
+    openReviewDialog();
     return true;
   }, [importData]);
 
@@ -4111,6 +4221,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // do push pode já estar velha, e a mescla substitui a árvore daqui — o
     // que fosse editado nesse meio tempo se perderia.
     const local = isCurrent ? collectionsRef.current : ((localCollections as CollectionItem[]) ?? []);
+    // "Cancelar" da Central: antes de mesclar aqui o que veio do GitHub.
+    throwIfSyncCancelled();
 
     // Depois de uma revisão: as collections já foram decididas, só os
     // environments passam pelo merge (ver handlePushEverything).
@@ -4185,6 +4297,10 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
   // Guarda o estado de antes de um pull/revisão — o "Desfazer" volta a ele.
   // Só o workspace aberto (é o que tem a árvore em memória).
+  // Snapshot tirado ANTES de abrir uma revisão (antes de mesclar marcadores e
+  // environments, que não esperam a revisão). O apply da revisão o usa em vez
+  // de tirar outro — tirado no apply, o Desfazer já não voltava esses dois.
+  const undoPrimedRef = useRef<typeof undoRef.current>(null);
   const takeUndoSnapshot = useCallback(async (workspaceName: string) => {
     if (workspaceName !== selectedWorkspaceRef.current) return;
     undoRef.current = {
@@ -4267,54 +4383,6 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     });
   }, [syncText]);
 
-  // "Preview push…": o merge do push, sem enviar nada — o que é seu e vai,
-  // o que vem do GitHub, o que vai pedir decisão e o que fica seu sozinho.
-  const handlePushPreview = useCallback(async () => {
-    const t = syncText;
-    const workspace = selectedWorkspaceRef.current;
-    try {
-      const remote = await githubSyncRef.current?.fetchWorkspace(workspace, undefined, `Checking "${workspace}" on GitHub...`);
-      if (!remote) return;
-      if (remote.failedPaths.length > 0) {
-        toast.error('Could not read GitHub', { description: `${remote.failedPaths.length} file(s) could not be read. Try again.` });
-        return;
-      }
-      const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
-      const remoteEnvs = importData(remote.environments).environments ?? [];
-      const base = await loadSyncBase(workspace);
-      const r = rebaseCollections(collectionsRef.current, remoteTree, base, new Set(readPendingPush(workspace).collections));
-      const e = rebaseEnvironments(environmentsRef.current, remoteEnvs, base);
-      setSyncList({
-        title: t.previewTitle(workspace),
-        subtitle: t.previewSubtitle,
-        pushNow: true,
-        sections: [
-          {
-            title: t.previewYours,
-            tone: 'mine',
-            items: [...withDiffs(r.outgoingDetails, r.nodes), ...e.outgoingNames.map(n => ({ primary: n, secondary: t.changeLabels.changed }))],
-            emptyText: t.previewNothing,
-          },
-          {
-            title: t.previewIncoming,
-            tone: 'github',
-            items: [...withDiffs(r.incomingDetails, r.nodes), ...e.incomingNames.map(n => ({ primary: n, secondary: t.changeLabels.changed }))],
-            emptyText: t.previewNothing,
-          },
-          { title: t.previewConflicts, tone: 'conflict', items: withDiffs(r.conflictDetails, r.nodes, true), emptyText: t.previewNothing },
-          {
-            title: t.previewKeptMine,
-            tone: 'conflict',
-            items: [...r.keptMineNames, ...e.keptMineNames].map(n => ({ primary: n })),
-            emptyText: t.previewNothing,
-          },
-        ],
-      });
-    } catch (err) {
-      toast.error('Could not read GitHub', { description: (err as Error)?.message ?? String(err) });
-    }
-  }, [importData, syncText, withDiffs]);
-
   // "Quem mudou este item?": percorre os últimos commits do arquivo da
   // collection e compara o item versão a versão — o primeiro commit em que
   // ele difere da versão anterior é quem mexeu por último.
@@ -4361,9 +4429,16 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // mesmo merge do push/pull, só que SEM aplicar nada — devolve os itens que
   // mudaram dos dois lados. Só pro workspace aberto (é o que tem a árvore
   // daqui em memória).
-  const handleConflictPreview = useCallback(async (workspaceName: string, changedRootIds: string[] = []) => {
+  // O merge de teste do push/pull SEM aplicar nada, sobre o GitHub de agora
+  // lido em modo prévia (peek) — o que o aviso em segundo plano e a Central
+  // de Sincronização mostram. Só pro workspace aberto (é o que tem a árvore
+  // daqui em memória). `null` = não deu pra ler o GitHub inteiro.
+  const peekSyncMerge = useCallback(async (workspaceName: string) => {
     if (workspaceName !== selectedWorkspaceRef.current) return null;
-    const remote = await githubSyncRef.current?.fetchWorkspace(workspaceName);
+    // peek: o aviso roda sozinho, até com uma revisão aberta — se marcasse
+    // a versão como lida, a revisão registraria como sincronizado o que
+    // ninguém viu, e o push que a segue passaria por cima.
+    const remote = await githubSyncRef.current?.fetchWorkspace(workspaceName, undefined, undefined, { peek: true });
     if (!remote || remote.failedPaths.length > 0) return null;
     const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
     const base = await loadSyncBase(workspaceName);
@@ -4376,17 +4451,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     const byId = new Map(result.nodes.map(n => [n.id, n]));
     // O que mudou nas variáveis de environment (só os nomes: valor costuma
     // ser token) — pro aviso dizer isso também.
-    const envResult = rebaseEnvironments(
-      environmentsRef.current,
-      importData(remote.environments).environments ?? [],
-      base
-    );
+    const remoteEnvs = importData(remote.environments).environments ?? [];
+    const envResult = rebaseEnvironments(environmentsRef.current, remoteEnvs, base);
     // A versão da última sincronização das collections com item mudado —
     // é ela que deixa a "Ver diferença" do aviso mostrar QUEM mudou cada
     // trecho (três painéis). Uma leitura por collection, guardada por sha
     // (syncedVersionOf); sem ela a visão fica de duas vias.
     const touchedRoots = [
-      ...new Set([...result.incomingDetails, ...result.conflictDetails].map(d => byId.get(d.id)?.rootId).filter(Boolean)),
+      ...new Set([...result.incomingDetails, ...result.conflictDetails, ...result.outgoingDetails].map(d => byId.get(d.id)?.rootId).filter(Boolean)),
     ] as string[];
     const baseRoots = new Map<string, CollectionItem | null>();
     await Promise.all(
@@ -4404,6 +4476,19 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       const root = baseRoots.get(node.rootId);
       return root ? findNodeById([root], node.id) ?? null : undefined;
     };
+    // O catálogo de marcadores não entra no merge das collections: o que
+    // receber mudaria aqui (o mesmo mergeCatalogs do pull, sem aplicar).
+    const markers = markerChangesFromRemote(markersRef.current, remote.markers ?? null, base);
+    return { result, envResult, baseItemOf, markers, remoteTree, remoteEnvs };
+  }, [importData]);
+
+  const handleConflictPreview = useCallback(async (workspaceName: string, changedRootIds: string[] = []) => {
+    const merge = await peekSyncMerge(workspaceName);
+    if (!merge) return null;
+    const { result, envResult, baseItemOf } = merge;
+    const byId = new Map(result.nodes.map(n => [n.id, n]));
+    // O que a Central mostra no ⚠ da barra, sem precisar abri-la.
+    setKnownConflicts(workspaceName, result.conflicts.length);
     // A prévia do aviso: quais itens vieram do GitHub e, de cada um, o
     // valor daqui, o de lá e o da última sincronização (lib/sync/remoteChangeAlert).
     const preview = buildRemoteChangePreview(result, envResult.incomingNames, baseItemOf);
@@ -4441,26 +4526,148 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       incoming: result.incoming + result.fieldMerged,
       preview,
     };
-  }, [importData]);
+  }, [importData, peekSyncMerge]);
 
-  // Pull com comparação dos ENVIRONMENTS. Mesmo fluxo do de collections, com
-  // outra fonte: o diff e a tela são os mesmos (ver environmentDiff).
-  // Busca os environments remotos e calcula o diff — mesmo pipeline usado
-  // por "Pull environments" e pela checagem proativa antes de enviar um
-  // environment (ver handleSaveEnvironmentToGitHub). `null` = não deu pra
-  // checar (sem remoto); quem chama decide o que fazer nesse caso.
-  const fetchEnvironmentDiffNodes = useCallback(async () => {
-    const remote = await githubSyncRef.current?.fetchWorkspace(
-      selectedWorkspaceRef.current,
-      undefined,
-      'Checking environments on GitHub...'
+  // Central de Sincronização: as três listas (receber, enviar, conflitos)
+  // do mesmo merge de teste (lib/sync/syncOverview). Lança quando não deu
+  // pra ler o GitHub — a Central mostra o erro em vez de "nada a fazer".
+  const handleSyncOverview = useCallback(async (): Promise<SyncOverview> => {
+    const workspace = selectedWorkspaceRef.current;
+    const merge = await peekSyncMerge(workspace);
+    if (!merge) throw new Error(syncText.scReadFailed);
+    setKnownConflicts(workspace, merge.result.conflicts.length);
+    // O que a Central acabou de ler do GitHub: é contra isto que o
+    // "Descartar" volta um item (sem ler de novo).
+    lastSyncPeekRef.current = { workspace, remoteTree: merge.remoteTree, remoteEnvs: merge.remoteEnvs };
+    const overview = withContentPreviews(
+      buildSyncOverview(merge.result, merge.envResult, merge.baseItemOf, merge.markers),
+      collectionsRef.current,
+      merge.remoteTree
     );
-    if (!remote) return null;
+    // "Não sincronizado" aceso sem nada a enviar (marcado antes de os tokens
+    // de sessão ficarem de fora, ou por uma edição que já subiu por outro
+    // caminho): a Central acabou de confirmar com o GitHub, então apaga.
+    // Antes ele ficava aceso, e o "Só enviar" desabilitado não o zerava.
+    const pendingEnvIds = new Set(readPendingPush(workspace).environments);
+    const sendingEnvs = new Set([...overview.envOutgoing, ...overview.envKeptMine].map(name => name.split(' › ')[0]));
+    for (const env of environmentsRef.current) {
+      if (env.isDirty && !pendingEnvIds.has(env.id) && !sendingEnvs.has(env.name)) markEnvironmentSynced(env.id);
+    }
+    return overview;
+  }, [peekSyncMerge, syncText, markEnvironmentSynced]);
 
-    const imported = importData(remote.environments);
-    const remoteEnvs = imported.environments ?? [];
-    return { nodes: diffEnvironments(environments, remoteEnvs), remoteEnvs };
-  }, [environments, importData]);
+  // "Descartar" da Central: o item (ou a variável) daqui volta a ser o do
+  // GitHub — o que a Central acabou de ler. Nada é enviado. Com "Desfazer"
+  // (o mesmo snapshot do pull: árvore, environments, pendência e base).
+  const handleSyncDiscard = useCallback(async (target: { itemId?: string; envName?: string; label: string }): Promise<SyncActionResult> => {
+    const workspace = selectedWorkspaceRef.current;
+    const peek = lastSyncPeekRef.current;
+    const failed = (message: string): SyncActionResult => ({ result: 'failed', messages: [{ type: 'error', message }] });
+    if (!peek || peek.workspace !== workspace) return failed(syncText.scDiscardStale);
+
+    await takeUndoSnapshot(workspace);
+    const undo = { label: syncText.undo, run: () => void undoLastPull(true) };
+
+    if (target.envName) {
+      const next = discardEnvironmentChange(environmentsRef.current, peek.remoteEnvs, target.envName);
+      if (next === environmentsRef.current) return failed(syncText.scDiscardNothing(target.label));
+      suppressEnvPendingMarkRef.current = true;
+      environmentsRef.current = next;
+      setEnvironments(next);
+      // Pendência dos environments: só o que ainda difere do GitHub.
+      const envName = target.envName.split(' › ')[0];
+      const env = next.find(e => e.name === envName);
+      const theirs = peek.remoteEnvs.find(e => e.name === envName);
+      if (env) {
+        const differs = !theirs || diffEnvironments(withoutSessionTokens([env]), withoutSessionTokens([theirs])).length > 0;
+        if (differs) markEnvironmentsPendingPush(workspace, [env.id]);
+        else {
+          clearEnvironmentsPendingPush(workspace, [env.id]);
+          markEnvironmentSynced(env.id);
+        }
+        setPendingPush(readPendingPush(workspace));
+      }
+      return { result: 'done', messages: [{ type: 'success', message: syncText.scDiscarded(target.label), action: undo }] };
+    }
+
+    const { tree, action } = discardLocalChange(collectionsRef.current, peek.remoteTree, target.itemId!);
+    if (action === 'none') return failed(syncText.scDiscardNothing(target.label));
+    const rootOf = (forest: CollectionItem[]) =>
+      forest.find(c => c.id === target.itemId || !!findNodeById([c], target.itemId!));
+    const rootId = (rootOf(collectionsRef.current) ?? rootOf(peek.remoteTree))?.id;
+
+    suppressPendingMarkRef.current = true;
+    collectionsRef.current = tree;
+    setCollections(tree);
+    await saveWorkspaceCollections(workspace, tree);
+    // Pendência da collection: continua só se ainda sobrar diferença nela.
+    if (rootId) {
+      const mine = tree.find(c => c.id === rootId);
+      const theirs = peek.remoteTree.find(c => c.id === rootId);
+      if (mine && theirs) {
+        const still = compareWorkspaces([mine], [theirs]);
+        if (still.modified.length + still.onlyLocal.length > 0) markCollectionsPendingPush(workspace, [rootId]);
+        else clearCollectionsPendingPush(workspace, [rootId]);
+      } else if (!mine && !theirs) {
+        clearCollectionsPendingPush(workspace, [rootId]);
+      }
+      setPendingPush(readPendingPush(workspace));
+    }
+    return { result: 'done', messages: [{ type: 'success', message: syncText.scDiscarded(target.label), action: undo }] };
+  }, [setEnvironments, markEnvironmentSynced, takeUndoSnapshot, undoLastPull, syncText]);
+
+  // "Abrir" da Central: a request (ou o example) numa aba. A Central continua
+  // aberta — ela não trava o app (modal={false}), e dá pra movê-la pra ver a
+  // aba e voltar pra lista sem esperar o GitHub de novo.
+  const handleSyncOpenItem = useCallback((itemId: string) => {
+    const item = findNodeById(collectionsRef.current, itemId);
+    if (!item || (item.type !== 'request' && item.type !== 'example')) return;
+    handleRequestSelect(item);
+  }, [handleRequestSelect]);
+
+  // Atalhos pra Central: a collection da árvore (filtrada na raiz dela), o
+  // environment e o workspace do menu (abre nele, trocando se preciso).
+  const handleOpenSyncFor = useCallback((item: CollectionItem, tab?: SyncCenterTab) => {
+    const root = collectionsRef.current.find(c => c.id === item.id || !!findNodeById([c], item.id));
+    if (!root) {
+      openSyncCenter({ tab });
+      return;
+    }
+    if (root.id === item.id) {
+      openSyncCenter({ tab, filter: { rootId: root.id, label: root.name } });
+      return;
+    }
+    // Pasta ou request: a Central recorta nela (pelo id e pelo caminho de
+    // nomes, que pega também o que é novo lá dentro).
+    openSyncCenter({
+      tab,
+      filter: { rootId: root.id, itemId: item.id, pathPrefix: namePathTo(root, item.id) ?? undefined, label: item.name },
+    });
+  }, []);
+  // "Enviar esta pasta/request…" da árvore: a Central filtrada no item, na
+  // aba "Para enviar" — o envio parcial passa pelo mesmo lugar que o resto,
+  // com o resultado (e o erro) aparecendo lá. Antes enviava direto, e o
+  // resultado ia pro painel do GitHub, que quase nunca está aberto.
+  const handleOpenSyncToSend = useCallback((item: CollectionItem) => {
+    handleOpenSyncFor(item, 'outgoing');
+  }, [handleOpenSyncFor]);
+  const handleOpenSyncForEnvironment = useCallback((env: Environment) => {
+    openSyncCenter({ tab: env.isDirty ? 'outgoing' : undefined, filter: { environmentName: env.name, label: env.name } });
+  }, []);
+  const handleSyncWorkspace = useCallback(async (path: string) => {
+    if (path !== selectedWorkspaceRef.current) await handleSelectWorkspace(path);
+    // A troca falhou (o handleSelectWorkspace já avisou por toast): abrir a
+    // Central agora mostraria — e sincronizaria — o workspace ERRADO, o que
+    // continuou aberto, sem nada dizendo isso.
+    if (selectedWorkspaceRef.current !== path) return;
+    openSyncCenter();
+  }, [handleSelectWorkspace]);
+
+  // Quem mexeu por último na collection (pra "Recebidos") — o mesmo da revisão.
+  const handleSyncCenterLastChange = useCallback(
+    (rootId: string) => githubSyncRef.current?.lastChangeOf(selectedWorkspaceRef.current, rootId) ?? Promise.resolve(null),
+    []
+  );
 
   // Abre a revisão de environments com um diff já calculado.
   const openEnvironmentReview = useCallback((
@@ -4482,84 +4689,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // Environments não entram na base: lá a identidade é a key da
     // variável, não um id de nó.
     setDiffBase(null);
-    setDiffOpen(true);
+    openReviewDialog();
   }, [environments]);
-
-  // Revisão de environments aberta por um ENVIO que esbarrou em conflito
-  // (handleSaveEnvironmentToGitHub) — o envio continua quando ela for
-  // aplicada. As variáveis suas começam em "Mine" (envKeepMineIds).
-  const reviewEnvironmentsForPush = useCallback(async () => {
-    if (pullingCollectionRef.current) return;
-    pullingCollectionRef.current = true;
-
-    try {
-      const result = await fetchEnvironmentDiffNodes();
-      if (!result) return;
-      const { nodes, remoteEnvs } = result;
-
-      if (nodes.length === 0) {
-        toast.success('Environments already match GitHub.');
-        return;
-      }
-
-      const base = await loadSyncBase(selectedWorkspaceRef.current);
-      openEnvironmentReview(nodes, remoteEnvs, envKeepMineIds(environmentsRef.current, remoteEnvs, base));
-    } catch (e) {
-      toast.error('Could not read GitHub', { description: (e as Error)?.message ?? String(e) });
-    } finally {
-      pullingCollectionRef.current = false;
-    }
-  }, [fetchEnvironmentDiffNodes, openEnvironmentReview]);
-
-  // "Pull environments" (seletor de environments): o mesmo merge por
-  // variável do pull do workspace (lib/sync/envMerge) — o que mudou só lá
-  // entra, o que é seu fica. Antes abria uma revisão sem base que marcava
-  // tudo como "usar a do GitHub", e aplicar descartava a sua variável.
-  const handlePullEnvironments = useCallback(async () => {
-    if (pullingCollectionRef.current) return;
-    pullingCollectionRef.current = true;
-    const workspace = selectedWorkspaceRef.current;
-
-    try {
-      const remote = await githubSyncRef.current?.fetchWorkspace(workspace, undefined, 'Checking environments on GitHub...');
-      if (!remote) return;
-      if (remote.failedPaths.length > 0) {
-        toast.error('Pull cancelled — nothing was changed here', {
-          description: `${remote.failedPaths.length} file(s) could not be read from GitHub. Try again.`,
-        });
-        return;
-      }
-      const remoteEnvs = importData(remote.environments).environments ?? [];
-      await takeUndoSnapshot(workspace);
-      const base = await loadSyncBase(workspace);
-      const result = rebaseEnvironments(environmentsRef.current, remoteEnvs, base);
-      if (result.incoming > 0) {
-        suppressEnvPendingMarkRef.current = true;
-        environmentsRef.current = result.merged;
-        setEnvironments(result.merged);
-      }
-      void recordSyncBase(workspace, environmentHashes(remoteEnvs), [ENV_BASE_PREFIX]);
-      await githubSyncRef.current?.markReviewed(workspace, 'environments').catch(() => undefined);
-
-      const kept = result.keptMineNames.length
-        ? `Kept yours (changed on both sides): ${result.keptMineNames.join(', ')}.`
-        : undefined;
-      if (result.incoming === 0) {
-        undoRef.current = null;
-        toast.success('Environments are up to date with GitHub.', { description: kept });
-      } else {
-        toast.success(`Pulled ${result.incoming} environment change(s) from GitHub.`, {
-          description: kept,
-          duration: 15000,
-          cancel: { label: syncText.undo, onClick: () => void undoLastPull() },
-        });
-      }
-    } catch (e) {
-      toast.error('Could not read GitHub', { description: (e as Error)?.message ?? String(e) });
-    } finally {
-      pullingCollectionRef.current = false;
-    }
-  }, [importData, setEnvironments, takeUndoSnapshot, undoLastPull, syncText]);
 
   /**
    * O botão Pull do painel de sync: traz o workspace ATUAL passando pela
@@ -4589,32 +4720,57 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
       if (remote.collectionPaths.length === 0 && remote.envPaths.length === 0) {
         toast.info(`"${workspace}" isn't on GitHub yet — push it first.`);
+        reportSyncStatus('info', `"${workspace}" isn't on GitHub yet — push it first.`);
         return;
       }
       // Algum arquivo não baixou: sem ele, a collection (ou o environment)
       // pareceria "apagado no GitHub" — tanto pra mescla automática quanto
       // pro "Safe defaults" da revisão, que apagaria daqui. Não aplica nada.
       if (remote.failedPaths.length > 0) {
-        toast.error('Pull cancelled — nothing was changed here', {
-          description: `${remote.failedPaths.length} file(s) could not be read from GitHub: ${remote.failedPaths
-            .map(p => p.split('/').pop())
-            .join(', ')}. Try again.`,
-        });
+        const description = `${remote.failedPaths.length} file(s) could not be read from GitHub: ${remote.failedPaths
+          .map(p => p.split('/').pop())
+          .join(', ')}. Try again.`;
+        toast.error('Pull cancelled — nothing was changed here', { description });
+        reportSyncStatus('error', `Pull cancelled — nothing was changed here. ${description}`);
         return;
       }
 
-      if (remote.markers) await handlePullMarkers(workspace, remote.markers);
-
+      // "Cancelar" da Central: leu, mas nada foi aplicado ainda.
+      if (isSyncCancelRequested()) {
+        reportSyncStatus('error', SYNC_CANCELLED_MESSAGE);
+        return;
+      }
       const remoteEnvs = importData(remote.environments).environments ?? [];
 
-      // Estado de antes — pro "Desfazer" do toast no fim.
+      // Arquivo antigo de uma renomeação ainda no GitHub (mesmo id de outro):
+      // a leitura usou o mais novo. Diz isso, em vez de calar.
+      if (remote.supersededPaths?.length) {
+        const names = remote.supersededPaths.map(p => p.split('/').pop()).join(', ');
+        const note = `GitHub still has old file(s) left from a rename: ${names}. The newest version was used; your next push removes the old file(s).`;
+        toast.info(note, { duration: 12000 });
+        reportSyncStatus('info', note);
+      }
+
+      // Estado de antes — pro "Desfazer" do toast no fim. ANTES dos
+      // marcadores: mesclados primeiro, o Desfazer não os voltava.
       await takeUndoSnapshot(workspace);
+      // Quantos marcadores o merge do catálogo muda aqui — calculado antes de
+      // aplicar, pra mensagem dizer que algo chegou mesmo quando é só isso.
+      const markerChanges = remote.markers
+        ? markerChangeCount(markerChangesFromRemote(markersRef.current, remote.markers, await loadSyncBase(workspace)))
+        : 0;
+      if (remote.markers) await handlePullMarkers(workspace, remote.markers);
 
       // Mesma mescla do push (lib/sync/rebase + envMerge): o que mudou só no
       // GitHub entra sozinho, o que é seu fica, e a revisão só abre se
       // sobrar conflito de verdade — já filtrada nele.
       const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
       const base = await loadSyncBase(workspace);
+      // Último ponto seguro do pull: daqui em diante a mescla é aplicada.
+      if (isSyncCancelRequested()) {
+        reportSyncStatus('error', SYNC_CANCELLED_MESSAGE);
+        return;
+      }
       const result = rebaseCollections(
         collectionsRef.current,
         remoteTree,
@@ -4633,6 +4789,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       void recordSyncBase(workspace, environmentHashes(remoteEnvs), [ENV_BASE_PREFIX]);
 
       if (result.conflicts.length > 0) {
+        // O apply da revisão usa o snapshot de antes dos marcadores e dos
+        // environments que acabaram de entrar.
+        undoPrimedRef.current = undoRef.current;
         await githubSyncRef.current?.markReviewed(workspace, 'environments').catch(() => undefined);
         setDiffConflictsOnly(true);
         handleCompareRemote(workspace, remote.collections, remote.environments);
@@ -4671,10 +4830,19 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       const yours = result.outgoing + envResult.keptMine;
       const waiting = yours > 0 ? 'Your own changes were kept and are waiting to be pushed.' : undefined;
       if (total === 0) {
-        undoRef.current = null; // nada mudou: nada a desfazer
-        toast.success(`"${workspace}" is up to date with GitHub.`, { description: waiting });
+        // Nada mudou: nada a desfazer. Marcadores que chegaram contam.
+        if (markerChanges === 0) undoRef.current = null;
+        const upToDate = markerChanges > 0
+          ? `"${workspace}" is up to date with GitHub — ${markerChanges} marker change(s) came in.`
+          : `"${workspace}" is up to date with GitHub.`;
+        toast.success(upToDate, { description: waiting });
+        reportSyncStatus('success', waiting ? `${upToDate} ${waiting}` : upToDate);
       } else {
         const sections = mergeReportSections(result, envResult, true);
+        reportSyncStatus('success', `Pulled ${total} change(s) from GitHub into "${workspace}".${waiting ? ` ${waiting}` : ''}`, {
+          label: syncText.undo,
+          run: () => void undoLastPull(),
+        });
         toast.success(`Pulled ${total} change(s) from GitHub into "${workspace}".`, {
           description: waiting,
           duration: 15000,
@@ -4684,33 +4852,47 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       }
     } catch (e) {
       toast.error('Could not read GitHub', { description: (e as Error)?.message ?? String(e) });
+      reportSyncStatus('error', `Could not read GitHub: ${(e as Error)?.message ?? String(e)}`);
     } finally {
       pullingCollectionRef.current = false;
     }
   }, [environments, importData, handleCompareRemote, handlePullMarkers, openEnvironmentReview, setEnvironments, takeUndoSnapshot, mergeReportSections, undoLastPull, syncText]);
 
-  const handleSaveEnvironmentToGitHub = useCallback(async (env: Environment) => {
+  // Envia UM environment, com o mesmo merge por variável do push do
+  // workspace (lib/sync/envMerge) — o "Só enviar" da Central aberta a partir
+  // de um environment. Sem isto o botão mandava o workspace inteiro, com as
+  // collections pela metade junto; antes da Central, o "Save environment"
+  // mandava só ele. 3 tentativas: alguém pode enviar entre a leitura e o commit.
+  const handlePushEnvironmentOnly = useCallback(async (env: Environment) => {
     if (!githubSyncRef.current) return;
     const workspace = selectedWorkspaceRef.current;
+    const fail = (message: string) => {
+      toast.error('Push cancelled', { description: message });
+      reportSyncStatus('error', `Push cancelled: ${message}`);
+    };
 
-    // Merge por variável antes de enviar (lib/sync/envMerge), igual ao push
-    // de uma collection: antes, qualquer diferença com o GitHub — inclusive
-    // a sua própria mudança, que é o que se quer enviar — abria a revisão.
-    // 3 tentativas: alguém pode enviar entre a leitura e a gravação.
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (isSyncCancelRequested()) {
+        reportSyncStatus('error', SYNC_CANCELLED_MESSAGE);
+        return;
+      }
       let toSend: Environment = environmentsRef.current.find(e => e.id === env.id) ?? env;
       try {
         const remote = await githubSyncRef.current.fetchWorkspace(workspace, undefined, `Checking "${env.name}" on GitHub...`);
         // Arquivo que não baixou pareceria "apagado lá" — e o envio gravaria
         // por cima de uma versão que nem foi lida.
-        if (remote && remote.failedPaths.length > 0) throw new Error(`Could not read ${remote.failedPaths.length} file(s) from GitHub (${remote.failedPaths.map(p => p.split('/').pop()).join(', ')}). Nothing was pushed — try again.`);
+        if (remote && remote.failedPaths.length > 0) {
+          fail(`Could not read ${remote.failedPaths.length} file(s) from GitHub (${remote.failedPaths.map(p => p.split('/').pop()).join(', ')}). Nothing was pushed — try again.`);
+          return;
+        }
         if (remote) {
           const remoteEnvs = importData(remote.environments).environments ?? [];
           const remoteEnv = remoteEnvs.find(e => e.id === toSend.id) ?? remoteEnvs.find(e => e.name === toSend.name);
-          const envBase = await loadSyncBase(workspace);
+          const base = await loadSyncBase(workspace);
           // Relê depois das esperas: a mescla troca o environment daqui.
           toSend = environmentsRef.current.find(e => e.id === env.id) ?? toSend;
-          const result = rebaseEnvironments([toSend], remoteEnv ? [remoteEnv] : [], envBase);
+          throwIfSyncCancelled();
+          const result = rebaseEnvironments([toSend], remoteEnv ? [remoteEnv] : [], base);
           const merged = result.merged.find(e => e.id === toSend.id);
           if (merged && result.incoming > 0) {
             const next = environmentsRef.current.map(e => (e.id === merged.id ? merged : e));
@@ -4721,33 +4903,121 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           }
         }
       } catch (e) {
-        // Sem ler o GitHub não há merge — enviar mesmo assim gravaria por
-        // cima do que não deu pra ler.
-        toast.error('Push cancelled', { description: (e as Error)?.message ?? String(e) });
+        fail((e as Error)?.message ?? String(e));
         return;
       }
 
       try {
         await githubSyncRef.current.pushEnvironment(toSend);
       } catch (e) {
-        // Sem senha de sync: o GitHubSync já avisou (toast com "Open settings").
-        // Não é erro do app — não repassa pro console.error de quem chamou.
-        if (e instanceof MissingPassphraseError) return;
         if (e instanceof GitHubConflictError) continue;
-        throw e;
+        // Sem senha, sem configuração, outro envio em curso: o GitHubSync já
+        // disse o motivo (e a Central o recebe pelo status).
+        return;
       }
       markEnvironmentSynced(env.id);
-      // O que subiu vira a base deste environment (as chaves antigas dele saem).
-      // Sem o token de sessão, que não subiu (lib/jwt).
+      // Pendência só deste environment — e só se nada mudou durante o envio.
+      const now = environmentsRef.current.find(e => e.id === env.id);
+      const sentValues = JSON.stringify(withoutSessionTokens([toSend])[0].values);
+      if (!now || JSON.stringify(withoutSessionTokens([now])[0].values) === sentValues) {
+        clearEnvironmentsPendingPush(workspace, [env.id]);
+        setPendingPush(readPendingPush(workspace));
+      }
+      // O que subiu vira a base deste environment, sem o token de sessão.
       void recordSyncBase(workspace, environmentHashes(withoutSessionTokens([toSend])), [`${ENV_BASE_PREFIX}${toSend.id}`]);
       return;
     }
+    fail(`"${env.name}" kept changing on GitHub while sending. Use "Sync all" to merge and send.`);
+  }, [importData, markEnvironmentSynced, setEnvironments]);
 
-    // O GitHub não parou de mudar: cai na revisão, e o envio continua quando
-    // ela for aplicada.
-    setPushEnvAfterDiff(env);
-    await reviewEnvironmentsForPush();
-  }, [importData, markEnvironmentSynced, reviewEnvironmentsForPush, setEnvironments]);
+  // Ações da Central de Sincronização — os MESMOS caminhos de sempre, sem
+  // sync novo:
+  //   receive / resolve → o pull com merge (handlePullWorkspaceWithReview):
+  //                       o que é só de lá entra, conflito abre a revisão;
+  //   send              → o push (handlePushEverything), que também mescla o
+  //                       que veio de lá antes de enviar. Com a Central
+  //                       filtrada, só aquela collection ou aquele environment;
+  //   all               → receber e, se não parou em conflito nem em erro e
+  //                       há o que enviar, enviar.
+  // O que o push e o pull disseram no caminho volta em `messages`: com a
+  // Central aberta, o painel do GitHub está fechado e o resultado sumia.
+  const runSyncAction = useCallback(async (
+    action: SyncAction,
+    scope: SyncActionScope = {},
+    // O que a Central contou em "Para enviar" (o merge de teste). A pendência
+    // marcada nem sempre o acompanha — e "Sincronizar tudo" pulava o envio
+    // com a Central mostrando ↑N.
+    hint: { outgoing?: boolean } = {}
+  ): Promise<SyncActionResult> => {
+    const workspace = selectedWorkspaceRef.current;
+    reviewRequestedRef.current = false;
+    resetSyncCancel();
+    const capture = captureSyncStatus();
+    setSyncCenterBusy(true);
+    let review = false;
+    let reviewedOnReceive = false;
+    try {
+      if (action === 'receive' || action === 'resolve' || action === 'all') {
+        await handlePullWorkspaceWithReview();
+        review = reviewRequestedRef.current;
+        reviewedOnReceive = review;
+      }
+      // Cancelado no receber: o envio de "tudo" nem começa.
+      if (!review && !isSyncCancelRequested() && (action === 'send' || action === 'all')) {
+        // Envio com escopo (Central filtrada, ou o "Enviar" de uma linha): só
+        // aquele item — collection, pasta, request ou environment.
+        const scoped = action === 'send' && !!(scope.environmentName || scope.itemId || scope.rootId);
+        const env = scoped && scope.environmentName
+          ? environmentsRef.current.find(e => e.name === scope.environmentName)
+          : undefined;
+        const targetId = scope.itemId ?? scope.rootId;
+        const item = scoped && !scope.environmentName && targetId
+          ? findNodeById(collectionsRef.current, targetId)
+          : undefined;
+        const receiveFailed = action === 'all' && capture.peek().some(m => m.type === 'error');
+        if (receiveFailed) {
+          // O pedido era "receber e enviar", e o receber já falhou: pára aqui
+          // em vez de enviar por cima de um GitHub que não deu pra ler.
+          reportSyncStatus('info', 'Nothing was sent, because receiving from GitHub failed.');
+        } else if (scoped && !env && !item) {
+          // O item sumiu daqui (apagado com a Central aberta, por exemplo).
+          // Antes isto caía no push do workspace inteiro — o oposto do pedido.
+          reportSyncStatus('error', `"${scope.label ?? scope.environmentName ?? targetId}" no longer exists here — nothing was sent.`);
+        } else if (env) {
+          await handlePushEnvironmentOnly(env);
+        } else if (item) {
+          // Collection, pasta ou request: o handlePushCollection decide (pelo
+          // ref, porque é declarado mais abaixo).
+          await pushCollectionRef.current?.(item);
+        } else if (action === 'send' || hint.outgoing || !isPendingEmpty(readPendingPush(workspace))) {
+          // "Tudo" sem nada daqui pra enviar (nem pela pendência, nem pelo que
+          // a Central mostrou) não faz commit à toa.
+          await githubSyncRef.current?.push();
+        }
+        review = reviewRequestedRef.current;
+      }
+    } catch (e) {
+      reportSyncStatus('error', (e as Error)?.message ?? String(e));
+    } finally {
+      setSyncCenterBusy(false);
+    }
+    const messages = capture.stop();
+    // Cancelada: o que terminou antes fica nas mensagens; o resto vira um
+    // aviso só (e não "falhou").
+    if (isSyncCancelRequested()) {
+      resetSyncCancel();
+      return asCancelled(messages, syncText.scCancelledResult);
+    }
+    return {
+      result: review ? 'review' : messages.some(m => m.type === 'error') ? 'failed' : 'done',
+      messages,
+      // Parou no conflito do RECEBER: o envio de "tudo" ainda não rodou.
+      ...(review && reviewedOnReceive && action === 'all' ? { continueSend: true } : {}),
+    };
+  }, [handlePullWorkspaceWithReview, handlePushEnvironmentOnly, syncText]);
+
+  // "Cancelar" da Central: para no próximo ponto seguro (ver syncCenterStore).
+  const handleSyncCancel = useCallback(() => requestSyncCancel(), []);
 
   // Restaurar um commit do workspace aberto (janela de histórico): mesma
   // revisão do Pull, com o commit no lugar do GitHub de hoje.
@@ -4757,8 +5027,16 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     rawEnvironments: unknown[],
     label: string
   ) => {
-    const remoteEnvs = importData(rawEnvironments).environments ?? [];
-    const envNodes = diffEnvironments(environments, remoteEnvs);
+    // Token de sessão fica fora da restauração, como fica do pull: o commit
+    // tem o token vazio (ou o antigo de alguém), e escolher "GitHub" trocava o
+    // token daqui por ele — e era preciso fazer login de novo. Os tokens
+    // daqui entram na versão do commit (withLocalOnlyValues), e a diferença é
+    // medida sem eles.
+    const remoteEnvs = withLocalOnlyValues(
+      withoutSessionTokens(importData(rawEnvironments).environments ?? []),
+      environments
+    );
+    const envNodes = diffEnvironments(withoutSessionTokens(environments), withoutSessionTokens(remoteEnvs));
     const { hasChanges } = handleCompareRemote(workspaceName, rawCollections, rawEnvironments);
     // handleCompareRemote marca o escopo pra registrar como sincronizado —
     // um commit antigo não é o GitHub de agora.
@@ -4814,10 +5092,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // "Desfazer" só faz sentido quando nada é enviado depois: aí o GitHub
     // continua o que era e dá pra voltar o local ao de antes.
     const pushFollows = !!(pushAfterDiff || pushAllAfterDiff || pushEnvAfterDiff || pushWorkspaceAfterDiff || pushItemAfterDiff);
-    if (!pushFollows && !diffSnapshotLabel) await takeUndoSnapshot(workspace);
-    else undoRef.current = null;
+    const primed = undoPrimedRef.current;
+    undoPrimedRef.current = null;
+    if (!pushFollows && !diffSnapshotLabel) {
+      if (!(primed && primed === undoRef.current && primed.workspace === workspace)) await takeUndoSnapshot(workspace);
+    } else undoRef.current = null;
     const offerUndo = () => {
       if (!undoRef.current) return;
+      reportSyncStatus('success', 'Changes from GitHub applied.', { label: syncText.undo, run: () => void undoLastPull() });
       toast.success('Changes from GitHub applied.', {
         duration: 15000,
         cancel: { label: syncText.undo, onClick: () => void undoLastPull() },
@@ -4852,6 +5134,20 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       }
       setDiffSnapshotLabel(null);
       setEnvironments(merged);
+      // A marcação automática foi suprimida acima — então o que ainda difere
+      // do GitHub (você escolheu "Mine") é marcado aqui. Sem isto a escolha
+      // não aparecia como "↑ para enviar". Sem os tokens de sessão, que não
+      // sobem (lib/jwt).
+      if (!diffSnapshotLabel) {
+        const localIds = new Set(merged.map(e => e.id));
+        const differ = [
+          ...new Set(diffEnvironments(withoutSessionTokens(merged), withoutSessionTokens(diffRemoteEnvs)).map(n => n.rootId)),
+        ].filter(id => localIds.has(id));
+        if (differ.length > 0) {
+          markEnvironmentsPendingPush(workspace, differ);
+          setPendingPush(readPendingPush(workspace));
+        }
+      }
       setDiffOpen(false);
       offerUndo();
 
@@ -4899,7 +5195,13 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       return;
     }
 
-    const merged = applySelectedChanges(collections, diffRemoteTree, selectedIds, overrides);
+    const merged = structuredClone(applySelectedChanges(collections, diffRemoteTree, selectedIds, overrides));
+    // Itens que o colega MOVEU de pasta (e o que editou neles) não aparecem
+    // na revisão — o diff não os lista. Sem isto ficavam no lugar antigo,
+    // com o conteúdo antigo; a base gravada abaixo diz "pasta nova", e o
+    // push seguinte desfazia a mudança dele no GitHub. Mesma regra do merge
+    // do push (lib/sync/rebase). Restaurar um commit não move nada.
+    if (!diffSnapshotLabel) applyRemoteMoves(merged, collections, diffRemoteTree, diffBase);
 
     // Suprime a marcação automática: o efeito de `collections` acusaria a
     // mescla inteira como edição local, quando boa parte dela acabou de vir
@@ -4999,7 +5301,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       const item = pushItemAfterDiff;
       setDiffOpen(false);
       collectionsRef.current = merged;
-      setTimeout(() => void pushItemRef.current?.(item), 0);
+      // A promessa fica guardada: quem abriu esta revisão pela Central
+      // espera o envio terminar pra mostrar o resultado (ver
+      // handleApplyDiffAndReturn).
+      deferredPushRef.current = new Promise<void>(resolve => {
+        setTimeout(() => {
+          void Promise.resolve(pushItemRef.current?.(item)).catch(() => undefined).finally(resolve);
+        }, 0);
+      });
     } else if (pendingAll) {
       // Mesma ideia do pending acima, só que pro push INTEIRO: a mescla virou
       // o novo estado local (merged), e é ele que precisa subir — reenviar
@@ -5024,7 +5333,53 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // `diffTarget`, `environments` e `diffRemoteEnvs` entram de verdade: sem
     // eles o callback aplicaria o ramo de environment com dados congelados da
     // primeira renderização — e escreveria valores velhos por cima dos atuais.
-  }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments, pushAfterDiff, pushAllAfterDiff, pushEnvAfterDiff, pushWorkspaceAfterDiff, pushItemAfterDiff, diffLocalOverride, pendingEnvReview, openEnvironmentReview, diffReviewScope, diffSnapshotLabel, diffNodes, takeUndoSnapshot, undoLastPull, syncText]);
+  }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments, pushAfterDiff, pushAllAfterDiff, pushEnvAfterDiff, pushWorkspaceAfterDiff, pushItemAfterDiff, diffLocalOverride, pendingEnvReview, openEnvironmentReview, diffReviewScope, diffSnapshotLabel, diffNodes, diffBase, takeUndoSnapshot, undoLastPull, syncText]);
+
+  // A revisão aberta por uma ação da Central: aplica e VOLTA pra Central, com
+  // o resultado do que veio depois (o envio que a mescla destrava, o
+  // "Desfazer"). Antes a Central fechava pra revisão e não voltava — e o
+  // resultado desse envio ia pro painel do GitHub, que estava fechado.
+  const handleApplyDiffAndReturn = useCallback(async (...args: Parameters<typeof handleApplyDiff>) => {
+    const resume = takeResumeAfterReview();
+    if (!resume) return handleApplyDiff(...args);
+    const capture = captureSyncStatus();
+    reviewRequestedRef.current = false;
+    let continueSend = resume.continueSend === true;
+    try {
+      await handleApplyDiff(...args);
+      const deferred = deferredPushRef.current;
+      deferredPushRef.current = null;
+      if (deferred) await deferred;
+      // "Sincronizar tudo" que parou no conflito do receber: com a revisão
+      // aplicada (e sem outra aberta), o envio que faltava roda agora. Antes
+      // a Central voltava e era preciso clicar "Só enviar".
+      if (continueSend && !reviewRequestedRef.current) {
+        continueSend = false;
+        // Um tick: o envio lê a árvore e os environments do último render.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const workspace = selectedWorkspaceRef.current;
+        if (resume.outgoing || !isPendingEmpty(readPendingPush(workspace))) {
+          await githubSyncRef.current?.push();
+        }
+      }
+    } catch (e) {
+      reportSyncStatus('error', (e as Error)?.message ?? String(e));
+    }
+    const messages = [...resume.messages, ...capture.stop()];
+    // A aplicação abriu outra revisão (a dos environments, ou um conflito no
+    // envio): a Central volta depois dela. Se foi a dos environments, o envio
+    // de "tudo" continua esperando; se foi o conflito do envio, a própria
+    // revisão reenvia ao ser aplicada.
+    if (reviewRequestedRef.current) {
+      markResumeAfterReview({ ...resume, messages: withoutActions(messages), continueSend });
+      return;
+    }
+    openSyncCenter({
+      tab: resume.tab,
+      filter: resume.filter,
+      result: { result: messages.some(m => m.type === 'error') ? 'failed' : 'done', messages },
+    });
+  }, [handleApplyDiff]);
 
   // Baixar o que mudou no GitHub SÓ desta collection e abrir a comparação.
   //
@@ -5046,7 +5401,11 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         undefined,
         `Checking "${item.name}" on GitHub...`
       );
-      if (!remote) return;
+      if (!remote) {
+        setPushAfterDiff(null);
+        setPushItemAfterDiff(null);
+        return;
+      }
       // Arquivo que não baixou some da árvore remota, e a collection dele
       // apareceria como "apagada no GitHub" — já marcada, e o Apply a
       // apagaria daqui. Mesma regra do pull do workspace inteiro.
@@ -5054,6 +5413,11 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         toast.error('Pull cancelled — nothing was changed here', {
           description: `${remote.failedPaths.length} file(s) could not be read from GitHub. Try again.`,
         });
+        reportSyncStatus('error', `Could not read ${remote.failedPaths.length} file(s) from GitHub — nothing was changed or sent. Try again.`);
+        // Sem revisão, o envio que esperava por ela não acontece: desmarca
+        // (senão a próxima revisão aplicada enviaria este item).
+        setPushAfterDiff(null);
+        setPushItemAfterDiff(null);
         return;
       }
 
@@ -5061,6 +5425,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       // árvore, nunca o catálogo de marcadores (renomear/recolorir um
       // marcador existente nunca chegava aqui antes). Mesma mescla do pull
       // do workspace inteiro — união, nunca substituição (handlePullMarkers).
+      // Desfazer: o estado de ANTES dos marcadores (ver undoPrimedRef).
+      await takeUndoSnapshot(workspace);
+      undoPrimedRef.current = undoRef.current;
       if (remote.markers) await handlePullMarkers(workspace, remote.markers);
 
       const imported = importData(remote.collections);
@@ -5071,7 +5438,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       const nodes = filterSubtree(diffTrees(collections, remoteTree), item.id);
 
       if (nodes.length === 0) {
+        // A revisão não abre: o envio que esperava por ela (pushAfterDiff /
+        // pushItemAfterDiff) é desmarcado. Sem isto ficava guardado, e a
+        // próxima revisão aplicada — de qualquer coisa — enviava este item.
+        setPushAfterDiff(null);
+        setPushItemAfterDiff(null);
+        setDiffConflictsOnly(false);
         toast.success(`"${item.name}" already matches GitHub.`);
+        reportSyncStatus('success', `"${item.name}" already matches GitHub.`);
         return;
       }
 
@@ -5089,85 +5463,18 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       // foi visto — não dá pra chamá-lo de sincronizado.
       setDiffReviewScope(collections.some(c => c.id === item.id) ? { rootIds: [item.id] } : null);
       setDiffBase(await loadSyncBase(workspace));
-      setDiffOpen(true);
+      openReviewDialog();
     } catch (e) {
       toast.error('Could not read GitHub', {
         description: (e as Error)?.message ?? String(e),
       });
+      reportSyncStatus('error', `Could not read GitHub: ${(e as Error)?.message ?? String(e)}`);
+      setPushAfterDiff(null);
+      setPushItemAfterDiff(null);
     } finally {
       pullingCollectionRef.current = false;
     }
-  }, [collections, importData, handlePullMarkers]);
-
-  // Busca o remoto e recorta o diff pela subárvore desta collection — mesmo
-  // pipeline usado por "Check for updates" e pela checagem proativa antes de
-  // cada push (ver handlePushCollection). `null` = não deu pra checar (sem
-  // remoto); quem chama decide o que fazer nesse caso.
-  const fetchCollectionDiffNodes = useCallback(async (item: CollectionItem) => {
-    const remote = await githubSyncRef.current?.fetchWorkspace(
-      selectedWorkspaceRef.current,
-      undefined,
-      `Checking "${item.name}" on GitHub...`
-    );
-    if (!remote) return null;
-    // Sem um arquivo, a collection dele pareceria apagada no GitHub — a
-    // checagem diria "N differences" e o push proativo abriria a revisão
-    // com ela marcada pra apagar. Falha vira erro, não diferença.
-    if (remote.failedPaths.length > 0) {
-      throw new Error(`${remote.failedPaths.length} file(s) could not be read from GitHub. Try again.`);
-    }
-
-    const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
-    return filterSubtree(diffTrees(collections, remoteTree), item.id);
-  }, [collections, importData]);
-
-  /**
-   * Responde "tem algo novo?" sem abrir a revisão.
-   *
-   * O pull também avisa quando não há nada — mas quando HÁ, ele já entra na
-   * tela de comparação. Querer só saber, para decidir a hora de mexer, era
-   * um caminho que não existia: a verificação do workspace inteiro vive no
-   * painel de sync e abre a mesma tela.
-   *
-   * A resposta vem num toast com atalho para revisar, então saber e agir
-   * continuam a um clique de distância.
-   */
-  const handleCheckCollectionUpdates = useCallback(async (item: CollectionItem) => {
-    if (pullingCollectionRef.current) return;
-    pullingCollectionRef.current = true;
-
-    try {
-      const nodes = await fetchCollectionDiffNodes(item);
-      if (nodes === null) return;
-
-      if (nodes.length === 0) {
-        toast.success(`"${item.name}" is up to date.`);
-        return;
-      }
-
-      const added = nodes.filter(n => n.change === 'added').length;
-      const removed = nodes.filter(n => n.change === 'removed').length;
-      const changed = nodes.length - added - removed;
-      const parts = [
-        changed > 0 ? `${changed} changed` : null,
-        added > 0 ? `${added} only on GitHub` : null,
-        removed > 0 ? `${removed} only here` : null,
-      ].filter(Boolean);
-
-      toast.info(
-        `${nodes.length} difference${nodes.length === 1 ? '' : 's'} in "${item.name}"`,
-        {
-          description: parts.join(' · '),
-          duration: 10000,
-          action: { label: 'Review', onClick: () => { void handlePullCollection(item) } },
-        }
-      );
-    } catch (e) {
-      toast.error('Could not read GitHub', { description: (e as Error)?.message ?? String(e) });
-    } finally {
-      pullingCollectionRef.current = false;
-    }
-  }, [fetchCollectionDiffNodes, handlePullCollection]);
+  }, [collections, importData, handlePullMarkers, takeUndoSnapshot]);
 
   // "Push deste item" (subpasta ou request): sobe SÓ esse item. O arquivo
   // no GitHub continua sendo a collection inteira, então o que vai é a
@@ -5176,25 +5483,39 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // aqui, pendentes; o que veio do GitHub entra aqui também.
   const handlePushItem = useCallback(async (item: CollectionItem) => {
     const workspace = selectedWorkspaceRef.current;
+    // Toda saída sem envio diz por quê — no toast e na Central, quando o
+    // envio veio dela. Antes os erros iam só pro toast (a Central dizia que
+    // tinha dado certo) e quatro saídas não diziam nada.
+    const fail = (title: string, description?: string) => {
+      toast.error(title, description ? { description } : undefined);
+      reportSyncStatus('error', description ? `${title}: ${description}` : title);
+    };
+    const gone = () => fail(`"${item.name}" no longer exists here — nothing was sent.`);
     const rootOf = (id: string) =>
       collectionsRef.current.find(c => c.id === id || !!findNodeById(c.item ?? [], id));
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const localRoot = rootOf(item.id);
-      if (!localRoot) return;
+      if (!localRoot) {
+        gone();
+        return;
+      }
 
       let remote;
       try {
         remote = await githubSyncRef.current?.fetchWorkspace(workspace, undefined, `Checking "${item.name}" on GitHub...`);
       } catch (e) {
-        toast.error('Could not read GitHub', { description: (e as Error)?.message ?? String(e) });
+        fail('Could not read GitHub', (e as Error)?.message ?? String(e));
         return;
       }
-      if (!remote) return;
+      if (!remote) {
+        fail('GitHub sync is not set up — nothing was sent.');
+        return;
+      }
       // Sem um arquivo, a collection pareceria "não estar no GitHub" — e o
       // envio da collection inteira gravaria por cima da versão de lá.
       if (remote.failedPaths.length > 0) {
-        toast.error('Push cancelled', { description: `Could not read ${remote.failedPaths.length} file(s) from GitHub (${remote.failedPaths.map(p => p.split('/').pop()).join(', ')}). Nothing was pushed — try again.` });
+        fail('Push cancelled', `Could not read ${remote.failedPaths.length} file(s) from GitHub (${remote.failedPaths.map(p => p.split('/').pop()).join(', ')}). Nothing was pushed — try again.`);
         return;
       }
 
@@ -5204,6 +5525,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       // A collection nem existe lá: não há "versão de lá" pra trocar um item.
       if (!remoteRoot) {
         toast.info(`"${localRoot.name}" isn't on GitHub yet — pushing the whole collection.`);
+        reportSyncStatus('info', `"${localRoot.name}" isn't on GitHub yet — the whole collection was sent.`);
         await pushCollectionRef.current?.(localRoot);
         return;
       }
@@ -5211,7 +5533,10 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       const base = await loadSyncBase(workspace);
       // Relê depois das esperas: a mescla troca a collection daqui.
       const latestRoot = rootOf(item.id);
-      if (!latestRoot) return;
+      if (!latestRoot) {
+        gone();
+        return;
+      }
       const result = rebaseCollections([latestRoot], [remoteRoot], base, new Set(readPendingPush(workspace).collections));
 
       // Só conflito DENTRO do item importa: o resto não está sendo enviado.
@@ -5224,8 +5549,12 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
       const mergedRoot = result.merged.find(c => c.id === latestRoot.id);
       const toSend = mergedRoot ? withSubtreeFrom(remoteRoot, mergedRoot, item.id) : null;
-      if (!mergedRoot || !toSend) return;
+      if (!mergedRoot || !toSend) {
+        fail(`Could not prepare "${item.name}" for sending — nothing was sent. Try "Sync all".`);
+        return;
+      }
 
+      throwIfSyncCancelled();
       // O que veio do GitHub entra aqui também (sem virar pendência).
       if (result.incoming + result.fieldMerged > 0) {
         const next = collectionsRef.current.map(c => (c.id === latestRoot.id ? mergedRoot : c));
@@ -5311,6 +5640,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
             await openReview();
             return;
           }
+          throwIfSyncCancelled();
           // O que veio do GitHub entra aqui também, sem virar pendência.
           if (result.incoming + result.fieldMerged > 0) {
             const next = collectionsRef.current.map(c => (c.id === toSend.id ? mergedRoot : c));
@@ -5325,6 +5655,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         // Sem ler o GitHub não há merge — enviar mesmo assim gravaria a
         // versão daqui por cima do que não deu pra ler.
         toast.error('Push cancelled', { description: (e as Error)?.message ?? String(e) });
+        reportSyncStatus('error', `Push cancelled: ${(e as Error)?.message ?? String(e)}`);
         return;
       }
 
@@ -5475,6 +5806,22 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // regra de gravação (patchEnvironmentVariables) e o mesmo aviso no Console
   // quando um script apaga ou esvazia uma variável — só que no environment
   // que a ferramenta usou, que pode não ser o selecionado.
+  // update_request / move_item / delete_item do MCP. Por updater, nunca pelo
+  // snapshot do contexto: duas chamadas seguidas não se atropelam. A pendência
+  // de push vem do efeito de collections, como em qualquer edição.
+  const handleMcpUpdateCollectionItem = useCallback(async (id: string, item: CollectionItem) => {
+    setCollections(prev => patchNode(prev, id, item));
+    // Aba aberta sem edição não salva: passa a mostrar a versão nova (senão o
+    // Save seguinte gravaria a antiga por cima). Com edição, fica como está.
+    setTabs(prev => prev.map(t => (t.id === id && !t.isDirty ? reloadedTab(t, item, buildTabFromItem) : t)));
+  }, []);
+  const handleMcpMoveCollectionItem = useCallback(async (id: string, targetFolderId: string | null, position?: number) => {
+    setCollections(prev => moveTreeItem(prev, id, targetFolderId, position).tree);
+  }, []);
+  const handleMcpRemoveCollectionItem = useCallback(async (id: string) => {
+    setCollections(prev => removeNode(prev, id));
+  }, []);
+
   const handleMcpApplyEnvironmentChanges = useCallback(
     async (environmentId: string, before: Record<string, string>, after: Record<string, string>, requestName: string) => {
       patchEnvironmentVariables(environmentId, before, after, loss => {
@@ -5510,7 +5857,10 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     renameCollectionItem: handleMcpRenameCollectionItem,
     setEnvironmentVariable: handleMcpSetEnvironmentVariable,
     applyEnvironmentChanges: handleMcpApplyEnvironmentChanges,
-  }), [collections, environments, activeEnv?.name, tabs, activeTabId, logs, handleMcpSetRequestScript, handleMcpAddCollectionItem, handleMcpRenameCollectionItem, handleMcpSetEnvironmentVariable, handleMcpApplyEnvironmentChanges]);
+    updateCollectionItem: handleMcpUpdateCollectionItem,
+    moveCollectionItem: handleMcpMoveCollectionItem,
+    removeCollectionItem: handleMcpRemoveCollectionItem,
+  }), [collections, environments, activeEnv?.name, tabs, activeTabId, logs, handleMcpSetRequestScript, handleMcpAddCollectionItem, handleMcpRenameCollectionItem, handleMcpSetEnvironmentVariable, handleMcpApplyEnvironmentChanges, handleMcpUpdateCollectionItem, handleMcpMoveCollectionItem, handleMcpRemoveCollectionItem]);
 
   const mcp = useMcpServer(getMcpContext);
 
@@ -5816,15 +6166,9 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
   }
 }, [handleSelectWorkspace, setEnvironments]);
 
+  // Abrindo o app: o carregamento padrão, com o ícone do DevFlow.
   if (!hydrated) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-pm-bg text-pm-text-muted text-sm font-sans">
-        <div className="flex items-center gap-2">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-pm-border border-t-transparent" />
-          <span>Loading interface...</span>
-        </div>
-      </div>
-    );
+    return <DevFlowFullScreenLoader label={syncText.loadingApp} detail={syncText.loadingAppSub} />;
   }
 
   const renderUrlBar = () => (
@@ -6023,7 +6367,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
           </div>
         )}
 
-        <EnvironmentSelector key={envVersion} workspace={selectedWorkspace} onSaveEnvironment={handleSaveEnvironmentToGitHub} onPullEnvironments={handlePullEnvironments} />
+        {/* Enviar e receber environments: pela Central de Sincronização, já filtrada nele. */}
+        <EnvironmentSelector key={envVersion} workspace={selectedWorkspace} onOpenSync={handleOpenSyncForEnvironment} />
 
 {/* Menu Dropdown de Ferramentas cURL */}
     <div className="relative" ref={toolsMenuRef}>
@@ -6362,8 +6707,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               </div>
               <div className="absolute inset-0 bg-pm-bg/60 backdrop-blur-[2px]" />
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-                <div className="w-8 h-8 rounded-full border-2 border-pm-accent/30 border-t-pm-accent animate-spin" />
-                <span className="text-[11px] text-pm-text-muted">Sending request…</span>
+                <DevFlowSpinner size={40} />
+                <span className="text-[11px] text-pm-text-muted">{syncText.sendingRequest}</span>
               </div>
             </div>
           ) : activeTab?.response ? (
@@ -6465,8 +6810,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               onCreateWorkspace={handleCreateWorkspace}
               onRenameWorkspace={handleRenameWorkspaceLocal}
                 onDeleteWorkspace={handleDeleteWorkspace}
-                onPullWorkspace={handlePullSingleWorkspace}
-                onPushWorkspace={handlePushSingleWorkspace}
+                onSyncWorkspace={handleSyncWorkspace}
                 onOpenCommitHistory={handleOpenCommitHistory}
             />
 
@@ -6494,7 +6838,6 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               onWorkspacePushConflict={handleWorkspacePushConflict}
               onRebasePush={handleRebasePush}
               onConflictPreview={handleConflictPreview}
-              onPushPreview={() => void handlePushPreview()}
               onShowConflictHistory={() => void handleShowConflictHistory()}
               currentMarkers={markers}
               onPullMarkers={handlePullMarkers}
@@ -6558,9 +6901,11 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               onRenameItem={handleRenameFromTree}
               onRunCollection={(item) => setRunnerItemId(item.id)}
               onLoadTestItem={setLoadTestItem}
-              onPushCollection={handlePushCollection}
-              onPullCollection={handlePullCollection}
-              onCheckUpdates={handleCheckCollectionUpdates}
+              // Receber/enviar: atalhos pra Central filtrada no item. O "Enviar
+              // esta pasta/request…" abre na aba "Para enviar", com o botão de
+              // enviar só ele — tudo passa pela Central.
+              onOpenSync={(item) => handleOpenSyncFor(item)}
+              onPushCollection={handleOpenSyncToSend}
               onAddExampleItem={handleRequestSelect}
               folderPickMode={!!flowPickerSession}
               pickerLabel={flowPickerSession ? `Select a folder to create the "${flowPickerSession.name}" flow` : undefined}
@@ -6761,6 +7106,14 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
             <Sparkles size={11} />
             <span>Claude</span>
           </button>
+
+          <McpStatusIndicator
+            mcp={mcp}
+            onOpen={() => {
+              setSettingsSection('mcp');
+              setSettingsOpen(true);
+            }}
+          />
 
           <button
             onClick={() => setConsoleOpen(prev => !prev)}
@@ -6996,12 +7349,17 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
 
 <SettingsModal
   isOpen={settingsOpen}
-  onClose={() => setSettingsOpen(false)}
+  requestedSection={settingsSection}
+  onClose={() => {
+    setSettingsOpen(false);
+    setSettingsSection(undefined);
+  }}
   mcp={mcp}
   extensionHost={extensionHost}
   collections={collections}
   onApplySecrets={handleApplySecrets}
   onJumpToItem={handleJumpToItem}
+  onReplaceAllFromGitHub={() => githubSyncRef.current?.replaceAllFromGitHub() ?? Promise.resolve()}
 />
 
 {/* Confirmação do "Save to all". Lista ONDE cada cópia está: duas requests
@@ -7071,6 +7429,30 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
   }
 />
 
+{/* Abrindo outro workspace (quando demora): o carregamento padrão, por
+    cima do app — o que estava na tela é do workspace anterior. */}
+{switchingWorkspace && (
+  <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-pm-bg/80 backdrop-blur-[2px] animate-in fade-in duration-150">
+    <DevFlowLoader
+      label={syncText.switchingWorkspace(switchingWorkspace.split(/[\\/]/).pop() || switchingWorkspace)}
+      detail={syncText.switchingWorkspaceSub}
+      size={64}
+    />
+  </div>
+)}
+
+{/* Central de Sincronização: abre pelo indicador da barra (store
+    lib/sync/syncCenterStore). */}
+<SyncCenter
+  workspace={selectedWorkspace}
+  loadOverview={handleSyncOverview}
+  discard={handleSyncDiscard}
+  openItem={handleSyncOpenItem}
+  lastChangeOf={handleSyncCenterLastChange}
+  runAction={runSyncAction}
+  cancelAction={handleSyncCancel}
+/>
+
 <SyncDiffDialog
   open={diffOpen}
   nodes={diffNodes}
@@ -7104,8 +7486,20 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
     setDiffConflictsOnly(false)
     setDiffEnvKeepMine(null)
     setDiffOpen(false)
+    // Revisão aberta pela Central e fechada sem aplicar: volta pra Central,
+    // com o que já tinha sido dito antes dela (o receber que parou no conflito).
+    const resume = takeResumeAfterReview()
+    if (resume) {
+      openSyncCenter({
+        tab: resume.tab,
+        filter: resume.filter,
+        ...(resume.messages.length > 0
+          ? { result: { result: resume.messages.some(m => m.type === 'error') ? 'failed' : 'done', messages: resume.messages } }
+          : {}),
+      })
+    }
   }}
-  onApply={handleApplyDiff}
+  onApply={handleApplyDiffAndReturn}
 />
 
 <CollectionRunnerPanel
