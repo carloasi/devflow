@@ -5,8 +5,9 @@ import { X } from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 import { closeMergeDiff, useMergeDiff, type MergeDiffRequest } from '@/lib/sync/mergeDiffStore'
-import { requestReviewEdit } from '@/lib/sync/reviewEditHint'
-import { defaultPicks, mergeChunks, type ChunkPick } from '@/lib/sync/mergeChunks'
+import { getPreparedEdit, setPreparedEdit } from '@/lib/sync/preparedMergeEdits'
+import { isEditableField } from '@/lib/diffFields'
+import { composeMerge, defaultPicks, mergeChunks, type ChunkPick } from '@/lib/sync/mergeChunks'
 import type { RemoteChangeItem, RemoteFieldPreview } from '@/lib/sync/remoteChangeAlert'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
 import { useSplitRatio } from '@/components/helper/useSplitRatio'
@@ -19,7 +20,9 @@ import { useSplitRatio } from '@/components/helper/useSplitRatio'
 // merge, a prévia do push.
 //
 // Simulação: as caixinhas mostram o que cada escolha daria, mas nada é
-// aplicado daqui — aplicar é na revisão (Pull / Review & merge).
+// aplicado daqui — aplicar é na revisão (Pull / Review & merge). Nos itens em
+// conflito dá pra editar o resultado à mão aqui mesmo: a edição fica guardada
+// (lib/sync/preparedMergeEdits) e a revisão a usa ao "Resolver".
 // ─────────────────────────────────────────────────────────────────────────
 
 const BADGE: Record<string, string> = {
@@ -31,7 +34,7 @@ const BADGE: Record<string, string> = {
   reordered: 'bg-pm-hover text-pm-text-secondary',
 }
 
-function FieldDiff({ field, onEditInReview }: { field: RemoteFieldPreview; onEditInReview?: () => void }) {
+function FieldDiff({ itemId, field, editable }: { itemId: string; field: RemoteFieldPreview; editable: boolean }) {
   const t = useSyncDiffStrings()
   const twoWay = field.base === undefined || field.base === null
   const chunks = useMemo(
@@ -40,6 +43,30 @@ function FieldDiff({ field, onEditInReview }: { field: RemoteFieldPreview; onEdi
   )
   // Começa como o merge automático faria: cada trecho com o lado que mudou.
   const [picks, setPicks] = useState<ChunkPick[] | null>(() => (chunks ? defaultPicks(chunks) : null))
+  // Resultado editado à mão, aqui mesmo. Fica guardado (preparedMergeEdits) e
+  // a revisão do merge o usa como rascunho do campo ao "Resolver"; reabrir a
+  // janela mostra a edição de novo.
+  const [manualText, setManualText] = useState<string | null>(() => getPreparedEdit(itemId, field.field) ?? null)
+  const setManual = (text: string | null) => {
+    setManualText(text)
+    setPreparedEdit(itemId, field.field, text ?? undefined)
+  }
+  // A edição parte do texto REAL (sem máscara de segredo, sem corte) com o
+  // que as caixinhas marcaram — nunca da prévia, cuja máscara viraria o valor
+  // salvo.
+  const raw = field.raw
+  const manualSeed =
+    editable && raw
+      ? () => {
+          const real = raw()
+          const realChunks = mergeChunks(real.base, real.before, real.after)
+          if (!realChunks) return real.before
+          // Mesmos trechos que a prévia (o comum): valem as mesmas marcas.
+          const current = picks ?? defaultPicks(chunks ?? [])
+          const realPicks = chunks && realChunks.length === chunks.length ? current : defaultPicks(realChunks)
+          return composeMerge(realChunks, realPicks, real.before.includes('\r\n')).text
+        }
+      : undefined
   if (!chunks) return null
   return (
     <div>
@@ -49,16 +76,20 @@ function FieldDiff({ field, onEditInReview }: { field: RemoteFieldPreview; onEdi
       </div>
       <ThreeWayMergeView
         chunks={chunks}
-        picks={picks ?? defaultPicks(chunks)}
-        manualText=""
+        picks={manualText !== null ? null : picks ?? defaultPicks(chunks)}
+        manualText={manualText ?? ''}
         twoWay={twoWay}
         readOnly={false}
         crlf={field.before.includes('\r\n')}
         simulation
-        onEditInReview={onEditInReview}
+        manualSeed={manualSeed}
+        manualNote={t.mvManualNotePreview}
         onPicks={setPicks}
-        onManualText={() => {}}
-        onBackToBoxes={() => setPicks(defaultPicks(chunks))}
+        onManualText={setManual}
+        onBackToBoxes={() => {
+          setManual(null)
+          setPicks(defaultPicks(chunks))
+        }}
       />
     </div>
   )
@@ -73,17 +104,11 @@ export function MergeDiffPanel({
   items,
   focusId,
   onSelect,
-  onEditInReview,
 }: {
   items: RemoteChangeItem[]
   focusId?: string
   /** Avisa qual item está aberto (a Central o leva pra janela separada). */
   onSelect?: (id: string) => void
-  /**
-   * "Editar na revisão" de um campo — só nos itens em CONFLITO, que são os
-   * que a revisão do merge abre pra decidir. Ausente = sem o botão.
-   */
-  onEditInReview?: (itemId: string, field: string) => void
 }) {
   const t = useSyncDiffStrings()
   const [selectedId, setSelected] = useState<string | null>(
@@ -142,10 +167,12 @@ export function MergeDiffPanel({
                 selected.fields.map(field => (
                   <FieldDiff
                     key={`${selected.id}:${field.field}`}
+                    itemId={selected.id}
                     field={field}
-                    onEditInReview={
-                      onEditInReview && selected.conflict ? () => onEditInReview(selected.id, field.field) : undefined
-                    }
+                    // Só em CONFLITO: é o item que a revisão do merge abre ao
+                    // "Resolver" — e é ela que aplica a edição. O que entra
+                    // sozinho no Pull não passa por ela.
+                    editable={selected.conflict && isEditableField(field.field)}
                   />
                 ))
               )}
@@ -179,21 +206,7 @@ function MergeDiffBody({ request }: { request: MergeDiffRequest }) {
         {t.mdSimulation}
       </div>
 
-      <MergeDiffPanel
-        items={request.items}
-        focusId={request.focusId}
-        // A ação de quem abriu (o "Resolver agora" do aviso) é o Pull com
-        // revisão: deixa o recado de qual campo editar e segue por ela.
-        onEditInReview={
-          request.action
-            ? (itemId, field) => {
-                requestReviewEdit({ itemId, field })
-                closeMergeDiff()
-                request.action!.onClick()
-              }
-            : undefined
-        }
-      />
+      <MergeDiffPanel items={request.items} focusId={request.focusId} />
 
       <div className="shrink-0 flex items-center justify-end gap-2 px-4 py-2.5 border-t border-pm-border">
         <button

@@ -45,7 +45,7 @@ import {
   type MergeChunk,
 } from '@/lib/sync/mergeChunks'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
-import { takeReviewEdit, type ReviewEditHint } from '@/lib/sync/reviewEditHint'
+import { draftsFromPreparedEdits, takePreparedEdits } from '@/lib/sync/preparedMergeEdits'
 import { REST, restOf } from '@/lib/sync/fieldMerge'
 import { sameContent } from '@/lib/canonicalCompare'
 import { useSyncDiffStrings, type SyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
@@ -850,17 +850,37 @@ export function SyncDiffDialog({
 
   const [focusedId, setFocusedId] = useState<string | null>(null)
 
-  // "Editar na revisão" da janela de diferença (simulação): abre já no item
-  // e com o resultado do campo em edição à mão — aqui, sobre os valores
-  // reais (lá eles vêm mascarados/cortados; ver lib/sync/reviewEditHint).
-  const [reviewEdit, setReviewEdit] = useState<ReviewEditHint | null>(null)
+  // Resultado editado à mão na janela de diferença (prévia do aviso / da
+  // Central): entra aqui como rascunho do campo, igual a digitar nesta tela —
+  // marca o item, aparece como "editado" e dá pra voltar atrás. Os textos são
+  // os reais (ver lib/sync/preparedMergeEdits).
   useEffect(() => {
     if (!open) return
-    const hint = takeReviewEdit(id => nodes.some(n => n.id === id))
-    if (!hint) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- recado de fora (store de módulo), lido uma vez por abertura
-    setFocusedId(hint.itemId)
-    setReviewEdit(hint)
+    const byId = new Map(nodes.map(n => [n.id, n]))
+    const prepared = takePreparedEdits(id => byId.get(id)?.change === 'modified')
+    if (!prepared.length) return
+    const seeded = draftsFromPreparedEdits(prepared, id => byId.get(id), {
+      isEditable: isEditableField,
+      format: formatFieldValue,
+      inMine: id => !selected.has(id),
+      canEditFromMine: id => canEditFromMine(byId.get(id)!),
+    })
+    const ids = Object.keys(seeded)
+    if (!ids.length) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- edições de fora (store de módulo), lidas uma vez por abertura
+    setDrafts(prev => {
+      const next = { ...prev }
+      for (const id of ids) next[id] = { ...(prev[id] ?? {}), ...seeded[id] }
+      return next
+    })
+    setSelected(prev => new Set([...prev, ...ids]))
+    // Caixinhas deixam de valer nos campos editados à mão.
+    setManualFields(prev => {
+      const next = new Set(prev)
+      for (const edit of prepared) if (seeded[edit.itemId]?.[edit.field] !== undefined) next.add(`${edit.itemId}|${edit.field}`)
+      return next
+    })
+    setFocusedId(ids[0])
     // Uma vez por abertura (openKey muda a cada comparação nova).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, openKey])
@@ -1212,10 +1232,7 @@ export function SyncDiffDialog({
         crlf={crlf}
         onPicks={next => pickChunks(node, field.field, chunks, next, crlf)}
         onManualText={text => editMergeResult(node, field.field, text)}
-        onBackToBoxes={() => pickChunks(node, field.field, chunks, defaultPicks(chunks), crlf)}
-        startEditing={reviewEdit?.itemId === node.id && reviewEdit.field === field.field}
-        onStartedEditing={() => setReviewEdit(null)}
-      />
+        onBackToBoxes={() => pickChunks(node, field.field, chunks, defaultPicks(chunks), crlf)}      />
     )
   }
 

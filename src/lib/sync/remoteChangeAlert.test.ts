@@ -11,6 +11,8 @@ const req = (id: string, patch: Partial<NonNullable<CollectionItem['request']>> 
   method: 'POST',
   request: { url: '/x', urlexport: { host: [], path: [], raw: '/x' }, headers: [], body: '', ...patch },
 });
+// `raw` é uma função (texto real, só pra edição à mão): fora da comparação de forma.
+const withoutRaw = <T extends { raw?: unknown }>({ raw: _raw, ...rest }: T) => rest;
 const col = (items: CollectionItem[]): CollectionItem[] => [{ id: 'root', name: 'Barramento B2B - Dev', type: 'folder', item: items }];
 
 describe('buildRemoteChangePreview', () => {
@@ -24,7 +26,7 @@ describe('buildRemoteChangePreview', () => {
     expect(preview.conflicts).toEqual([]);
     const pay = preview.items.find(i => i.id === 'pay')!;
     expect(pay.change).toBe('changed');
-    expect(pay.fields).toEqual([{ field: 'body', before: 'a', after: 'b', base: null }]);
+    expect(pay.fields.map(withoutRaw)).toEqual([{ field: 'body', before: 'a', after: 'b', base: null }]);
     expect(preview.items.find(i => i.id === 'new')?.change).toBe('new');
   });
 
@@ -36,6 +38,29 @@ describe('buildRemoteChangePreview', () => {
     const preview = buildRemoteChangePreview(result);
     expect(preview.conflicts).toEqual(['Barramento B2B - Dev / pay']);
     expect(preview.items[0]).toMatchObject({ id: 'pay', conflict: true, fields: [{ field: 'body', before: 'mine', after: 'theirs' }] });
+  });
+});
+
+describe('raw field text (hand editing in the preview)', () => {
+  it('is masked in the preview, real in raw(), and never serialized', () => {
+    const token = 'eyJhbGciOiJIUzI1NiJ9.payload.signature';
+    const auth = (t: string) => ({ type: 'bearer', token: t }) as never;
+    const baseTree = col([req('pay', { auth: auth('') })]);
+    const local = col([req('pay', { auth: auth('') })]);
+    const remote = col([req('pay', { auth: auth(token) })]);
+    const result = rebaseCollections(local, remote, nodeHashes(baseTree), new Set());
+    const field = buildRemoteChangePreview(result).items[0].fields.find(f => f.field === 'auth')!;
+    expect(field.after).not.toContain('payload');
+    expect(field.raw?.().after).toContain(token);
+    expect(JSON.stringify(field)).not.toContain('payload');
+  });
+
+  it('is not clipped', () => {
+    const long = 'x'.repeat(7000);
+    const result = rebaseCollections(col([req('pay')]), col([req('pay', { body: long })]), nodeHashes(col([req('pay')])), new Set());
+    const field = buildRemoteChangePreview(result).items[0].fields[0];
+    expect(field.after.length).toBeLessThan(long.length);
+    expect(field.raw?.().after).toBe(long);
   });
 });
 
@@ -65,7 +90,8 @@ describe('base text for the three-pane view', () => {
     const result = rebaseCollections(local, remote, nodeHashes(baseTree), new Set());
     const baseItem = baseTree[0].item![0];
     const preview = buildRemoteChangePreview(result, [], node => (node.id === 'pay' ? baseItem : undefined));
-    expect(preview.items[0].fields[0]).toEqual({ field: 'body', before: 'base', after: 'theirs', base: 'base' });
+    expect(withoutRaw(preview.items[0].fields[0])).toEqual({ field: 'body', before: 'base', after: 'theirs', base: 'base' });
+    expect(preview.items[0].fields[0].raw?.()).toEqual({ before: 'base', after: 'theirs', base: 'base' });
   });
 
   it('detailItems builds the same items from a merge report', () => {

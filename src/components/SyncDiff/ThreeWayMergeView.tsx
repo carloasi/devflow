@@ -1,7 +1,7 @@
 'use client'
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ArrowDown, ArrowUp, ExternalLink, PencilLine, Undo2 } from 'lucide-react'
+import { AlertTriangle, ArrowDown, ArrowUp, PencilLine, Undo2 } from 'lucide-react'
 import {
   chunkResult,
   composeMerge,
@@ -43,19 +43,18 @@ interface Props {
   onBackToBoxes: () => void
   /**
    * Simulação (janela de diferença dos avisos de merge): as caixinhas mudam
-   * só o que se vê no Resultado — nada é aplicado, e não há edição à mão.
+   * só o que se vê no Resultado — nada é aplicado daqui.
    */
   simulation?: boolean
   /**
-   * Simulação: leva pra revisão de verdade, com este campo já em edição à
-   * mão (ver lib/sync/reviewEditHint). Sem isto, a simulação não oferece
-   * edição — o texto dela é mascarado/cortado.
+   * Texto com que a edição à mão começa, quando não é o que as caixinhas
+   * montaram. Na simulação os trechos são a PRÉVIA (segredo mascarado, texto
+   * longo cortado) e editar a partir deles gravaria a máscara; quem chama
+   * monta o texto real. Na simulação, sem isto não há edição à mão.
    */
-  onEditInReview?: () => void
-  /** Abre já editando o resultado à mão (pedido pelo "Editar na revisão"). */
-  startEditing?: boolean
-  /** Avisa que o pedido de `startEditing` foi atendido (ou não cabia). */
-  onStartedEditing?: () => void
+  manualSeed?: () => string
+  /** Nota sob a caixa editada à mão, no lugar da padrão. */
+  manualNote?: string
 }
 
 const NONE: ChunkPick = { theirs: false, mine: false }
@@ -100,7 +99,7 @@ function Line({ n, text, tone = '', gutter }: { n?: number; text?: string; tone?
 
 export function ThreeWayMergeView({
   chunks, picks, manualText, twoWay, readOnly, crlf, onPicks, onManualText, onBackToBoxes,
-  simulation = false, onEditInReview, startEditing = false, onStartedEditing,
+  simulation = false, manualSeed, manualNote,
 }: Props) {
   const t = useSyncDiffStrings()
   // Largura de cada coluna (GitHub | sua versão), guardada entre aberturas.
@@ -121,34 +120,19 @@ export function ThreeWayMergeView({
   // Edição à mão do resultado: pra acrescentar algo que nenhum dos lados tem,
   // ou quando o merge fica complexo demais pras caixinhas. Começa do que as
   // caixinhas montaram até aqui.
-  const canEditByHand = !readOnly && !simulation
+  const canEditByHand = !readOnly && (!simulation || !!manualSeed)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const focusTextarea = useRef(false)
   const editByHand = () => {
     if (!canEditByHand || manual) return
     focusTextarea.current = true
-    onManualText(composed.text)
+    onManualText(manualSeed ? manualSeed() : composed.text)
   }
   useEffect(() => {
     if (!manual || !focusTextarea.current) return
     focusTextarea.current = false
     textareaRef.current?.focus()
   }, [manual])
-
-  // "Editar na revisão" chegou aqui: entra em edição uma vez, se der (item em
-  // Minha sem poder virar Merge fica só leitura — aí só avisa que tentou).
-  const startedRef = useRef(false)
-  useEffect(() => {
-    if (!startEditing || startedRef.current) return
-    startedRef.current = true
-    if (canEditByHand && !manual) {
-      focusTextarea.current = true
-      onManualText(composed.text)
-    }
-    onStartedEditing?.()
-    // Uma vez por pedido; composed/manual mudam a cada tecla.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startEditing])
 
   // Número da primeira linha de cada trecho, em cada lado e no resultado.
   const numbers = useMemo(() => {
@@ -351,12 +335,6 @@ export function ThreeWayMergeView({
             <PencilLine size={10} /> {t.mvEditResult}
           </button>
         ))}
-        {simulation && onEditInReview && (
-          <button type="button" onClick={onEditInReview} title={t.mvEditInReviewTitle}
-            className="flex items-center gap-1 rounded border border-pm-border px-1.5 py-px text-pm-text-secondary hover:bg-pm-hover hover:text-pm-text cursor-pointer">
-            <ExternalLink size={10} /> {t.mvEditInReview}
-          </button>
-        )}
       </div>
       {manual ? (
         <div className="p-1.5">
@@ -369,7 +347,7 @@ export function ThreeWayMergeView({
             rows={Math.min(16, Math.max(3, manualText.split('\n').length))}
             className="w-full rounded border border-pm-border bg-pm-bg px-2 py-1.5 font-mono text-[10.5px] text-pm-text outline-none resize-y focus:border-[#007acc]/60"
           />
-          <p className="mt-0.5 text-[10px] text-pm-text-muted/70">{t.mvManualNote}</p>
+          <p className="mt-0.5 text-[10px] text-pm-text-muted/70">{manualNote ?? t.mvManualNote}</p>
         </div>
       ) : (
         <div

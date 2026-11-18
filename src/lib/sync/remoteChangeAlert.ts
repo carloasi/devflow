@@ -31,6 +31,19 @@ export interface RemoteFieldPreview {
    * (relatório depois do merge, base indisponível): a visão vira de duas vias.
    */
   base?: string | null;
+  /**
+   * Os mesmos textos SEM máscara e sem corte — pra editar o resultado à mão
+   * ali mesmo (a edição vira rascunho da revisão). Função, e não campo: não
+   * vai junto quando algo serializa o aviso (JSON.stringify ignora função),
+   * então o token real nunca acaba num storage por tabela.
+   */
+  raw?: () => RawFieldTexts;
+}
+
+export interface RawFieldTexts {
+  before: string;
+  after: string;
+  base: string | null;
 }
 
 /** O item na última sincronização: undefined = não dá pra saber; null = não existia. */
@@ -93,12 +106,18 @@ function fieldsOf(node: DiffNode | undefined, only: string[], baseItemOf?: BaseI
     .filter(f => f.field !== 'order' && (only.length === 0 || only.includes(f.field)))
     .map(f => {
       const known = baseItem !== undefined && (MERGE_FIELDS as readonly string[]).includes(f.field);
+      const baseValue = known && baseItem ? fieldValue(baseItem, f.field as MergeField) : undefined;
       return {
         field: f.field,
         before: clip(safeFieldText(f.field, f.local)),
         after: clip(safeFieldText(f.field, f.remote)),
         // Item que não existia na base: base vazia (os dois o criaram).
-        base: known ? clip(baseItem ? safeFieldText(f.field, fieldValue(baseItem, f.field as MergeField)) : '') : null,
+        base: known ? clip(baseItem ? safeFieldText(f.field, baseValue) : '') : null,
+        raw: () => ({
+          before: diffableText(f.local),
+          after: diffableText(f.remote),
+          base: known ? (baseItem ? diffableText(baseValue) : '') : null,
+        }),
       };
     })
     .filter(f => f.before !== f.after);
