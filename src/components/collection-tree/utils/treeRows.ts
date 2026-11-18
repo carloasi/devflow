@@ -106,3 +106,25 @@ export function findTypeAheadMatch(
   }
   return -1
 }
+
+/**
+ * Seleção restrita ao que está na tela. Um item selecionado que sai de
+ * vista (filtro, pasta fechada, apagado num pull, troca de workspace)
+ * continuava selecionado: Delete e Copy agiam sobre linhas invisíveis, e o
+ * menu contava "Delete (3)" com duas na tela. Devolve o mesmo Set quando
+ * nada sai.
+ */
+export function keepVisibleSelection(
+  selected: ReadonlySet<string>,
+  visible: { has(id: string): boolean }
+): ReadonlySet<string> {
+  if (selected.size === 0) return selected
+  let next: Set<string> | null = null
+  for (const id of selected) {
+    if (!visible.has(id)) {
+      next ??= new Set(selected)
+      next.delete(id)
+    }
+  }
+  return next ?? selected
+}

@@ -34,7 +34,8 @@ interface Props {
   onToggleSelect?: (id: string) => void
   onRowContextMenu?: (e: React.MouseEvent, item: CollectionItem) => void
   onSetExpanded: (id: string, open: boolean) => void
-  onRowFocus?: (id: string) => void
+  /** `plainClick`: botão esquerdo sem Ctrl/Cmd — desfaz a seleção múltipla. */
+  onRowFocus?: (id: string, plainClick?: boolean) => void
   // F2/item recém-criado -> esta linha entra em modo rename.
   renameRequested?: boolean
   onRenameHandled?: () => void
@@ -506,7 +507,7 @@ export const TreeNode = memo(function TreeNode({
           }
           if (!isActive && !isSelected) e.currentTarget.style.backgroundColor = 'transparent'
         }}
-        onMouseDown={() => onRowFocus?.(item.id)}
+        onMouseDown={e => onRowFocus?.(item.id, e.button === 0 && !e.ctrlKey && !e.metaKey && !folderPickMode)}
         onContextMenu={e => {
           if (folderPickMode) { e.preventDefault(); return }
           e.preventDefault()

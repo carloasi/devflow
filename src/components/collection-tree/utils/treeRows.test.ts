@@ -4,6 +4,7 @@ import {
   visibleRange,
   scrollTopToReveal,
   findTypeAheadMatch,
+  keepVisibleSelection,
 } from './treeRows';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 
@@ -90,5 +91,19 @@ describe('findTypeAheadMatch', () => {
 
   it('sem resultado', () => {
     expect(findTypeAheadMatch(rows, 0, 'z')).toBe(-1);
+  });
+});
+
+describe('keepVisibleSelection', () => {
+  it('tira o que não está mais na tela', () => {
+    const sel = new Set(['a', 'gone', 'b']);
+    expect([...keepVisibleSelection(sel, new Set(['a', 'b', 'c']))]).toEqual(['a', 'b']);
+  });
+
+  it('nada muda: mesmo Set (sem re-render)', () => {
+    const sel = new Set(['a']);
+    expect(keepVisibleSelection(sel, new Set(['a', 'b']))).toBe(sel);
+    const empty = new Set<string>();
+    expect(keepVisibleSelection(empty, new Set())).toBe(empty);
   });
 });

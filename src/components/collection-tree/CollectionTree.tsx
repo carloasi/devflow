@@ -41,6 +41,7 @@ import {
   visibleRange,
   scrollTopToReveal,
   findTypeAheadMatch,
+  keepVisibleSelection,
 } from './utils/treeRows'
 import { TreeSearch } from './TreeSearch'
 import { MarkersDialog } from './MarkersDialog'
@@ -330,14 +331,21 @@ export function CollectionTree({
   // Esc limpa a seleção múltipla (Ctrl/Cmd+Click) — só registra o listener
   // enquanto há algo selecionado, pra não interferir com outros usos de Esc
   // (fechar popovers, etc.) no resto do app.
+  //
+  // Com um menu ou a confirmação de exclusão aberta, o Esc é DELES: fechar o
+  // menu de clique direito (ou cancelar o "Delete 3 items") com Esc também
+  // apagava a seleção em que eles iam agir.
+  const escOwnedElsewhere = !!contextMenu || !!openActionMenuId
   useEffect(() => {
-    if (selectedIds.size === 0) return
+    if (selectedIds.size === 0 || escOwnedElsewhere) return
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') handleClearSelection()
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return
+      handleClearSelection()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [selectedIds.size, handleClearSelection])
+  }, [selectedIds.size, escOwnedElsewhere, handleClearSelection])
 
   const handleRowContextMenu = useCallback((e: React.MouseEvent, item: CollectionItem) => {
     e.preventDefault()
@@ -430,13 +438,18 @@ export function CollectionTree({
    * duas regras divergiriam.
    */
   const deleteTargets = useCallback((fallback: CollectionItem | null): CollectionItem[] => {
-    if (selectedIds.size > 0) {
-      return Array.from(selectedIds)
-        .map(id => findNodeById(items, id))
-        .filter((n): n is CollectionItem => !!n)
-    }
+    // Sem o que está dentro de outro selecionado: some junto com ele, e
+    // contado à parte dava "Delete 2 items" pra uma pasta e um filho dela.
+    if (selectedIds.size > 0) return topLevelInTreeOrder(items, selectedIds)
     return fallback ? [fallback] : []
   }, [selectedIds, items])
+
+  // O que o menu mostra em "Copy (N)" / "Delete (N)": o mesmo que as ações
+  // vão atingir.
+  const selectionCount = useMemo(
+    () => (selectedIds.size > 0 ? topLevelInTreeOrder(items, selectedIds).length : 0),
+    [selectedIds, items]
+  )
 
   /*
    * ============================================================
@@ -839,6 +852,11 @@ export function CollectionTree({
     [flatRows]
   )
 
+  // Selecionado é só o que está na tela (ver keepVisibleSelection).
+  useEffect(() => {
+    setSelectedIds(prev => keepVisibleSelection(prev, rowIndexById) as Set<string>)
+  }, [rowIndexById])
+
   const expandPath = useCallback((ids: string[]) => {
     if (ids.length === 0) return
     setExpandedIds(prev => {
@@ -896,7 +914,13 @@ export function CollectionTree({
   const exportSecretsDrag = useDraggableDialog()
 
   const handleRenameHandled = useCallback(() => setRenamingId(null), [])
-  const handleRowFocus = useCallback((id: string) => setFocusedId(id), [])
+  // Clique comum (sem Ctrl/Cmd) numa linha desfaz a seleção, como no
+  // Explorer. Antes ela ficava: clicar numa request e apertar Delete apagava
+  // os itens selecionados lá atrás, não a linha recém-clicada.
+  const handleRowFocus = useCallback((id: string, plainClick?: boolean) => {
+    setFocusedId(id)
+    if (plainClick) setSelectedIds(prev => (prev.size > 0 ? new Set() : prev))
+  }, [])
   const typeAheadRef = useRef({ buffer: '', at: 0 })
 
   // Linhas visíveis na ordem da tela — da lista achatada, não do DOM: só a
@@ -1772,7 +1796,7 @@ export function CollectionTree({
           x={contextMenu.x}
           y={contextMenu.y}
           targetItem={contextMenu.item}
-          selectionCount={selectedIds.size}
+          selectionCount={selectionCount}
           canPaste={contextMenu.canPaste}
           onCopy={() => handleCopySelected(contextMenu.item?.id)}
           onRename={
