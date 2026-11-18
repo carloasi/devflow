@@ -43,6 +43,12 @@ interface Props {
    */
   variableValue?: (key: string) => string | undefined
   onCommitVariable?: (key: string, value: string) => void
+  /**
+   * Torna o texto editável (Payload de um passo já executado). Cada tecla
+   * chega aqui; quem chama guarda o rascunho e o devolve em `value` — igual
+   * ao que foi digitado, então o Monaco não reposiciona o cursor.
+   */
+  onChange?: (value: string) => void
 }
 
 // JSON ganha cor e dobra de bloco; qualquer outra coisa (HTML, texto de
@@ -59,7 +65,8 @@ function detectLanguage(text: string): 'json' | 'plaintext' {
   }
 }
 
-export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVariable }: Props) {
+export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVariable, onChange }: Props) {
+  const editable = !!onChange
   const { effectiveThemeId } = useTheme()
 
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null)
@@ -105,6 +112,7 @@ export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVaria
     const decorations: MonacoEditorNS.IModelDeltaDecoration[] = []
     const ranges: TrackedVarRange[] = []
 
+    const clickHint = editable ? 'Ctrl+click' : 'click'
     for (const { key, start: from, end: to } of scanVars(model.getValue())) {
       const resolved = readValue(key)
       const hasValue = !!resolved?.trim()
@@ -122,8 +130,8 @@ export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVaria
                 : 'body-var-missing',
           hoverMessage: {
             value: hasValue
-              ? `**${key}** = \`${resolved}\` — click to edit`
-              : `**${key}** is not defined in this environment — click to set`,
+              ? `**${key}** = \`${resolved}\` — ${clickHint} to edit`
+              : `**${key}** is not defined in this environment — ${clickHint} to set`,
           },
         },
       })
@@ -132,7 +140,7 @@ export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVaria
 
     varRangesRef.current = ranges
     collection.set(decorations)
-  }, [value, varsSignature, justSaved, mounted])
+  }, [value, varsSignature, justSaved, mounted, editable])
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
@@ -148,6 +156,10 @@ export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVaria
 
     editor.onMouseDown(e => {
       if (!varsRef.current.variableValue) return
+      // Editável, o clique simples é para posicionar o cursor (inclusive
+      // dentro de um {{token}}); a edição da variável fica no Ctrl/Cmd+clique.
+      if (editorRef.current?.getOption(monaco.editor.EditorOption.readOnly) === false
+        && !(e.event.ctrlKey || e.event.metaKey)) return
       const position = e.target.position
       const model = editor.getModel()
       if (!position || !model) return
@@ -187,12 +199,14 @@ export function JsonBlock({ value, maxHeight = 288, variableValue, onCommitVaria
           beforeMount={(monaco: Monaco) => registerDevflowMonacoThemes(monaco)}
           value={value}
           onMount={handleMount}
+          onChange={next => onChange?.(next ?? '')}
           options={{
-            readOnly: true,
+            readOnly: !editable,
             // Sem isto o Monaco mantém um textarea escondido com foco, e o
             // teclado do modal (Esc pra fechar) para de funcionar depois de
-            // um clique no bloco.
-            domReadOnly: true,
+            // um clique no bloco. Editável, o textarea é justamente o que
+            // recebe a digitação.
+            domReadOnly: !editable,
             fontSize: FONT_SIZE,
             lineHeight: LINE_HEIGHT,
             fontFamily: 'Fira Code, Consolas, monospace',

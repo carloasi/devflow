@@ -6,7 +6,7 @@ import { acceptTestExpectation } from '@/lib/acceptTestExpectation'
 import { toast } from 'sonner'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Pause, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer, RotateCw, BadgeCheck, ExternalLink, Sparkles, WandSparkles } from 'lucide-react'
+import { Play, Pause, Square, X, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Copy, Check, Terminal, Braces, Download, FileJson, History, Trash2, ArrowUpRight , Table2, Timer, RotateCw, BadgeCheck, ExternalLink, Sparkles, WandSparkles, Undo2, Pencil } from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CollectionItem } from '@/app/types/CollectionItem'
 import { useEnvironment } from '@/components/EnvironmentContext'
@@ -22,7 +22,12 @@ import { requestHasBody } from '@/lib/defaultHeaders'
 import { hasFailureReason, failureReason, isExpectedErrorStatus } from './runVerdict'
 import { buildEnvMap } from '@/lib/envMap';
 import { envForRow, parseDataFile, rowLabel, type DataSet } from '@/lib/runnerData'
-import { VAR_REGEX } from '@/lib/monacoVarHighlight'
+import {
+  applyEnvChanges,
+  effectiveBodyOverride,
+  isBodyEdited,
+  prettyBodyPreservingTemplates,
+} from './payloadOverride'
 
 interface Props {
   item: CollectionItem | null
@@ -122,32 +127,11 @@ function prettyBody(body: string): string {
   }
 }
 
-// Mesma ideia do prettyBody, mas pro Payload — que tem {{variaveis}} no meio,
-// e isso não é JSON válido (nem dentro nem fora de aspas). A saída de
-// JSON.parse não aceita "{{token}}" como valor, então cada ocorrência vira
-// um número grande e só-seu antes de parsear, e volta a ser o texto original
-// depois de formatado — funciona tanto pra uso com aspas ("{{x}}" → string)
-// quanto sem ("amount": {{x}} → number), porque a substituição só troca o
-// miolo, nunca as aspas que já estavam (ou não) ao redor.
-function prettyBodyPreservingTemplates(body: string): string {
-  const trimmed = body.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return body
-
-  const tokens: string[] = []
-  const withPlaceholders = trimmed.replace(new RegExp(VAR_REGEX.source, 'g'), match => {
-    const sentinel = `90150${tokens.length}17230`
-    tokens.push(match)
-    return sentinel
-  })
-
-  try {
-    const pretty = JSON.stringify(JSON.parse(withPlaceholders), null, 2)
-    return tokens.reduce((text, token, i) => text.replace(`90150${i}17230`, token), pretty)
-  } catch {
-    // Veio algo que não é só {{vars}} quebrando o parse (JSON realmente
-    // inválido, ou corpo cortado) — mostra cru em vez de esconder.
-    return body
-  }
+// O body cru (template) do passo, quando a request manda body — é o que o
+// bloco Payload mostra e o que o rascunho editado substitui.
+function rawBodyOf(item: CollectionItem | undefined): string {
+  const req = item?.request
+  return requestHasBody(req?.bodyType, req?.body) ? req?.body ?? '' : ''
 }
 
 // Preferências do Runner que valem entre sessões. localStorage, e não o
@@ -293,6 +277,33 @@ export function CollectionRunnerPanel({
   const [payloadPrettyIds, setPayloadPrettyIds] = useState<Set<string>>(new Set())
   const [responseRawIds, setResponseRawIds] = useState<Set<string>>(new Set())
 
+  // ── Payload editado só nesta execução ────────────────────────────────────
+  //
+  // Rascunho do body por linha (entry.id), em TEMPLATE — ver payloadOverride.ts
+  // para a decisão sobre {{variaveis}}. Nunca vai para a collection: a request
+  // salva continua igual, e o rascunho some ao fechar o painel ou num Run novo.
+  // O ref existe porque o laço de runFrom é uma closure longa: editar outra
+  // linha enquanto o run anda tem que valer quando o laço chegar nela.
+  const [bodyDrafts, setBodyDrafts] = useState<Record<string, string>>({})
+  const bodyDraftsRef = useRef(bodyDrafts)
+  useEffect(() => {
+    bodyDraftsRef.current = bodyDrafts
+  }, [bodyDrafts])
+  // Linha rodando sozinha (reexecução de um passo), fora do laço do run.
+  const [stepRunningId, setStepRunningId] = useState<string | null>(null)
+  const busy = running || stepRunningId !== null
+
+  const setBodyDraft = (entryId: string, value: string | undefined) =>
+    setBodyDrafts(prev => {
+      const next = { ...prev }
+      if (value === undefined) delete next[entryId]
+      else next[entryId] = value
+      return next
+    })
+
+  const bodyOverrideFor = (entryId: string, reqItem: CollectionItem): string | undefined =>
+    effectiveBodyOverride(rawBodyOf(reqItem), bodyDraftsRef.current[entryId])
+
   const currentEnvValue = (key: string): string | undefined =>
     environments.find(e => e.id === runEnvId)?.values.find(v => v.key === key && v.enabled)?.value
 
@@ -357,6 +368,7 @@ export function CollectionRunnerPanel({
     setPaused(false)
     pauseRef.current = false
     runContextRef.current = null
+    setBodyDrafts({})
   }
 
   useEffect(() => {
@@ -392,6 +404,9 @@ export function CollectionRunnerPanel({
     setRestoredAt(null)
     setRestoredTruncated(false)
     setRunMeta({})
+    // Payload editado vale só para a execução que estava na tela.
+    setBodyDrafts({})
+    setStepRunningId(null)
 
     // Restaura o último run em vez de deixar a tela vazia: um fluxo de 12
     // requests encadeadas leva meio minuto, e antes fechar o painel sem
@@ -577,7 +592,12 @@ export function CollectionRunnerPanel({
       const requestId = crypto.randomUUID()
       currentRequestIdRef.current = requestId
       const startedAt = new Date().toISOString()
-      const outcome = await runCollectionRequest(reqItem, envMap, { requestId })
+      // Payload editado no Runner vale também no "Run from here": é o
+      // caminho natural de quem mudou o body e quer ver o efeito dali pra frente.
+      const outcome = await runCollectionRequest(reqItem, envMap, {
+        requestId,
+        bodyOverride: bodyOverrideFor(entry.id, reqItem),
+      })
       const finishedAt = new Date().toISOString()
       currentRequestIdRef.current = null
 
@@ -616,8 +636,15 @@ export function CollectionRunnerPanel({
   }
 
   const handleRun = async () => {
+    if (busy) return
     const selected = requests.filter(r => checked[r.id])
     if (selected.length === 0) return
+
+    // Run novo = execução nova: o payload editado na anterior não vale aqui
+    // (as linhas têm os mesmos ids, e sem isto o rascunho entraria calado).
+    // O ref também, porque runFrom lê dele antes do próximo render.
+    setBodyDrafts({})
+    bodyDraftsRef.current = {}
 
     const envId = runEnvId
     const baseEnv = environments.find(e => e.id === envId)
@@ -679,6 +706,7 @@ export function CollectionRunnerPanel({
   }
 
   const handleResume = async () => {
+    if (busy) return
     stopRef.current = false
     pauseRef.current = false
     await runFrom(pausedAtIndex)
@@ -692,7 +720,7 @@ export function CollectionRunnerPanel({
   // linhas mantidas já gravaram de verdade, mais qualquer ajuste manual
   // feito nesse meio tempo pelo painel de Environment.
   const handleRunFrom = async (entryId: string) => {
-    if (running) return
+    if (busy) return
     const startIdx = entries.findIndex(e => e.id === entryId)
     if (startIdx === -1) return
 
@@ -742,6 +770,68 @@ export function CollectionRunnerPanel({
     pauseRef.current = false
 
     await runFrom(startIdx)
+  }
+
+  // Reexecuta SÓ esta linha — com o payload editado, quando houver — e deixa
+  // as outras como estão. O environment de partida é o atual (o mesmo
+  // raciocínio do handleRunFrom): já tem o token e o que os passos anteriores
+  // gravaram. Os scripts do passo rodam como num run normal, e o que eles
+  // gravarem vai pro environment do mesmo jeito.
+  const handleRunStep = async (entryId: string) => {
+    if (busy) return
+    const entry = entries.find(e => e.id === entryId)
+    const reqItem = entry && requests.find(r => r.id === entry.itemId)
+    if (!entry || !reqItem) return
+
+    const envId = runEnvId
+    const baseEnv = environments.find(e => e.id === envId)
+    const baseEnvMap: Record<string, string> = buildEnvMap(baseEnv?.values)
+    const row = dataSet?.rows?.[entry.iteration - 1]
+    const envMap = row ? envForRow(baseEnvMap, row) : baseEnvMap
+
+    setStepRunningId(entryId)
+    setEntries(prev => prev.map(e => (e.id === entryId ? { ...e, state: 'running' } : e)))
+
+    const startedAt = new Date().toISOString()
+    let outcome: Awaited<ReturnType<typeof runCollectionRequest>>
+    try {
+      outcome = await runCollectionRequest(reqItem, envMap, {
+        bodyOverride: bodyOverrideFor(entryId, reqItem),
+      })
+    } catch (e) {
+      // runCollectionRequest já transforma falha em outcome de erro; isto é
+      // só pra linha não ficar girando para sempre se algo escapar.
+      outcome = {
+        itemId: reqItem.id, status: 'error', responseTime: 0, tests: [],
+        errorMessage: String((e as Error)?.message ?? e), envAfter: envMap, logs: [], variablesSet: [],
+      }
+    } finally {
+      setStepRunningId(null)
+    }
+    const finishedAt = new Date().toISOString()
+
+    const done: RunEntry = { ...entry, state: outcome.status, outcome, startedAt, finishedAt }
+    setEntries(prev => prev.map(e => (e.id === entryId ? done : e)))
+    if (envId) patchEnvironmentVariables(envId, envMap, outcome.envAfter)
+
+    // Run pausado: o Resume continua do contexto guardado, que precisa ver
+    // este resultado e o que o passo gravou (ex.: um token novo).
+    const ctx = runContextRef.current
+    if (ctx) {
+      if (ctx.runEntries.some(e => e.id === entryId)) ctx.finalized.set(entryId, done)
+      ctx.envMap = applyEnvChanges(ctx.envMap, envMap, outcome.envAfter)
+    }
+
+    if (item) {
+      saveLastRun({
+        collectionId: item.id,
+        collectionName: item.name,
+        finishedAt,
+        startedAt: runMeta.startedAt ?? startedAt,
+        environmentName: runMeta.environmentName ?? baseEnv?.name,
+        entries: entries.map(e => (e.id === entryId ? done : e)),
+      })
+    }
   }
 
   const handleStop = () => {
@@ -1007,7 +1097,7 @@ export function CollectionRunnerPanel({
                 {!running && !paused && (
                   <button
                     onClick={handleRun}
-                    disabled={selectedCount === 0}
+                    disabled={selectedCount === 0 || busy}
                     className="flex items-center gap-1.5 h-7 px-3 rounded-md text-xs font-semibold bg-[#f26b3a] text-white hover:bg-[#f26b3a]/90 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Play size={12} /> Run
@@ -1166,9 +1256,9 @@ export function CollectionRunnerPanel({
                     const source = requests.find(r => r.id === entry.itemId)
                     const scriptableRequest = source?.request
                     const rawUrl = source?.request?.url ?? ''
-                    const rawBody = requestHasBody(source?.request?.bodyType, source?.request?.body)
-                      ? source?.request?.body ?? ''
-                      : ''
+                    const rawBody = rawBodyOf(source)
+                    const bodyDraft = bodyDrafts[entry.id]
+                    const bodyEdited = !!rawBody.trim() && isBodyEdited(rawBody, bodyDraft)
                     // Variáveis desta linha: as que o passo gravou mais as que
                     // ele leu. Sem as lidas, a request que FALHA por causa de
                     // um valor errado não oferecia onde corrigi-lo — só a que
@@ -1307,10 +1397,21 @@ export function CollectionRunnerPanel({
                               Também disponível pausado: permite retomar de
                               uma linha diferente da que parou, não só da
                               próxima (handleRunFrom já reseta o pause). */}
-                          {!running && (
+                          {bodyEdited && (
+                            <span
+                              title="Payload edited in the Runner — used only in this run; the saved request is unchanged"
+                              className="flex items-center gap-0.5 px-1.5 py-0 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400 shrink-0"
+                            >
+                              <Pencil size={9} /> edited
+                            </span>
+                          )}
+                          {!busy && (
                             <button
                               onClick={e => { e.stopPropagation(); handleRunFrom(entry.id) }}
-                              title={paused ? 'Resume from here — restart from this request' : 'Run from here — redo this request and everything after it'}
+                              title={
+                                (paused ? 'Resume from here — restart from this request' : 'Run from here — redo this request and everything after it') +
+                                (bodyEdited ? ' (with the edited payload)' : '')
+                              }
                               className="shrink-0 opacity-0 group-hover:opacity-100 text-pm-text-muted hover:text-[#f26b3a] transition-opacity cursor-pointer"
                             >
                               <RotateCw size={12} />
@@ -1451,43 +1552,110 @@ export function CollectionRunnerPanel({
                             )}
 
                             {(rawBody?.trim() || entry.outcome?.sentBody?.trim()) && (
-                              <div className="rounded-md border border-pm-border bg-pm-hover p-2 flex flex-col gap-1.5">
-                                <div className="flex items-center gap-1">
+                              <div
+                                className={`rounded-md border bg-pm-hover p-2 flex flex-col gap-1.5 ${
+                                  bodyEdited ? 'border-amber-500/50' : 'border-pm-border'
+                                }`}
+                              >
+                                <div className="flex items-center gap-1.5">
                                   <span className="flex items-center gap-1 text-[10px] font-semibold text-pm-text-muted uppercase tracking-wide">
                                     <ArrowUpRight size={10} /> Payload
                                   </span>
-                                  {!!rawBody?.trim() && (
-                                    <button
-                                      onClick={e => {
-                                        e.stopPropagation()
-                                        setPayloadPrettyIds(prev => {
-                                          const next = new Set(prev)
-                                          if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id)
-                                          return next
-                                        })
-                                      }}
-                                      title={payloadPrettyIds.has(entry.id) ? 'Show raw (as stored in the request)' : 'Pretty-print this JSON'}
-                                      className={`ml-auto flex items-center gap-1 text-[10px] transition-colors cursor-pointer ${
-                                        payloadPrettyIds.has(entry.id) ? 'text-[#097bed]' : 'text-pm-text-muted hover:text-pm-text'
-                                      }`}
-                                    >
-                                      <WandSparkles size={11} /> {payloadPrettyIds.has(entry.id) ? 'Pretty' : 'Prettify'}
-                                    </button>
+                                  {bodyEdited && (
+                                    <span className="flex items-center gap-0.5 text-[10px] font-semibold text-amber-400">
+                                      <Pencil size={9} /> edited
+                                    </span>
+                                  )}
+                                  {!!rawBody.trim() && (
+                                    <div className="ml-auto flex items-center gap-2.5">
+                                      {bodyEdited && (
+                                        <button
+                                          onClick={e => { e.stopPropagation(); setBodyDraft(entry.id, undefined) }}
+                                          disabled={entry.state === 'running'}
+                                          title="Discard the edit and go back to the payload saved in the request"
+                                          className="flex items-center gap-1 text-[10px] text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                          <Undo2 size={11} /> Reset
+                                        </button>
+                                      )}
+                                      <button
+                                        onClick={e => {
+                                          e.stopPropagation()
+                                          // Com rascunho, formatar É mexer no
+                                          // texto que está sendo editado; sem
+                                          // ele, só alterna a exibição do salvo.
+                                          if (bodyDraft !== undefined) {
+                                            setBodyDraft(entry.id, prettyBodyPreservingTemplates(bodyDraft))
+                                            return
+                                          }
+                                          setPayloadPrettyIds(prev => {
+                                            const next = new Set(prev)
+                                            if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id)
+                                            return next
+                                          })
+                                        }}
+                                        title={
+                                          bodyDraft !== undefined
+                                            ? 'Pretty-print the edited JSON'
+                                            : payloadPrettyIds.has(entry.id) ? 'Show raw (as stored in the request)' : 'Pretty-print this JSON'
+                                        }
+                                        className={`flex items-center gap-1 text-[10px] transition-colors cursor-pointer ${
+                                          bodyDraft === undefined && payloadPrettyIds.has(entry.id) ? 'text-[#097bed]' : 'text-pm-text-muted hover:text-pm-text'
+                                        }`}
+                                      >
+                                        <WandSparkles size={11} />{' '}
+                                        {bodyDraft === undefined && payloadPrettyIds.has(entry.id) ? 'Pretty' : 'Prettify'}
+                                      </button>
+                                      {!busy && (
+                                        <button
+                                          onClick={e => { e.stopPropagation(); handleRunStep(entry.id) }}
+                                          title={
+                                            bodyEdited
+                                              ? 'Send only this request again, with the edited payload'
+                                              : 'Send only this request again'
+                                          }
+                                          className="flex items-center gap-1 h-5 px-1.5 rounded text-[10px] font-semibold cursor-pointer border border-[#f26b3a]/40 bg-[#f26b3a]/10 text-[#f26b3a] hover:bg-[#f26b3a]/20 transition-colors"
+                                        >
+                                          <Play size={10} /> Send
+                                        </button>
+                                      )}
+                                      {stepRunningId === entry.id && (
+                                        <Loader2 size={12} className="animate-spin text-[#097bed]" />
+                                      )}
+                                    </div>
                                   )}
                                 </div>
-                                {rawBody?.trim() ? (
+                                {rawBody.trim() ? (
                                   // Cru por padrão: é o que está guardado na
                                   // request, e reformatar sem pedir mostraria
                                   // um payload diferente do que o editor de
                                   // Body mostra. Bonito é opt-in, ver o botão
                                   // acima — mantém os {{tokens}} clicáveis
                                   // (prettyBodyPreservingTemplates só reindenta).
-                                  <JsonBlock
-                                    value={payloadPrettyIds.has(entry.id) ? prettyBodyPreservingTemplates(rawBody) : rawBody}
-                                    maxHeight={224}
-                                    variableValue={currentEnvValue}
-                                    onCommitVariable={commitVariable}
-                                  />
+                                  //
+                                  // Editável: o que se digita vira o rascunho
+                                  // desta linha (template, com {{vars}} — ver
+                                  // payloadOverride.ts) e é o que o Send / Run
+                                  // from here mandam. Travado só enquanto a
+                                  // própria linha está no ar.
+                                  <>
+                                    <JsonBlock
+                                      value={
+                                        bodyDraft ??
+                                        (payloadPrettyIds.has(entry.id) ? prettyBodyPreservingTemplates(rawBody) : rawBody)
+                                      }
+                                      maxHeight={224}
+                                      variableValue={currentEnvValue}
+                                      onCommitVariable={commitVariable}
+                                      onChange={entry.state === 'running' ? undefined : next => setBodyDraft(entry.id, next)}
+                                    />
+                                    {bodyEdited && (
+                                      <span className="text-[10px] text-pm-text-muted">
+                                        Edited for this run only — the saved request is unchanged. {'{{variables}}'} are
+                                        resolved from the current environment when sent.
+                                      </span>
+                                    )}
+                                  </>
                                 ) : (
                                   // Request apagada depois do run: sobra o que
                                   // foi enviado, já resolvido — sem variável

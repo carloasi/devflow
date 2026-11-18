@@ -5,6 +5,7 @@ import { DataResponse } from '@/app/types/DataResponse';
 import { sanitizeJsonBodyForSend } from '@/lib/sanitizeJsonBody';
 import { buildRequestHeaders, requestHasBody } from '@/lib/defaultHeaders';
 import { resolveAfterPreRequest } from '@/lib/preRequestResolution';
+import { applyBodyOverride } from './payloadOverride';
 import {
   describeToken,
   isTokenStep,
@@ -307,9 +308,12 @@ export async function runCollectionRequest(
   item: CollectionItem,
   envMap: Record<string, string>,
   // requestId: permite interromper o envio com cancel_http_request (Stop do Runner).
-  options: { requestId?: string } = {}
+  // bodyOverride: body (template, com {{vars}}) editado no Runner só para esta
+  // execução — resolvido e passado aos scripts igual ao da request salva, que
+  // não é alterada (ver payloadOverride.ts).
+  options: { requestId?: string; bodyOverride?: string } = {}
 ): Promise<RunItemOutcome> {
-  const req = item.request;
+  const req = applyBodyOverride(item, options.bodyOverride).request;
 
   if (item.protocol === 'grpc') {
     return {
