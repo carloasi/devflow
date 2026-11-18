@@ -11,6 +11,7 @@ import {
   duplicateNode,
   findNodeById,
   topLevelInTreeOrder,
+  projectSiblingDrop,
 } from './tree.utils';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 
@@ -81,5 +82,27 @@ describe('cópia não herda favorito', () => {
     const dup = duplicateNode(items, 'fav');
     const col = findNodeById(dup, 'col')!;
     expect(col.item!.filter(i => i.starred).length).toBe(1);
+  });
+});
+
+describe('soltar logo abaixo de uma pasta aberta', () => {
+  // ColA aberta com X e Y dentro; ColB depois.
+  const rows = [
+    { id: 'ColA', depth: 0 },
+    { id: 'X', depth: 1 },
+    { id: 'Y', depth: 1 },
+    { id: 'ColB', depth: 0 },
+  ];
+
+  it('vira o primeiro filho dela, onde o traço está desenhado', () => {
+    expect(projectSiblingDrop(rows, 0, 0)).toEqual({ targetId: 'X', depth: 1, position: 'before' });
+  });
+
+  it('puxar pra esquerda ali não pula a pasta inteira', () => {
+    expect(projectSiblingDrop(rows, 0, 3)).toEqual({ targetId: 'X', depth: 1, position: 'before' });
+  });
+
+  it('entre irmãos continua "depois da linha de cima"', () => {
+    expect(projectSiblingDrop(rows, 1, 0)).toEqual({ targetId: 'X', depth: 1 });
   });
 });

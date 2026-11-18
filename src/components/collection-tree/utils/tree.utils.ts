@@ -614,6 +614,8 @@ export interface ProjectedDrop {
   targetId: string
   // Nível em que ele cai — é o recuo desenhado no traço de inserção.
   depth: number
+  // Lado de targetId em que ele entra; ausente = depois.
+  position?: 'before'
 }
 
 // Resolve um drop "entre duas linhas" quando o usuário puxa o ponteiro pra
@@ -636,6 +638,15 @@ export function projectSiblingDrop(
 ): ProjectedDrop {
   const above = rows[aboveIndex]
   const below = rows[aboveIndex + 1]
+
+  // Logo abaixo de uma pasta aberta (a linha de baixo é filha dela): o traço
+  // fica entre a pasta e o primeiro filho, então o item vira esse primeiro
+  // filho. Antes virava "irmão depois da pasta" — ia parar abaixo da
+  // subárvore inteira, longe do traço; e como o nível mínimo é o da linha de
+  // baixo, puxar pra esquerda não mudava nada ali.
+  if (below && below.depth > above.depth) {
+    return { targetId: below.id, depth: below.depth, position: 'before' }
+  }
 
   const maxDepth = above.depth
   // O mínimo nunca passa do máximo: encostar no topo do primeiro filho de uma

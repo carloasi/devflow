@@ -191,6 +191,11 @@ export interface DropIndicator {
   // puxa pra esquerda pra tirar o item de nível: o traço continua no ponto de
   // inserção sob o cursor, mas o item vira irmão de um ANCESTRAL dessa linha.
   targetId?: string
+  // Lado de targetId em que o item entra, quando difere de `position` (que é
+  // o lado da linha em que o traço é desenhado): soltar logo abaixo de uma
+  // pasta aberta desenha o traço DEPOIS da pasta e põe o item ANTES do
+  // primeiro filho dela.
+  targetPosition?: 'before'
   // Recuo do traço, em níveis. Mostra em qual nível o item vai cair.
   indentDepth?: number
 }
@@ -1454,7 +1459,7 @@ export function CollectionTree({
 
     // Request solta entre os examples de outra (ou example fora da sua
     // request): o drop seria recusado, então o traço não aparece.
-    if (!canDropAt(items, dragged.id, projected.targetId, 'after')) {
+    if (!canDropAt(items, dragged.id, projected.targetId, projected.position ?? 'after')) {
       setDropIndicator(null)
       return
     }
@@ -1463,6 +1468,7 @@ export function CollectionTree({
       id: rows[above].item.id,
       position: 'after',
       targetId: projected.targetId,
+      targetPosition: projected.position,
       indentDepth: projected.depth,
     }
 
@@ -1473,6 +1479,7 @@ export function CollectionTree({
       current.id === next.id &&
       current.position === next.position &&
       current.targetId === next.targetId &&
+      current.targetPosition === next.targetPosition &&
       current.indentDepth === next.indentDepth
         ? current
         : next
@@ -1491,18 +1498,34 @@ export function CollectionTree({
     return () => body.classList.remove('tree-drag-blocked', 'tree-dragging')
   }, [activeItem, dropBlocked])
 
+  // A lista rola sozinha quando o arraste encosta na borda (auto-scroll do
+  // dnd-kit) sem o ponteiro se mexer, e sem pointermove o traço ficava preso
+  // na linha de antes, que subia junto — o item caía longe do cursor.
+  const handleTreeScroll = () => {
+    updateRange()
+    if (activeItem) updateDropIndicator()
+  }
+
   const handleDragOver = (_event: DragOverEvent) => updateDropIndicator()
   const handleDragMove = (_event: DragMoveEvent) => updateDropIndicator()
 
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active } = event
-    const indicator = dropIndicator
-
+  // Fim do arraste, solto ou cancelado. O cancelar (Esc no meio do arraste)
+  // só apagava o traço: activeItem ficava preso, então o cursor de arrastar
+  // não saía do body e o traço voltava a seguir o mouse até o próximo
+  // arraste.
+  const resetDrag = () => {
     setActiveItem(null)
     setDropIndicator(null)
     pointerYRef.current = null
     pointerXRef.current = null
     dragStartXRef.current = null
+  }
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active } = event
+    const indicator = dropIndicator
+
+    resetDrag()
 
     // O alvo é o do indicador (o que estava desenhado na tela), não o `over`
     // do dnd-kit — ver o comentário em updateDropIndicator.
@@ -1515,7 +1538,7 @@ export function CollectionTree({
       items,
       active.id as string,
       targetId,
-      indicator.position
+      indicator.targetPosition ?? indicator.position
     )
     moveWithUndo(active.id as string, updated)
   }
@@ -1636,7 +1659,7 @@ export function CollectionTree({
         aria-label="Collections"
         aria-multiselectable
         aria-activedescendant={treeFocused && focusedId && rowIndexById.has(focusedId) ? treeRowDomId(focusedId) : undefined}
-        onScroll={updateRange}
+        onScroll={handleTreeScroll}
         onKeyDown={handleTreeKeyDown}
         onFocus={handleTreeFocus}
         onBlur={handleTreeBlur}
@@ -1667,7 +1690,7 @@ export function CollectionTree({
             onDragOver={handleDragOver}
             onDragMove={handleDragMove}
             onDragEnd={handleDragEnd}
-            onDragCancel={() => setDropIndicator(null)}
+            onDragCancel={resetDrag}
           >
             <SortableContext items={rootIds} strategy={verticalListSortingStrategy}>
               {/* Só a janela do scroll é desenhada (ver treeRows): o espaçador
