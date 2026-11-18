@@ -17,8 +17,7 @@ import {
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { ParsedCurlRequest } from '@/lib/curlParser'
-import { toPostmanUrl as buildPostmanUrl } from '@/lib/postmanUrl'
-import { toPostmanScript } from '@/lib/postmanScriptCompat'
+import { toPostmanCollection, exportFileName, countSkippedGrpc } from '@/lib/postmanExport'
 
 interface Params {
   items: CollectionItem[]
@@ -35,261 +34,6 @@ function normalizeMethod(method: string): HttpMethod {
   return (VALID_METHODS as string[]).includes(upper)
     ? (upper as HttpMethod)
     : 'GET'
-}
-
-// ─── Conversor para formato Postman Collection v2.1 ───────────────────────────
-
-function toPostmanAuth(auth: RequestDetails['auth']) {
-  if (!auth || auth.type === 'none') {
-    return { type: 'noauth' }
-  }
-
-  if (auth.type === 'bearer') {
-    return {
-      type: 'bearer',
-      bearer: [{ key: 'token', value: auth.token ?? '', type: 'string' }],
-    }
-  }
-
-  // Antes caía direto em "noauth" — Basic Auth e API Key eram descartados
-  // silenciosamente no export, perdendo usuário/senha ou chave/valor.
-  if (auth.type === 'basic') {
-    return {
-      type: 'basic',
-      basic: [
-        { key: 'username', value: auth.username ?? '', type: 'string' },
-        { key: 'password', value: auth.password ?? '', type: 'string' },
-      ],
-    }
-  }
-
-  if (auth.type === 'apikey') {
-    return {
-      type: 'apikey',
-      apikey: [
-        { key: 'key',   value: auth.key   ?? '', type: 'string' },
-        { key: 'value', value: auth.value ?? '', type: 'string' },
-        { key: 'in',    value: 'header',         type: 'string' },
-      ],
-    }
-  }
-
-  if (auth.type === 'oauth2') {
-    const getValue = (key: string) =>
-      auth.oauth2?.find((item) => item.key === key)?.value ?? ''
-
-    return {
-      type: 'oauth2',
-      oauth2: [
-        { key: 'accessToken',   value: getValue('accessToken'),   type: 'string' },
-        { key: 'headerPrefix',  value: getValue('headerPrefix'),  type: 'string' },
-        { key: 'tokenName',     value: getValue('tokenName'),     type: 'string' },
-        { key: 'grantType',     value: getValue('grantType'),     type: 'string' },
-        { key: 'callbackUrl',   value: getValue('callbackUrl'),   type: 'string' },
-        { key: 'authUrl',       value: getValue('authUrl'),       type: 'string' },
-        { key: 'accessTokenUrl',value: getValue('accessTokenUrl'),type: 'string' },
-        { key: 'clientId',      value: getValue('clientId'),      type: 'string' },
-        { key: 'clientSecret',  value: getValue('clientSecret'),  type: 'string' },
-        { key: 'scope',         value: getValue('scope'),         type: 'string' },
-      ],
-    }
-  }
-
-  return { type: 'noauth' }
-}
-
-/**
- * URL no formato Postman, SEMPRE derivada do texto cru.
- *
- * Antes isto preferia `urlexport.host`/`path`, preenchidos na importação.
- * Mas editar a URL no app atualiza só o `raw` (ver AppLayout), então numa
- * request importada e depois editada as duas versões se contradiziam — e o
- * Postman monta a URL pelas PARTES, ignorando o `raw`. O resultado era um
- * export apontando para outro endpoint, sem erro e sem aviso: 296 das 8.279
- * requests de uma base real.
- *
- * Derivando do `raw`, elas concordam por construção. `variable` continua
- * vindo do `urlexport` porque os path params são guardados à parte e
- * acompanham a edição.
- */
-function toPostmanUrl(request: RequestDetails) {
-  const raw = request.urlexport?.raw ?? request.url ?? ''
-  return buildPostmanUrl(raw, request.urlexport?.variable ?? [])
-}
-
-function toPostmanEvents(scripts: RequestDetails['scripts']) {
-  if (!scripts) return []  // 👈 scripts é opcional
-
-  const events = []
-
-  if (scripts.preRequest?.trim()) {
-    events.push({
-      listen: 'prerequest',
-      script: {
-        type: 'text/javascript',
-        exec: toPostmanScript(scripts.preRequest).code.split(/\r?\n/),
-      },
-    })
-  }
-
-  if (scripts.postResponse?.trim()) {
-    events.push({
-      listen: 'test',
-      script: {
-        type: 'text/javascript',
-        exec: toPostmanScript(scripts.postResponse).code.split(/\r?\n/),
-      },
-    })
-  }
-
-  return events
-}
-
-function toPostmanHeaders(headers: RequestDetails['headers']) {
-  if (!headers?.length) return []
-
-  return headers.map((h) => ({
-    key:      h.key,
-    value:    h.value,
-    type:     'text',
-    disabled: !h.enabled,  // 👈 seu tipo usa 'enabled', Postman usa 'disabled'
-  }))
-}
-
-function toPostmanBody(body: RequestDetails['body'], bodyType: RequestDetails['bodyType'], contentType?: string) {
-  if (!body?.trim()) return undefined  // 👈 body é opcional
-
-  // Corpo GraphQL é guardado internamente como JSON.stringify({query, variables})
-  // — desmonta de volta pro formato { mode: 'graphql', graphql: {...} } que o
-  // Postman espera, em vez de exportar como texto raw ilegível.
-  if (bodyType === 'graphql') {
-    try {
-      const parsed = JSON.parse(body)
-      if (parsed && typeof parsed.query === 'string') {
-        const variables = typeof parsed.variables === 'string' ? parsed.variables : JSON.stringify(parsed.variables ?? {})
-        return {
-          mode: 'graphql',
-          graphql: { query: parsed.query, variables },
-        }
-      }
-    } catch {
-      // não era o JSON esperado — cai no fallback raw abaixo
-    }
-  }
-
-  if (contentType?.includes('application/json') || isJsonString(body)) {
-    return {
-      mode: 'raw',
-      raw: body,
-      options: { raw: { language: 'json' } },
-    }
-  }
-
-  return {
-    mode: 'raw',
-    raw: body,
-  }
-}
-
-function isJsonString(str: string): boolean {
-  try {
-    const trimmed = str.trim()
-    return (trimmed.startsWith('{') || trimmed.startsWith('['))
-  } catch {
-    return false
-  }
-}
-
-/** Monta só o bloco `request: {...}` do formato Postman — reaproveitado
- * tanto pela request "de verdade" quanto pelo `originalRequest` de cada
- * example salvo dela (ambos guardam o snapshot no mesmo campo `request`). */
-function buildPostmanRequest(item: CollectionItem) {
-  const req = item.request
-  if (!req) return { method: item.method ?? 'GET', header: [], url: { raw: '' } }
-
-  const contentTypeHeader = req.headers?.find(
-    (h) => h.key.toLowerCase() === 'content-type'
-  )
-
-  return {
-    method: item.method ?? 'GET',
-    header: toPostmanHeaders(req.headers),
-    url:    toPostmanUrl(req),
-    auth:   req.auth ? toPostmanAuth(req.auth) : undefined,
-    body:   toPostmanBody(req.body, req.bodyType, contentTypeHeader?.value),
-  }
-}
-
-/** Converte um CollectionItem type='example' → um item do array
- * `item.response[]` do Postman v2.1 (Saved Examples). */
-function toPostmanExample(ex: CollectionItem): object {
-  const data = ex.example
-  return {
-    id:      ex.id,
-    name:    ex.name,
-    originalRequest: buildPostmanRequest(ex),
-    status:  data?.status ?? 'OK',
-    code:    data?.code ?? 200,
-    _postman_previewlanguage: data?.previewLanguage ?? 'json',
-    header: (data?.headers ?? [])
-      .filter((h) => h.enabled !== false)
-      .map((h) => ({ key: h.key, value: h.value })),
-    cookie: [],
-    body: data?.body ?? '',
-  }
-}
-
-// O formato Postman v2.1 não tem request gRPC (o Postman guarda gRPC à
-// parte) — essas ficam fora do export em vez de virar uma HTTP quebrada.
-function isExportable(item: CollectionItem): boolean {
-  return item.protocol !== 'grpc'
-}
-
-// `description` só entra quando tem texto: a chave vazia em todo item
-// engorda o arquivo e vira ruído no diff de quem importa no Postman.
-const withDescription = (item: CollectionItem) =>
-  item.description?.trim() ? { description: item.description.trim() } : {}
-
-/** Converte CollectionItem (interno) → item do formato Postman v2.1 */
-function toPostmanItem(item: CollectionItem): object {
-  if (item.type === 'folder') {
-    return {
-      name: item.name,
-      ...withDescription(item),
-      item: (item.item ?? []).filter(isExportable).map(toPostmanItem),
-    }
-  }
-
-  const req = item.request  // pode ser undefined em requests mal formados
-  // Saved Examples ficam guardados como filhos type='example' na árvore
-  // interna (ver CollectionItem.ts) — no Postman de verdade eles são um
-  // array `response[]` irmão de `request`, não filhos de `item[]`.
-  const examples = (item.item ?? []).filter((c) => c.type === 'example')
-
-  if (!req) {
-    return { name: item.name, ...withDescription(item), request: buildPostmanRequest(item), response: examples.map(toPostmanExample) }
-  }
-
-  return {
-    name:    item.name,
-    ...withDescription(item),
-    event:   toPostmanEvents(req.scripts),
-    request: buildPostmanRequest(item),
-    response: examples.map(toPostmanExample),
-  }
-}
-
-/** Monta o JSON raiz no padrão Postman Collection v2.1 */
-function toPostmanCollection(root: CollectionItem) {
-  return {
-    info: {
-      _postman_id: root.id,
-      name:        root.name,
-      ...withDescription(root),
-      schema:      'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
-    },
-    item: (root.item ?? []).filter(isExportable).map(toPostmanItem),
-  }
 }
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
@@ -448,19 +192,25 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
 }, [items, onUpdateItems])
 
 
-  const exportCollection = useCallback(async (item: CollectionItem) => {
+  // Devolve o que aconteceu pra quem chamou avisar: antes o export não dava
+  // retorno nenhum — nem de sucesso, nem de falha ao gravar (que virava uma
+  // promise rejeitada que ninguém via), nem das gRPC deixadas de fora.
+  const exportCollection = useCallback(async (
+    item: CollectionItem
+  ): Promise<{ saved: boolean; skippedGrpc: number }> => {
     // Converte para o padrão Postman v2.1
     const postmanJson = toPostmanCollection(item)
     const json = JSON.stringify(postmanJson, null, 2)
 
     const filePath = await save({
-      defaultPath: `${item.name}.json`,
+      defaultPath: exportFileName(item.name),
       filters: [{ name: 'JSON', extensions: ['json'] }],
     })
 
-    if (!filePath) return
+    if (!filePath) return { saved: false, skippedGrpc: 0 }
 
     await writeTextFile(filePath, json)
+    return { saved: true, skippedGrpc: countSkippedGrpc(item) }
   }, [])
 
   const rename = useCallback((id: string, newName: string) => {

@@ -809,14 +809,30 @@ export function CollectionTree({
   // Compiler desistir de memoizar uma dúzia de outros callbacks do
   // componente, sem relação nenhuma com isto — confirmado comparando o lint
   // com/sem essa única mudança.
+  // Grava e diz o resultado: sucesso, falha ao gravar, gRPC que ficaram de
+  // fora. Os dois caminhos (direto e "Export anyway") passam por aqui.
+  const runExport = useCallback(async (item: CollectionItem) => {
+    try {
+      const result = await actions.export(item)
+      if (!result.saved) return
+      toast.success(`"${item.name}" exported`, {
+        description: result.skippedGrpc > 0
+          ? `${result.skippedGrpc} gRPC request${result.skippedGrpc === 1 ? ' was' : 's were'} left out: the Postman format has no gRPC.`
+          : undefined,
+      })
+    } catch (e) {
+      toast.error(`Could not export "${item.name}"`, { description: (e as Error)?.message ?? String(e) })
+    }
+  }, [actions])
+
   const exportWithSecretCheck = useCallback(async (item: CollectionItem) => {
     const findings = scanTree([item])
     if (findings.length > 0) {
       setPendingExportSecrets({ item, findings })
       return
     }
-    await actions.export(item)
-  }, [actions])
+    await runExport(item)
+  }, [runExport])
 
   // "Export as HTML runner": o flow vira um .html que roda os passos no
   // navegador (lib/flowHtml). Primeiro abre a janela de escolhas
@@ -2367,7 +2383,7 @@ export function CollectionTree({
             </button>
             <button
               onClick={() => {
-                if (pendingExportSecrets) actions.export(pendingExportSecrets.item)
+                if (pendingExportSecrets) void runExport(pendingExportSecrets.item)
                 setPendingExportSecrets(null)
               }}
               className="h-7 px-3 rounded-md text-xs font-semibold bg-amber-500 text-white hover:bg-amber-400 transition-colors cursor-pointer"
