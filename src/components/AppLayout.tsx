@@ -1310,16 +1310,21 @@ export default function AppLayout() {
   // sincronização (lib/syncBase.pendingChanges), lida do disco: espera a
   // digitação parar um pouco e descarta a resposta de um workspace antigo.
   const [pendingDetails, setPendingDetails] = useState<Map<string, PendingDetail>>(() => new Map());
+  // Só a leitura mais recente vale: uma mais lenta, disparada antes, não
+  // pode sobrescrever a contagem nova com a velha.
+  const pendingDetailsSeqRef = useRef(0);
   useEffect(() => {
     if (pendingCollectionIds.size === 0) {
+      pendingDetailsSeqRef.current++;
       setPendingDetails(prev => (prev.size === 0 ? prev : new Map()));
       return;
     }
     const workspace = selectedWorkspace;
     const roots = collections;
     const timer = setTimeout(() => {
+      const seq = ++pendingDetailsSeqRef.current;
       void loadSyncBase(workspace).then(base => {
-        if (selectedWorkspaceRef.current !== workspace) return;
+        if (seq !== pendingDetailsSeqRef.current || selectedWorkspaceRef.current !== workspace) return;
         const next = new Map<string, PendingDetail>();
         for (const id of pendingCollectionIds) {
           const detail = pendingChangesSince(base, roots.find(c => c.id === id));

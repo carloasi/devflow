@@ -99,7 +99,7 @@ import { ExportFlowHtmlDialog, type ExportFlowHtmlChoice } from './ExportFlowHtm
 import type { ActionMenuView } from './TreeActionMenu'
 import { shortcutFor } from './treeShortcuts'
 import { ImportCurlDialog } from '../SlidePanel/ImportCurlDialog'
-import { copyItemsToClipboard, cutItemsToClipboard, getCutIds, clearCut, getClipboardItems, hasClipboardItems } from '@/storage/treeClipboard'
+import { copyItemsToClipboard, cutItemsToClipboard, getCutIds, clearCut, clearClipboard, getClipboardItems, hasClipboardItems } from '@/storage/treeClipboard'
 import { useEnvironment } from '@/components/EnvironmentContext'
 import {
   AlertDialog,
@@ -479,16 +479,26 @@ export function CollectionTree({
       setCutIds(prev => (prev.size === 0 ? prev : new Set()))
       return null
     }
-    if (!moveGroupWithUndo(present, place(present))) {
+    const next = place(present)
+    if (!moveGroupWithUndo(present, next)) {
       toast.error("Can't move here. Collections only hold folders, and requests can't go inside a request.")
       return false
     }
-    clearCut()
+    // Recorte é de uso único, como no Explorer: depois de colado o
+    // clipboard esvazia. Antes só o recorte saía e as CÓPIAS guardadas
+    // ficavam — o Ctrl+V seguinte colava duplicatas do que foi movido.
+    clearClipboard()
     setCutIds(new Set())
+    const left = present.filter(id => {
+      const before = positionOf(items, id)
+      const after = positionOf(next, id)
+      return before && after && before.parentId === after.parentId && before.index === after.index
+    }).length
+    if (left > 0) toast.warning(`${left} item${left === 1 ? '' : 's'} couldn't go there and stayed where ${left === 1 ? 'it was' : 'they were'}.`)
     return true
   }, [items, moveGroupWithUndo])
 
-  // Reordenar pelo menu de contexto.) O que pode ser feito é calculado na
+  // Reordenar pelo menu de contexto. O que pode ser feito é calculado na
   // abertura do menu, pra que as entradas impossíveis nasçam desabilitadas em
   // vez de não fazer nada ao serem clicadas.
   const buildMoveActions = useCallback((id: string) => ({
@@ -1028,10 +1038,12 @@ export function CollectionTree({
 
   // Guia realçada: a da pasta da linha com foco (ou da aba ativa).
   const guide = useMemo(() => {
-    const id = focusedId ?? activeRequestId
+    // Com a árvore sem foco vale a aba ativa: o foco que ficou pra trás
+    // não diz mais onde a pessoa está.
+    const id = (treeFocused ? focusedId : null) ?? activeRequestId ?? focusedId
     const index = id ? rowIndexById.get(id) ?? -1 : -1
     return activeGuide(flatRows, index)
-  }, [focusedId, activeRequestId, rowIndexById, flatRows])
+  }, [focusedId, treeFocused, activeRequestId, rowIndexById, flatRows])
 
   // Caminho até a aba ativa, mostrado acima da árvore. Cada parte leva ao
   // item na árvore.
@@ -1369,7 +1381,13 @@ export function CollectionTree({
     const canExpand = !!node && (node.type === 'folder' || (node.item?.length ?? 0) > 0)
     const mod = e.ctrlKey || e.metaKey
 
-    const move = (to: number) => setFocusedId(rows[Math.max(0, Math.min(rows.length - 1, to))].id)
+    // Andar sem Shift muda de onde o próximo Shift+seta/Shift+Click conta:
+    // da linha a que se chegou, não de um clique antigo.
+    const move = (to: number) => {
+      const target = rows[Math.max(0, Math.min(rows.length - 1, to))].id
+      selectionAnchorRef.current = target
+      setFocusedId(target)
+    }
 
     // Busca por digitação (como no Explorer/VS Code): letras pulam pro item
     // cujo nome começa com o que foi digitado. F, R, N e M sozinhos são
@@ -1406,8 +1424,10 @@ export function CollectionTree({
         else move(idx < 0 ? 0 : idx - 1)
         break
       case ' ':
-        // Espaço marca/desmarca a linha com foco, como o Ctrl+Click.
-        if (node && !folderPickMode) handleToggleSelect(node.id)
+        // No meio da busca por digitação o espaço é parte do nome ("order
+        // groups"); fora dela marca/desmarca a linha, como o Ctrl+Click.
+        if (typing) runTypeAhead()
+        else if (node && !folderPickMode) handleToggleSelect(node.id)
         else handled = false
         break
       case 'Home':

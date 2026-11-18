@@ -167,3 +167,36 @@ describe('árvore: caminho da aba aberta', () => {
     expect([...nav!.querySelectorAll('button')].map(b => b.textContent)).toEqual(['ColA', 'Sub', 'd1']);
   });
 });
+
+describe('árvore: bugs das melhorias', () => {
+  it('Shift+seta parte da linha a que se chegou com as setas, não de um clique antigo', () => {
+    click('a1');
+    focusTree();
+    key('ArrowDown'); // a2
+    key('ArrowDown'); // a3
+    key('ArrowDown', { shiftKey: true }); // a3..Sub
+    expect(selected()).toEqual(['a3', 'Sub']);
+  });
+
+  it('espaço no meio da busca por digitação continua a busca', () => {
+    items = [folder('ColA', [request('Order Groups'), request('Order Seats')])];
+    render();
+    focusTree();
+    key('o');
+    key('r');
+    key(' ');
+    expect(selected()).toEqual([]);
+  });
+
+  it('depois de colar um recorte, o Ctrl+V seguinte não cola cópias', () => {
+    click('a1');
+    focusTree();
+    key('x', { ctrlKey: true });
+    click('Sub');
+    focusTree();
+    key('v', { ctrlKey: true });
+    const calls = onUpdateItems.mock.calls.length;
+    key('v', { ctrlKey: true });
+    expect(onUpdateItems.mock.calls.length).toBe(calls);
+  });
+});

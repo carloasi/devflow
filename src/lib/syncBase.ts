@@ -294,23 +294,37 @@ export function pendingChanges(
   const present = new Set<string>();
   const walk = (node: CollectionItem, parentId: string) => {
     present.add(node.id);
+    const known = base[node.id] !== undefined;
     const own = changedSinceBase(base, node.id, node) === true;
-    const order = node.item?.length ? JSON.stringify(node.item.map(c => c.id)) : undefined;
-    const moved =
-      base[node.id] !== undefined &&
-      ((base[fieldHashKey(node.id, PARENT_FIELD)] ?? '') !== parentId ||
-        (base[fieldHashKey(node.id, ORDER_FIELD)] ?? undefined) !== order);
+    // Trocou de pai: conta no item que se moveu.
+    const moved = known && (base[fieldHashKey(node.id, PARENT_FIELD)] ?? '') !== parentId;
+    // Ordem dos filhos: só conta na pasta quando os filhos são os MESMOS
+    // (reordenou). Filho que entrou, saiu ou foi apagado já conta nele —
+    // senão mover um item contava 3 (ele e as duas pastas).
+    const ids = node.item?.map(c => c.id) ?? [];
+    const recorded = base[fieldHashKey(node.id, ORDER_FIELD)];
+    const before: string[] = recorded ? JSON.parse(recorded) : [];
+    const reordered =
+      known &&
+      before.length === ids.length &&
+      before.some((id, i) => id !== ids[i]) &&
+      before.every(id => ids.includes(id));
     const fields = Object.entries(fieldHashesOf(node)).some(([k, v]) => base[k] !== v);
-    if (own || moved || fields) changed.push(node.id);
+    if (own || moved || reordered || fields) changed.push(node.id);
     node.item?.forEach(child => walk(child, node.id));
   };
   walk(root, '');
 
+  // Apagados: só os de cima. Apagar uma pasta com 10 requests é 1 alteração,
+  // não 11 — o que estava dentro dela sai junto.
   const suffix = `#${ROOT_FIELD}`;
   let deleted = 0;
   for (const [key, value] of Object.entries(base)) {
     if (value !== root.id || !key.endsWith(suffix)) continue;
-    if (!present.has(key.slice(0, -suffix.length))) deleted++;
+    const id = key.slice(0, -suffix.length);
+    if (present.has(id)) continue;
+    const parent = base[fieldHashKey(id, PARENT_FIELD)];
+    if (!parent || present.has(parent)) deleted++;
   }
   return { changed, deleted };
 }
