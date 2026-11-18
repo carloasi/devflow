@@ -138,7 +138,7 @@ import type { FileShas } from '@/lib/remoteVersions';
 import { pruneEmptyGroups, type TabGroup } from '@/lib/tabGroups';
 import { applySelectedChanges } from '@/lib/applyDiff';
 import { diffEnvironments, applyEnvironmentChanges } from '@/lib/environmentDiff';
-import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, type NodeHashes } from '@/lib/syncBase';
+import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, matchesSyncBase, type NodeHashes } from '@/lib/syncBase';
 import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
@@ -2860,6 +2860,32 @@ useEffect(() => {
   // reconcilia o arquivo que ficou no remoto.
   if (removed.length > 0) markFullPushRequired(selectedWorkspace);
   setPendingPush(readPendingPush(selectedWorkspace));
+
+  // Editar e desfazer à mão deixava o ponto aceso pra sempre. Se a
+  // collection voltou a ser exatamente o que foi sincronizado por último
+  // (lib/syncBase.matchesSyncBase), a pendência sai. A base é lida do disco
+  // (assíncrono): só limpa se a collection conferida ainda é a atual — uma
+  // edição no meio do caminho já teria marcado de novo e não pode ser
+  // apagada por esta resposta atrasada.
+  if (changed.length > 0) {
+    const workspace = selectedWorkspace;
+    const checked = new Map(
+      changed.map(id => [id, collections.find(c => c.id === id)] as const)
+    );
+    void loadSyncBase(workspace).then(base => {
+      if (!base || selectedWorkspaceRef.current !== workspace) return;
+      const back = [...checked]
+        .filter(([id, root]) =>
+          root &&
+          collectionsRef.current.find(c => c.id === id) === root &&
+          matchesSyncBase(base, root)
+        )
+        .map(([id]) => id);
+      if (back.length === 0) return;
+      clearCollectionsPendingPush(workspace, back);
+      setPendingPush(readPendingPush(workspace));
+    });
+  }
 }, [collections, selectedWorkspace]);
 
 // useEffect(() => {

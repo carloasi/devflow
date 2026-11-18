@@ -567,3 +567,16 @@ a:focus-visible {
   .devflow-ring { animation-duration: 3s; }
   .devflow-progress { animation-duration: 3s; }
 }
+
+/* Arraste na árvore de Collections (CollectionTree): o cursor diz se soltar
+   ali faz alguma coisa. Precisa do `*` com !important porque as linhas e os
+   botões da árvore declaram o próprio cursor, que venceria o do body. */
+body.tree-dragging,
+body.tree-dragging * {
+  cursor: grabbing !important;
+}
+
+body.tree-drag-blocked,
+body.tree-drag-blocked * {
+  cursor: no-drop !important;
+}

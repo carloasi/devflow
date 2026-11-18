@@ -464,8 +464,8 @@ export function TreeContextMenu({
                 onClick={() => { onDelete(); onClose() }}
                 title={
                   deleteHasFolder
-                    ? 'Everything inside will be deleted too. This can’t be undone.'
-                    : 'This can’t be undone.'
+                    ? 'Everything inside will be deleted too. You can undo it right after.'
+                    : 'You can undo it right after.'
                 }
                 /* O `!` passa por cima do hover:bg-pm-hover que vem no
                    itemClass — sem ele a linha destrutiva acende cinza como

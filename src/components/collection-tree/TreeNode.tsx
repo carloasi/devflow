@@ -7,29 +7,36 @@ import type { Marker } from '@/lib/markers'
 import { MarkerGlyph } from './MarkerGlyph'
 import { TreeActionMenu, type ActionMenuView } from './TreeActionMenu'
 import { useSortable } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
-import { DropIndicator } from './CollectionTree'
+import type { DropIndicator } from './CollectionTree'
 import { countRequests } from './utils/tree.utils'
 
+// Uma LINHA da árvore. A árvore não é mais desenhada recursivamente: o
+// CollectionTree achata o que está aberto (treeRows.flattenVisibleTree) e
+// desenha só as linhas que cabem no scroll, cada uma com tudo o que ela
+// precisa já resolvido em booleanos (isActive, isFocused, isOpen…). Assim
+// trocar o foco ou o alvo do arraste re-renderiza duas linhas, não todas.
 interface Props {
   item: CollectionItem
   depth: number
-  activeRequestId?: string
-  isDragging?: boolean
+  // Pasta, ou request com Saved Examples — e se está aberta agora.
+  hasChildren: boolean
+  isOpen: boolean
+  // Posição entre os irmãos, pro leitor de tela (aria-posinset/setsize).
+  posInSet: number
+  setSize: number
+  isActive: boolean
+  isSelected: boolean
+  // Foco de teclado (só true enquanto a árvore tem foco).
+  isFocused: boolean
   onRequestSelect?: (item: CollectionItem) => void
+  // Só chega preenchido na linha contra a qual o traço/anel é desenhado.
   dropIndicator?: DropIndicator | null
-  selectedIds?: Set<string>
   onToggleSelect?: (id: string) => void
   onRowContextMenu?: (e: React.MouseEvent, item: CollectionItem) => void
-  // Quais nós estão abertos — controlado pelo CollectionTree (persistido
-  // entre sessões e aberto automaticamente durante a busca).
-  expandedIds: Set<string>
   onSetExpanded: (id: string, open: boolean) => void
-  // Linha com foco de teclado (só vem preenchido enquanto a árvore tem foco).
-  focusedId?: string | null
   onRowFocus?: (id: string) => void
-  // F2 pedido pelo teclado -> esta linha entra em modo rename.
-  renamingId?: string | null
+  // F2/item recém-criado -> esta linha entra em modo rename.
+  renameRequested?: boolean
   onRenameHandled?: () => void
   // Termos da busca, pra destacar o trecho que bateu no nome.
   searchTokens?: string[]
@@ -48,20 +55,23 @@ interface Props {
   // Grava a descrição do item (ver CollectionItem.description) — mesmo
   // menu "…", que foi pra onde "Add description" e "Markers" se mudaram.
   onSaveDescription?: (itemId: string, text: string) => void
-  // Id do item cujo menu "..." está aberto — compartilhado com o menu de
-  // clique direito (CollectionTree), pra só um menu da árvore ficar aberto
-  // por vez. Ver handleActionMenuOpenChange lá.
-  openActionMenuId?: string | null
+  // Se o menu "..." DESTA linha está aberto — controlado pelo CollectionTree
+  // pra só um menu da árvore ficar aberto por vez (ver
+  // handleActionMenuOpenChange lá). undefined = ninguém controla.
+  actionMenuOpen?: boolean
   // Vista em que o "..." abre quando o atalho M / Shift+M o abriu.
   actionMenuView?: ActionMenuView
   onActionMenuOpenChange?: (itemId: string, open: boolean) => void
+  // Esta collection tem alteração local esperando push. Só chega preenchido
+  // nas raízes — é a granularidade em que o pendente é rastreado.
+  isPendingPush?: boolean
+  // Total de requests da collection SEM filtro — com a busca ativa o
+  // contador vira "achadas / total". Só nas raízes.
+  totalRequests?: number
   // "Modo escolher pasta" — usado pelo fluxo de Tab Group -> Flow (ver
   // AppLayout.tsx). Enquanto ativo, clicar numa pasta chama
   // onPickFolder em vez do comportamento normal (abrir request/expandir);
   // clicar num item que não é pasta não faz nada.
-  // Esta collection tem alteração local esperando push. Só chega preenchido
-  // nas raízes — é a granularidade em que o pendente é rastreado.
-  isPendingPush?: boolean
   folderPickMode?: boolean
   onPickFolder?: (id: string) => void
   actions: {
@@ -85,6 +95,9 @@ interface Props {
     copyCurl?: (item: CollectionItem) => void
   }
 }
+
+/** id do elemento da linha — o `aria-activedescendant` da árvore aponta pra ele. */
+export const treeRowDomId = (id: string) => `tree-row-${id}`
 
 // Divide o nome em trechos, marcando os que batem com algum termo da busca.
 function highlightName(name: string, tokens: string[] | undefined): React.ReactNode {
@@ -177,17 +190,20 @@ function DropLine({ edge, indent }: { edge: 'top' | 'bottom'; indent: number }) 
 export const TreeNode = memo(function TreeNode({
   item,
   depth,
-  activeRequestId,
+  hasChildren,
+  isOpen: open,
+  posInSet,
+  setSize,
+  isActive,
+  isSelected,
+  isFocused,
   onRequestSelect,
   dropIndicator,
-  selectedIds,
   onToggleSelect,
   onRowContextMenu,
-  expandedIds,
   onSetExpanded,
-  focusedId,
   onRowFocus,
-  renamingId,
+  renameRequested,
   onRenameHandled,
   searchTokens,
   markerMap,
@@ -198,18 +214,15 @@ export const TreeNode = memo(function TreeNode({
   onRecolorMarker,
   onManageMarkers,
   onSaveDescription,
-  openActionMenuId,
+  actionMenuOpen,
   actionMenuView,
   onActionMenuOpenChange,
   folderPickMode,
   onPickFolder,
   isPendingPush,
+  totalRequests,
   actions,
 }: Props) {
-  // `?.` de propósito: durante um hot reload o TreeNode novo chegou a rodar
-  // com um CollectionTree antigo (sem expandedIds) e derrubava a árvore
-  // inteira com "reading 'has'". Sem o Set, o nó só aparece fechado.
-  const open = expandedIds?.has(item.id) ?? false
   const setOpen = (next: boolean | ((prev: boolean) => boolean)) =>
     onSetExpanded(item.id, typeof next === 'function' ? next(open) : next)
   // Clique único numa pasta abre/fecha — mas adiado, pra um duplo-clique
@@ -232,14 +245,6 @@ export const TreeNode = memo(function TreeNode({
   // decidir de novo. Sem isto, o onBlur — closure da renderização anterior,
   // ainda com o texto digitado — gravava o nome novo depois do Esc.
   const renameSettledRef = useRef(false)
-  // true quando este clique É a origem de isActive virar true — pula o
-  // scrollIntoView suave nesse caso (ver o efeito abaixo). Sem isso, o
-  // PRIMEIRO clique de um duplo-clique já rola a árvore (o item clicado
-  // ainda não era o ativo), e esse scroll suave desloca a lista embaixo do
-  // cursor antes do segundo clique/dblclick chegar — que então acerta outra
-  // linha, numa árvore com nomes repetidos (comum: vários "01 - Token v1"
-  // em flows diferentes) editando/abrindo a linha errada.
-  const selectedBySelfClickRef = useRef(false)
 
   useEffect(() => {
     setValue(item.name)
@@ -256,9 +261,6 @@ export const TreeNode = memo(function TreeNode({
 
   const isFolder = item.type === 'folder'
   const isExample = item.type === 'example'
-  // Requests com Saved Examples também podem expandir/colapsar pra revelar
-  // os filhos (igual pastas) — mas só quando de fato têm algum example.
-  const hasChildren = isFolder || (item.type === 'request' && !!item.item?.length)
   // Qualquer pasta pode ser favoritada, inclusive a collection inteira — é
   // assim que uma collection vai pro topo da árvore, como no Postman.
   //
@@ -272,9 +274,6 @@ export const TreeNode = memo(function TreeNode({
   // lógica de mover pro topo / devolver ao lugar (toggleStarNode) não depende
   // do tipo.
   const canToggleStar = true
-  const isActive = activeRequestId === item.id
-  const isSelected = selectedIds?.has(item.id) ?? false
-  const isFocused = focusedId === item.id
   // Collection = pasta na raiz. Ganha nome em destaque e o contador de
   // requests.
   const isCollection = isFolder && depth === 0
@@ -282,6 +281,16 @@ export const TreeNode = memo(function TreeNode({
     () => (isCollection ? countRequests(item) : 0),
     [isCollection, item]
   )
+  // Com a busca ativa, "achadas / total": só o número filtrado parecia a
+  // collection ter encolhido.
+  const countLabel =
+    totalRequests !== undefined && totalRequests !== requestCount
+      ? `${requestCount} / ${totalRequests}`
+      : String(requestCount)
+  const countTitle =
+    totalRequests !== undefined && totalRequests !== requestCount
+      ? `${requestCount} of ${totalRequests} requests match the filter`
+      : `${requestCount} request${requestCount === 1 ? '' : 's'}`
   // Marcadores da linha. Três bolinhas no máximo e o resto vira "+N": a
   // linha tem 22px e o nome é o que importa — uma fila de sete pontos come
   // o nome que eles deveriam estar qualificando.
@@ -325,20 +334,18 @@ export const TreeNode = memo(function TreeNode({
 
   const method = item.protocol === 'grpc' ? GRPC_META : METHOD_META[item.method as string]
 
-  // F2 pelo teclado (CollectionTree) -> entra em modo rename.
+  // F2 pelo teclado, ou item recém-criado (CollectionTree) -> modo rename.
   useEffect(() => {
-    if (renamingId === item.id) {
+    if (renameRequested) {
       setEditing(true)
       onRenameHandled?.()
     }
-  }, [renamingId, item.id, onRenameHandled])
+  }, [renameRequested, onRenameHandled])
 
   const {
     attributes,
     listeners,
     setNodeRef,
-    transform,
-    transition,
     isDragging,
   } = useSortable({
     id: item.id,
@@ -347,19 +354,6 @@ export const TreeNode = memo(function TreeNode({
     // texto do rename podia iniciar um drag do item sem querer.
     disabled: editing,
   })
-
-  const dndStyle: React.CSSProperties = {
-    transform: CSS.Transform.toString(
-      transform
-        ? { x: transform.x, y: transform.y, scaleX: 1, scaleY: 1 }
-        : null
-    ),
-    transition: transition ?? undefined,
-    zIndex: isDragging ? 999 : undefined,
-    opacity: isDragging ? 0.4 : 1,
-    width: '100%',
-    maxWidth: '100%',
-  }
 
   // Ao sair do rename, devolve o foco pra linha — senão o foco cai no body e
   // a navegação por teclado da árvore para de funcionar.
@@ -403,30 +397,9 @@ export const TreeNode = memo(function TreeNode({
   // filhos normalmente), e a pasta abrindo no meio do arrasto mexia no
   // layout sem necessidade.
 
-  // (Abrir as pastas ancestrais do item ativo agora é feito no
-  // CollectionTree, que controla o estado aberto/fechado de todos os nós.)
-
-  // Rola a linha até a viewport quando ela vira o item ativo — cobre tanto
-  // o caso de já estar visível (troca de aba simples) quanto o de ter
-  // acabado de ser revelada pela abertura automática das pastas acima.
-  useEffect(() => {
-    if (isActive) {
-      if (selectedBySelfClickRef.current) {
-        selectedBySelfClickRef.current = false
-        return
-      }
-      rowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    } else {
-      // Clicar numa linha que JÁ era a ativa marca a flag (ver onClick
-      // abaixo), mas isActive não muda (true -> true), então o `if` acima
-      // nunca roda pra consumi-la — ficaria "true" parada até a próxima vez
-      // que este item virasse ativo de novo, aí sim suprimindo um scroll que
-      // dessa vez seria legítimo (ex: reativado pela aba ou pelos Favoritos).
-      // Zera aqui, na desativação, que sempre acontece antes de qualquer
-      // reativação futura.
-      selectedBySelfClickRef.current = false
-    }
-  }, [isActive])
+  // (Abrir as pastas ancestrais do item ativo e rolar até ele agora é feito
+  // no CollectionTree: com a árvore desenhada só na janela do scroll, a linha
+  // de um item fora da tela nem existe pra rolar até ela.)
 
   return (
     <div
@@ -439,11 +412,26 @@ export const TreeNode = memo(function TreeNode({
       }}
       className="relative w-full min-w-0 overflow-x-clip"
     >
-      {/* Envolve SÓ a linha (22px). As linhas de inserção são posicionadas
-          contra este container, não contra o wrapper de fora: numa pasta
-          aberta o wrapper engloba toda a subárvore, e a marca de "depois"
-          aparecia lá embaixo, no fim dos filhos, em vez de logo abaixo da
-          linha da pasta. */}
+      {/* Linhas guia: uma por nível acima desta linha, ligando o chevron de
+          cada pasta aberta aos filhos, igual ao Postman — só visíveis com o
+          mouse sobre a árvore (.tree-scroll:hover, ver globals.css). Antes
+          era um traço só no container dos filhos; com as linhas achatadas,
+          cada uma desenha o seu pedaço. */}
+      {Array.from({ length: depth }, (_, level) => (
+        <span
+          key={level}
+          className="tree-guide-line"
+          style={{
+            position: 'absolute',
+            left: Math.min(level * INDENT, MAX_INDENT) + 20,
+            top: 0,
+            bottom: 0,
+            width: 1,
+            backgroundColor: 'var(--color-pm-border)',
+            pointerEvents: 'none',
+          }}
+        />
+      ))}
       <div className="relative w-full">
       {/* Linha indicadora de inserção ANTES do item */}
       {showLineBefore && <DropLine edge="top" indent={lineIndent} />}
@@ -460,6 +448,20 @@ export const TreeNode = memo(function TreeNode({
         data-tree-row-depth={depth}
         {...attributes}
         {...listeners}
+        // Depois do spread de propósito: o dnd-kit põe role="button" e
+        // tabIndex=0 em cada linha — o Tab parava em centenas de linhas e o
+        // leitor de tela ouvia uma lista de botões. A árvore é um widget só
+        // (o container tem o tabIndex e o aria-activedescendant); cada linha
+        // é um treeitem com nível, posição e estado.
+        id={treeRowDomId(item.id)}
+        role="treeitem"
+        tabIndex={-1}
+        aria-level={depth + 1}
+        aria-posinset={posInSet}
+        aria-setsize={setSize}
+        aria-expanded={hasChildren ? open : undefined}
+        aria-selected={isSelected || isActive}
+        aria-label={item.type === 'request' && item.method ? `${item.method} ${item.name}` : item.name}
         className={`group relative h-[22px] w-full overflow-x-clip${
           showInsideRing ? ' tree-drop-inside' : ''
         }`}
@@ -634,7 +636,6 @@ export const TreeNode = memo(function TreeNode({
                   return
                 }
                 if (!isFolder) {
-                  selectedBySelfClickRef.current = true
                   onRequestSelect?.(item)
                 } else {
                   if (expandClickTimerRef.current) clearTimeout(expandClickTimerRef.current)
@@ -703,9 +704,9 @@ export const TreeNode = memo(function TreeNode({
           {isCollection && !editing && (
             <span
               className="shrink-0 pl-1.5 text-[10px] tabular-nums text-pm-text-muted"
-              title={`${requestCount} request${requestCount === 1 ? '' : 's'}`}
+              title={countTitle}
             >
-              {requestCount}
+              {countLabel}
             </span>
           )}
 
@@ -835,9 +836,9 @@ export const TreeNode = memo(function TreeNode({
               // undefined (em vez de false) quando ninguém está controlando
               // isto de cima — senão o menu nasceria preso fechado, sem
               // onOpenChange nenhum pra reabrir.
-              open={openActionMenuId === undefined ? undefined : openActionMenuId === item.id}
+              open={actionMenuOpen}
               onOpenChange={next => onActionMenuOpenChange?.(item.id, next)}
-              requestedView={openActionMenuId === item.id ? actionMenuView : undefined}
+              requestedView={actionMenuOpen ? actionMenuView : undefined}
             />
           </div>
           </div>
@@ -847,60 +848,6 @@ export const TreeNode = memo(function TreeNode({
       {/* Linha indicadora de inserção DEPOIS do item */}
       {showLineAfter && <DropLine edge="bottom" indent={lineIndent} />}
       </div>
-
-      {hasChildren && open && item.item && item.item.length > 0 && (
-        <div className="w-full relative">
-          {/* Linha guia conectando o chevron desta pasta aos filhos, igual
-              ao Postman — só fica visível com o mouse sobre a árvore
-              (.tree-scroll:hover, ver globals.css). */}
-          <span
-            className="tree-guide-line"
-            style={{
-              position: 'absolute',
-              left: Math.min(depth * INDENT, MAX_INDENT) + 20,
-              top: 0,
-              bottom: 0,
-              width: 1,
-              backgroundColor: 'var(--color-pm-border)',
-              pointerEvents: 'none',
-            }}
-          />
-          {item.item.map(child => (
-            <TreeNode
-              key={child.id}
-              item={child}
-              depth={depth + 1}
-              activeRequestId={activeRequestId}
-              onRequestSelect={onRequestSelect}
-              actions={actions}
-              dropIndicator={dropIndicator}
-              selectedIds={selectedIds}
-              onToggleSelect={onToggleSelect}
-              onRowContextMenu={onRowContextMenu}
-              expandedIds={expandedIds}
-              onSetExpanded={onSetExpanded}
-              focusedId={focusedId}
-              onRowFocus={onRowFocus}
-              renamingId={renamingId}
-              onRenameHandled={onRenameHandled}
-              searchTokens={searchTokens}
-              markerMap={markerMap}
-              onMarkerClick={onMarkerClick}
-              markerCatalog={markerCatalog}
-              onToggleMarker={onToggleMarker}
-              onCreateMarker={onCreateMarker}
-              onRecolorMarker={onRecolorMarker}
-              onManageMarkers={onManageMarkers}
-              onSaveDescription={onSaveDescription}
-              openActionMenuId={openActionMenuId}
-              actionMenuView={actionMenuView}
-              onActionMenuOpenChange={onActionMenuOpenChange}
-              folderPickMode={folderPickMode}
-              onPickFolder={onPickFolder}
-            />
-          ))}
-        </div>
-      )}
     </div>
   )
 })

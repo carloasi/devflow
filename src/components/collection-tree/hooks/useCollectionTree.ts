@@ -313,7 +313,9 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
     }
   }, [])
 
-  const createRequest = useCallback((parentId: string) => {
+  // Os "create*" devolvem o id criado: a árvore usa pra revelar o item novo
+  // (mesmo com filtro ativo) e já abrir o rename nele.
+  const createRequest = useCallback((parentId: string): string => {
     const node: CollectionItem = {
       id:     crypto.randomUUID(),
       name:   'New Request',
@@ -329,10 +331,11 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
       },
     }
     onUpdateItems(addNode(items, parentId, node))
+    return node.id
   }, [items, onUpdateItems])
 
   // Request gRPC vazia — o schema vem depois (reflection ou .proto), na aba.
-  const createGrpcRequest = useCallback((parentId: string) => {
+  const createGrpcRequest = useCallback((parentId: string): string => {
     const node: CollectionItem = {
       id:       crypto.randomUUID(),
       name:     'New gRPC Request',
@@ -341,6 +344,7 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
       grpc:     emptyGrpcRequest(),
     }
     onUpdateItems(addNode(items, parentId, node))
+    return node.id
   }, [items, onUpdateItems])
 
   // Cria um Saved Example em branco (igual ao "Add Example" do Postman) como
@@ -390,7 +394,7 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
     onUpdateItems(applyPatch(items))
   }, [items, onUpdateItems])
 
-  const createFolder = useCallback((parentId: string) => {
+  const createFolder = useCallback((parentId: string): string => {
     const node: CollectionItem = {
       id:   crypto.randomUUID(),
       name: 'New Folder',
@@ -398,12 +402,13 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
       item: [],
     }
     onUpdateItems(addNode(items, parentId, node))
+    return node.id
   }, [items, onUpdateItems])
 
   const createRequestFromCurl = useCallback((
   parentId: string,
   parsed: ParsedCurlRequest
-) => {
+): string => {
   const rawUrl = parsed.queryParams.length
     ? `${parsed.baseUrl}?${parsed.queryParams
         .map((p) => `${p.key}=${p.value}`)
@@ -439,6 +444,7 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
     },
   }
   onUpdateItems(addNode(items, parentId, node))
+  return node.id
 }, [items, onUpdateItems])
 
 
@@ -491,10 +497,21 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
     onUpdateItems(pasteNodesBeside(items, targetId, cloned, position))
   }, [items, onUpdateItems])
 
+  // Itens criados com o filtro ativo: aparecem mesmo sem casar com a busca,
+  // até ela mudar (ver filterTree). Sem isto o item novo sumia no clique.
+  const [revealIds, setRevealIds] = useState<ReadonlySet<string>>(() => new Set())
+  const reveal = useCallback((id: string) => {
+    setRevealIds(prev => (prev.has(id) ? prev : new Set(prev).add(id)))
+  }, [])
+  const changeSearch = useCallback((value: string) => {
+    setSearch(value)
+    setRevealIds(prev => (prev.size === 0 ? prev : new Set()))
+  }, [])
+
   const filteredItems = useMemo(() => {
     if (!search) return items
-    return filterTree(items, search)
-  }, [items, search])
+    return filterTree(items, search, revealIds)
+  }, [items, search, revealIds])
 
 
   // Objeto estável enquanto `items` não muda: ele desce como prop pra cada
@@ -522,8 +539,10 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
 
   return {
     search,
-    setSearch,
+    setSearch: changeSearch,
     filteredItems,
+    revealIds,
+    reveal,
     actions,
   }
 }

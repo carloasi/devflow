@@ -79,18 +79,32 @@ export function toggleStarNode(
   return [...rest.slice(0, anchorAt + 1), restored, ...rest.slice(anchorAt + 1)]
 }
 
+// Galhos que não continham o nó voltam como o MESMO objeto: antes cada
+// exclusão recriava todos os nós de todas as collections (e punha um
+// `item: undefined` em cada request), o que fazia a árvore inteira
+// re-renderizar.
 export function removeNode(
   items: CollectionItem[],
   id: string
 ): CollectionItem[] {
-  return items
-    .filter((item: CollectionItem) => item.id !== id)
-    .map((item: CollectionItem) => ({
-      ...item,
-      item: item.item
-        ? removeNode(item.item, id)
-        : undefined,
-    }))
+  let changed = false
+  const out: CollectionItem[] = []
+  for (const item of items) {
+    if (item.id === id) {
+      changed = true
+      continue
+    }
+    if (item.item) {
+      const children = removeNode(item.item, id)
+      if (children !== item.item) {
+        changed = true
+        out.push({ ...item, item: children })
+        continue
+      }
+    }
+    out.push(item)
+  }
+  return changed ? out : items
 }
 
 export function addNode(
@@ -199,24 +213,17 @@ export function duplicateNode(
   items: CollectionItem[],
   id: string
 ): CollectionItem[] {
-  // Ids novos em toda a subárvore, nomes intocados: um id repetido faz o
-  // findNodeById devolver o primeiro, e editar a cópia passaria a editar o
-  // original.
-  const cloneChild = (node: CollectionItem): CollectionItem => {
-    const cloned: CollectionItem = { ...node, id: crypto.randomUUID() }
-    if (node.item) cloned.item = node.item.map(cloneChild)
-    return cloned
-  }
-
+  // Ids novos em toda a subárvore (cloneItemWithNewIds), nomes intocados: um
+  // id repetido faz o findNodeById devolver o primeiro, e editar a cópia
+  // passaria a editar o original.
+  //
   // Mesmo nome do original — sem sufixo. O "(Copy)" só servia pra distinguir
   // os dois na lista, mas num fluxo o nome da request é o passo ("1 - Gerar
   // token"), e ver o nome marcado logo depois de duplicar é mais confuso do
   // que ajuda: o rename (F2) é o caminho de quem quer renomear a cópia.
-  const cloneNode = (node: CollectionItem): CollectionItem => cloneChild(node)
-
   return items.flatMap((item: CollectionItem) => {
     if (item.id === id) {
-      return [item, cloneNode(item)]
+      return [item, cloneItemWithNewIds(item)]
     }
 
     if (item.item) {
@@ -264,30 +271,58 @@ function itemMatchesToken(item: CollectionItem, token: string): boolean {
   return false
 }
 
+/**
+ * Recorta a árvore pela busca.
+ *
+ * Cada termo pode casar com o próprio item OU com o nome de uma pasta acima
+ * dele: "payments create" acha a request "Create" dentro de
+ * "Order.Groups.Payments". Antes todos os termos tinham que estar no mesmo
+ * item, e numa collection organizada por pastas o termo que distingue a
+ * request costuma estar no nome da pasta, não no dela. Pelo menos um termo
+ * precisa casar com o item (ou com a pasta mais funda que casou) — senão
+ * cada termo cairia em uma pasta e a busca devolveria tudo abaixo delas.
+ *
+ * `keepIds`: itens que ficam mesmo sem casar (o que acabou de ser criado com
+ * o filtro ativo — sem isto o "New Request" sumia no próprio clique).
+ */
 export function filterTree(
   items: CollectionItem[],
-  query: string
+  query: string,
+  keepIds?: ReadonlySet<string>
 ): CollectionItem[] {
   const tokens = parseTreeQuery(query)
   if (tokens.length === 0) return items
 
-  const walk = (list: CollectionItem[]): CollectionItem[] =>
+  // `pending`: termos que nenhuma pasta acima casou ainda.
+  const walk = (list: CollectionItem[], pending: string[]): CollectionItem[] =>
     list
       .map((item) => {
-        const children = item.item ? walk(item.item) : []
-        // Filhos que batem -> mostra só eles (some o que não bate, mesmo
-        // dentro de uma pasta que bate pelo nome).
-        if (children.length > 0) return { ...item, item: children }
+        if (keepIds?.has(item.id)) return item
 
-        // Nenhum filho bate, mas o próprio item bate -> mantém a subárvore
-        // INTEIRA, senão uma pasta achada pelo nome apareceria vazia.
-        if (tokens.every((t) => itemMatchesToken(item, t))) return item
+        const own = pending.filter((t) => itemMatchesToken(item, t))
+        const left = pending.filter((t) => !own.includes(t))
 
-        return null
+        // O próprio item fecha a busca -> mantém a subárvore INTEIRA, senão
+        // uma pasta achada pelo nome apareceria vazia. Precisa ter casado
+        // algum termo AQUI (ver o comentário acima).
+        if (left.length === 0 && own.length > 0) {
+          // Filhos que também casam sozinhos -> mostra só eles (some o que
+          // não bate, mesmo dentro de uma pasta que bate pelo nome).
+          const narrowed = item.item ? walk(item.item, tokens) : []
+          return narrowed.length > 0 ? { ...item, item: narrowed } : item
+        }
+
+        // Só pasta passa termos pra baixo: o nome de uma request não
+        // qualifica os examples dela. Um filho que casaria TODOS os termos
+        // sozinho também casa o que sobrou, então não precisa de uma segunda
+        // busca do zero.
+        const childPending = item.type === 'folder' ? left : pending
+        const children = item.item ? walk(item.item, childPending) : []
+        return children.length > 0 ? { ...item, item: children } : null
       })
       .filter((item): item is CollectionItem => item !== null)
 
-  return walk(items)
+  return walk(items, tokens)
 }
 
 // Ids de todo nó que pode expandir (pastas e requests com examples) — usado
@@ -844,6 +879,108 @@ export function pruneExpandedIds(
   return next ?? expanded
 }
 
+// ── Desfazer (excluir e mover) ───────────────────────────────────────────
+//
+// O desfazer devolve SÓ o que a ação mexeu, em vez de restaurar a árvore
+// inteira de antes: entre o clique e o "Undo" do toast a pessoa pode ter
+// renomeado ou salvo outra coisa, e voltar a árvore toda apagaria isso.
+
+/** Onde um nó está: pai (null = raiz) e posição entre os irmãos. */
+export interface TreePosition {
+  parentId: string | null
+  index: number
+}
+
+export interface RemovedEntry extends TreePosition {
+  node: CollectionItem
+}
+
+/**
+ * O que excluir `ids` vai tirar da árvore, e de onde. Um id dentro de outro
+ * que também sai não entra: some junto com o de cima e volta junto com ele.
+ * Vem em pré-ordem — a ordem em que restoreRemoved precisa reinserir para os
+ * índices continuarem certos.
+ */
+export function captureRemoval(items: CollectionItem[], ids: Iterable<string>): RemovedEntry[] {
+  const wanted = new Set(ids)
+  const out: RemovedEntry[] = []
+  const walk = (list: CollectionItem[], parentId: string | null) => {
+    list.forEach((node, index) => {
+      if (wanted.has(node.id)) {
+        out.push({ node, parentId, index })
+        return
+      }
+      if (node.item) walk(node.item, node.id)
+    })
+  }
+  walk(items, null)
+  return out
+}
+
+/** Insere `node` como filho de `parentId` (null = raiz) na posição `index`. */
+function insertAt(
+  items: CollectionItem[],
+  parentId: string | null,
+  index: number,
+  node: CollectionItem
+): CollectionItem[] | null {
+  if (parentId === null) {
+    const next = [...items]
+    next.splice(Math.min(index, next.length), 0, node)
+    return next
+  }
+  let done = false
+  const walk = (list: CollectionItem[]): CollectionItem[] =>
+    list.map((item) => {
+      if (done) return item
+      if (item.id === parentId) {
+        done = true
+        const children = [...(item.item ?? [])]
+        children.splice(Math.min(index, children.length), 0, node)
+        return { ...item, item: children }
+      }
+      return item.item ? { ...item, item: walk(item.item) } : item
+    })
+  const next = walk(items)
+  return done ? next : null
+}
+
+/**
+ * Devolve à árvore o que captureRemoval guardou, cada um no lugar de onde
+ * saiu. Pula o que já voltou (Undo clicado duas vezes) e o que perdeu o pai
+ * nesse meio-tempo — não há lugar honesto pra ele.
+ */
+export function restoreRemoved(items: CollectionItem[], removed: RemovedEntry[]): CollectionItem[] {
+  let next = items
+  const present = collectAllIds(items)
+  for (const entry of removed) {
+    if (present.has(entry.node.id)) continue
+    const inserted = insertAt(next, entry.parentId, entry.index, entry.node)
+    if (inserted) next = inserted
+  }
+  return next
+}
+
+/** Posição atual do nó, ou null se ele não está na árvore. */
+export function positionOf(items: CollectionItem[], id: string): TreePosition | null {
+  const parentId = findParentId(items, id)
+  if (parentId === undefined) return null
+  const siblings = parentId === null ? items : findNodeById(items, parentId)?.item ?? []
+  return { parentId, index: siblings.findIndex((s) => s.id === id) }
+}
+
+/** Leva o nó de volta pra `position` (o desfazer de um mover). */
+export function restorePosition(
+  items: CollectionItem[],
+  id: string,
+  position: TreePosition
+): CollectionItem[] {
+  const node = findNodeById(items, id)
+  if (!node) return items
+  const without = removeNode(items, id)
+  return insertAt(without, position.parentId, position.index, node) ?? items
+}
+
 export function moveNode(
   items: CollectionItem[],
   activeId: string,
@@ -952,279 +1089,6 @@ export function moveNode(
   }
 }
 
-// export function moveNode(
-//   items: CollectionItem[],
-//   activeId: string,
-//   overId: string,
-//   position: DropPosition = 'after'
-// ): CollectionItem[] {
-//   if (activeId === overId) return items
-
-//   // 1. Extrair o nó ativo
-//   let activeNode: CollectionItem | null = null
-
-//   const extract = (list: CollectionItem[]): CollectionItem[] =>
-//     list.reduce<CollectionItem[]>((acc: CollectionItem[], item: CollectionItem) => {
-//       if (item.id === activeId) {
-//         activeNode = { ...item }
-//         return acc
-//       }
-//       acc.push(
-//         item.item ? { ...item, item: extract(item.item) } : item
-//       )
-//       return acc
-//     }, [])
-
-//   const treeWithout = extract(items)
-
-//   if (!activeNode) return items
-
-//   // Evita soltar uma pasta dentro dela mesma (ou dentro de um descendente dela)
-//   const containsId = (node: CollectionItem, id: string): boolean => {
-//     if (node.id === id) return true
-//     if (!node.item) return false
-//     return node.item.some((child: CollectionItem) => containsId(child, id))
-//   }
-
-//   if (position === 'inside' && containsId(activeNode, overId)) {
-//     return items
-//   }
-
-//   // 2a. Soltar DENTRO de uma pasta → vira o último filho dela
-//   const insertInside = (list: CollectionItem[]): CollectionItem[] =>
-//     list.map((item: CollectionItem) => {
-//       if (item.id === overId) {
-//         return {
-//           ...item,
-//       result.splice(insertAt, 0, activeNode!)
-//       return result
-//     }
-
-//     return list.map((item: CollectionItem) =>
-//       item.item ? { ...item, item: insertBesides(item.item) } : item
-//     )
-//   }
-
-//   const result =
-//     position === 'inside' ? insertInside(treeWithout) : insertBesides(treeWithout)
-
-//   const wasInserted = JSON.stringify(result) !== JSON.stringify(treeWithout)
-//   if (!wasInserted) return [...treeWithout, activeNode!]
-
-//   return result
-// }
-
-//-----------------------------------------
-
-// import { CollectionItem } from '@/app/types/CollectionItem'
-
-// export type DropPosition = 'before' | 'after' | 'inside'
-
-// function removeNode(
-//   items: CollectionItem[],
-//   id: string
-// ): { items: CollectionItem[]; removed: CollectionItem | null } {
-//   let removed: CollectionItem | null = null
-
-//   const walk = (list: CollectionItem[]): CollectionItem[] =>
-//     list
-//         node.item ? { ...node, item: walk(node.item) } : node
-//     next.splice(insertAt, 0, node)
-//     return next
-//   }
-
-//   return items.map(item =>
-//     item.item
-//       ? { ...item, item: insertNode(item.item, targetId, node, position) }
-//       : item
-//   )
-// }
-
-
-// export function moveNode(
-//   items: CollectionItem[],
-//   activeId: string,
-//   overId: string,
-//   position: DropPosition = 'after'
-// ): CollectionItem[] {
-//   if (activeId === overId) return items
-
-//   // 1. Extrair o nó ativo (mesma lógica de extração que você já tinha)
-//   let activeNode: CollectionItem | null = null
-
-//   const extract = (list: CollectionItem[]): CollectionItem[] =>
-//     list.reduce<CollectionItem[]>((acc, item) => {
-//       if (item.id === activeId) {
-//         activeNode = { ...item }
-//         return acc
-//       }
-//       acc.push(
-//         item.item ? { ...item, item: extract(item.item) } : item
-//       )
-//       return acc
-//     }, [])
-
-//   const treeWithout = extract(items)
-
-//   if (!activeNode) return items
-
-//   // Evita soltar uma pasta dentro dela mesma (ou dentro de um descendente dela)
-//   const containsId = (node: CollectionItem, id: string): boolean => {
-//     if (node.id === id) return true
-//     if (!node.item) return false
-//     return node.item.some(child => containsId(child, id))
-//   }
-
-//   if (position === 'inside' && containsId(activeNode, overId)) {
-//     return items
-//   }
-
-//   // 2a. Soltar DENTRO de uma pasta → vira o último filho dela
-//   const insertInside = (list: CollectionItem[]): CollectionItem[] =>
-//     list.map(item => {
-//       if (item.id === overId) {
-//         return {
-//           ...item,
-//       result.splice(insertAt, 0, activeNode!)
-//       return result
-//     }
-
-//     return list.map(item =>
-//       item.item ? { ...item, item: insertBesides(item.item) } : item
-//     )
-//   }
-
-//   const result =
-//     position === 'inside' ? insertInside(treeWithout) : insertBesides(treeWithout)
-
-//   // Se não encontrou o "over" em nenhum nível, adiciona no final da raiz
-//   const wasInserted = JSON.stringify(result) !== JSON.stringify(treeWithout)
-//   if (!wasInserted) return [...treeWithout, activeNode!]
-
-//   return result
-// }
-
-
-// import { CollectionItem } from '@/app/types/CollectionItem'
-
-// export function renameNode(
-//   items: CollectionItem[],
-//   id: string,
-//   newName: string
-// ): CollectionItem[] {
-//   return items.map(item => {
-//     if (item.id === id) {
-//       return {
-//         ...item,
-//         name: newName,
-//       }
-//     }
-
-//     if (item.item) {
-//       return {
-//         ...item,
-//       ...item,
-//       item: item.item
-//         ? removeNode(item.item, id)
-//         : undefined,
-//         ...item,
-//         item: [...(item.item || []), node],
-//       }
-//     }
-
-//     if (item.item) {
-//       return {
-//         ...item,
-//       ...node,
-//       id: crypto.randomUUID(),
-//       name: `${node.name} (Copy)`,
-//     }
-
-//     if (node.item) {
-//       cloned.item = node.item.map(cloneNode)
-//     }
-
-//     return cloned
-//   }
-
-//   return items.flatMap(item => {
-//     if (item.id === id) {
-//       return [item, cloneNode(item)]
-//     }
-
-//     if (item.item) {
-//       return [
-//         {
-//           ...item,
-//           item: duplicateNode(item.item, id),
-//         },
-//       ]
-//     }
-
-//     return [item]
-//   })
-// }
-
-// export function filterTree(
-//   items: CollectionItem[],
-//   query: string
-// ): CollectionItem[] {
-//   const lower = query.toLowerCase()
-
-//   return items
-//     .map(item => {
-//       const matches = item.name.toLowerCase().includes(lower)
-
-//       const filtereditem = item.item
-//         ? filterTree(item.item, query)
-//         : []
-
-//       if (matches || filtereditem.length > 0) {
-//         return {
-//           ...item,
-//     list.reduce<CollectionItem[]>((acc, item) => {
-//       if (item.id === activeId) {
-//         activeNode = { ...item }
-//         return acc
-//       }
-//       acc.push(
-//         item.item ? { ...item, item: extract(item.item) } : item
-//       )
-//       return acc
-//     }, [])
-
-//   const treeWithout = extract(items)
-
-//   if (!activeNode) return items
-
-//   // 2. Inserir após o nó "over" no mesmo nível
-//   const insert = (list: CollectionItem[]): CollectionItem[] => {
-//     const idx = list.findIndex((i) => i.id === overId)
-
-//     if (idx !== -1) {
-//       const result = [...list]
-//       result.splice(idx + 1, 0, activeNode!)
-//       return result
-//     }
-
-//     return list.map((item) =>
-//       item.item ? { ...item, item: insert(item.item) } : item
-//     )
-//   }
-
-//   // 3. Caso especial: "over" é a raiz
-//   const overIsRoot = treeWithout.findIndex((i) => i.id === overId) !== -1
-//     || items.findIndex((i) => i.id === overId) !== -1
-
-//   // Tenta inserir em qualquer nível
-//   const result = insert(treeWithout)
-
-//   // Se não encontrou o over em nenhum nível, adiciona no final da raiz
-//   const wasInserted = JSON.stringify(result).length !== JSON.stringify(treeWithout).length
-//   if (!wasInserted) return [...treeWithout, activeNode!]
-
-//   return result
-// }
 /**
  * Tira um prefixo de numeração do começo do nome.
  *

@@ -245,3 +245,35 @@ export function changedSinceBase(
   if (!local) return null;
   return hash(canonicalString(ownContent(local))) !== recorded;
 }
+
+/**
+ * A collection está exatamente como na última sincronização?
+ *
+ * Serve ao ponto laranja de pendência da árvore. Ele é ligado por "algo
+ * mudou desde a última vez que olhei" (collectionFingerprint), então editar
+ * e desfazer à mão — renomear e voltar o nome, favoritar e desfavoritar —
+ * deixava o ponto aceso pra sempre, pedindo um push que não envia nada.
+ * Comparado com a base, dá pra apagá-lo quando a collection voltou a ser o
+ * que está no GitHub.
+ *
+ * Confere tudo o que a base guarda da collection: conteúdo e campos de cada
+ * nó, pai e ordem dos filhos — e que nenhum nó que a base tinha nela sumiu
+ * (exclusão). Na dúvida (sem base, ou base que não conhece a collection)
+ * responde `false`: deixar o ponto aceso é o lado seguro.
+ */
+export function matchesSyncBase(base: NodeHashes | null, root: CollectionItem | undefined): boolean {
+  if (!base || !root?.id || base[root.id] === undefined) return false;
+
+  const local = nodeHashes([root]);
+  for (const [key, value] of Object.entries(local)) {
+    if (base[key] !== value) return false;
+  }
+
+  // Nó que a base tinha nesta collection e que não existe mais aqui.
+  const suffix = `#${ROOT_FIELD}`;
+  for (const [key, value] of Object.entries(base)) {
+    if (value !== root.id || !key.endsWith(suffix)) continue;
+    if (local[key] === undefined) return false;
+  }
+  return true;
+}

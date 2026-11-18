@@ -34,7 +34,14 @@ import {
   recolorMarker,
   toggleMarker,
 } from '@/lib/markers'
-import { TreeNode } from './TreeNode'
+import { TreeNode, treeRowDomId } from './TreeNode'
+import {
+  TREE_ROW_HEIGHT,
+  flattenVisibleTree,
+  visibleRange,
+  scrollTopToReveal,
+  findTypeAheadMatch,
+} from './utils/treeRows'
 import { TreeSearch } from './TreeSearch'
 import { MarkersDialog } from './MarkersDialog'
 import { MarkerPopover } from './MarkerPopover'
@@ -46,6 +53,7 @@ import { TreeContextMenu } from './TreeContextMenu'
 import { useCollectionTree } from './hooks/useCollectionTree'
 import {
   moveNode,
+  findNodeById,
   findParentId,
   findPathToItem,
   projectSiblingDrop,
@@ -55,10 +63,15 @@ import {
   collectExpandableIds,
   collectRequests,
   collectStarred,
+  countRequests,
   removeNode,
   canDropAt,
   resolvePasteParent,
   pruneExpandedIds,
+  captureRemoval,
+  restoreRemoved,
+  positionOf,
+  restorePosition,
   moveUp,
   moveDown,
   moveToFirst,
@@ -132,6 +145,8 @@ interface Props {
 const EXPANDED_STORAGE_KEY = 'devflow_tree_expanded'
 const FAVORITES_OPEN_STORAGE_KEY = 'devflow_tree_favorites_open'
 const MAX_PERSISTED_EXPANDED = 5000
+// Pausa máxima entre teclas pra continuar a mesma busca por digitação.
+const TYPE_AHEAD_MS = 800
 
 function loadExpandedIds(): Set<string> {
   try {
@@ -187,17 +202,6 @@ const FOLDER_EDGE = 5
 // arraste vertical já mudaria o nível de destino.
 const OUTDENT_STEP = 20
 
-function findNode(items: CollectionItem[], id: string): CollectionItem | null {
-  for (const item of items) {
-    if (item.id === id) return item
-    if (item.item) {
-      const found = findNode(item.item, id)
-      if (found) return found
-    }
-  }
-  return null
-}
-
 // True se `id` está na subárvore de `node` (o próprio nó incluído).
 function isDescendantOf(node: CollectionItem, id: string): boolean {
   if (node.id === id) return true
@@ -224,11 +228,35 @@ export function CollectionTree({
   onMarkersChange,
   focusRequest,
 }: Props) {
-  const { search, setSearch, filteredItems, actions } = useCollectionTree({
+  const { search, setSearch, filteredItems, revealIds, reveal, actions } = useCollectionTree({
     items,
     onUpdateItems,
     onRename
   })
+
+  // Árvore mais recente, pro "Undo" dos toasts: ele é clicado segundos
+  // depois, e a closure da ação já teria uma árvore velha.
+  const itemsRef = useRef(items)
+  useEffect(() => {
+    itemsRef.current = items
+  }, [items])
+
+  // Mover com desfazer: menu "Move…" e arraste. O Undo devolve só o item
+  // movido ao lugar de antes (restorePosition), sem desfazer o resto.
+  const moveWithUndo = useCallback((id: string, next: CollectionItem[]) => {
+    if (next === items) return
+    const before = positionOf(items, id)
+    const name = findNodeById(items, id)?.name ?? 'Item'
+    onUpdateItems(next)
+    if (!before) return
+    toast(`Moved "${name}"`, {
+      action: {
+        label: 'Undo',
+        onClick: () => onUpdateItems(restorePosition(itemsRef.current, id, before)),
+      },
+      duration: 5000,
+    })
+  }, [items, onUpdateItems])
   const { activeEnv, environments } = useEnvironment()
   // Pasta cujo "Export as HTML runner" está com a janela de escolhas aberta.
   const [exportHtmlItem, setExportHtmlItem] = useState<CollectionItem | null>(null)
@@ -332,7 +360,7 @@ export function CollectionTree({
   const copyItems = useCallback((fallbackId?: string | null): number => {
     const ids = selectedIds.size > 0 ? Array.from(selectedIds) : fallbackId ? [fallbackId] : []
     const nodes = ids
-      .map(id => findNode(items, id))
+      .map(id => findNodeById(items, id))
       .filter((n): n is CollectionItem => !!n)
     if (nodes.length === 0) return 0
     copyItemsToClipboard(nodes)
@@ -349,12 +377,12 @@ export function CollectionTree({
     canUp: canMoveUp(items, id),
     canDown: canMoveDown(items, id),
     canOut: canMoveOut(items, id),
-    onUp: () => onUpdateItems(moveUp(items, id)),
-    onDown: () => onUpdateItems(moveDown(items, id)),
-    onToFirst: () => onUpdateItems(moveToFirst(items, id)),
-    onToLast: () => onUpdateItems(moveToLast(items, id)),
-    onOut: () => onUpdateItems(moveOut(items, id)),
-  }), [items, onUpdateItems])
+    onUp: () => moveWithUndo(id, moveUp(items, id)),
+    onDown: () => moveWithUndo(id, moveDown(items, id)),
+    onToFirst: () => moveWithUndo(id, moveToFirst(items, id)),
+    onToLast: () => moveWithUndo(id, moveToLast(items, id)),
+    onOut: () => moveWithUndo(id, moveOut(items, id)),
+  }), [items, moveWithUndo])
 
   /**
    * Renumera os filhos diretos da pasta: "01 - ", "02 - ".
@@ -389,7 +417,7 @@ export function CollectionTree({
   const deleteTargets = useCallback((fallback: CollectionItem | null): CollectionItem[] => {
     if (selectedIds.size > 0) {
       return Array.from(selectedIds)
-        .map(id => findNode(items, id))
+        .map(id => findNodeById(items, id))
         .filter((n): n is CollectionItem => !!n)
     }
     return fallback ? [fallback] : []
@@ -682,26 +710,6 @@ export function CollectionTree({
     }
   }, [items])
 
-  // Memoizado pelo mesmo motivo do `actions` do hook: desce pra todo TreeNode.
-  const actionsWithImport = useMemo(() => ({
-    ...actions,
-    export: exportWithSecretCheck,
-    exportHtml: exportFlowAsHtml,
-    copyUrl: (item: CollectionItem) => copyText(buildItemUrl(item, envMap), 'URL'),
-    copyCurl: (item: CollectionItem) => copyText(buildItemCurl(item, envMap), 'cURL'),
-    importCurl: (parentId: string) => setCurlDialogParentId(parentId),
-    run: onRunItem ? (item: CollectionItem) => onRunItem(item) : undefined,
-    loadTest: onLoadTestItem ? (item: CollectionItem) => onLoadTestItem(item) : undefined,
-    pushCollection: onPushCollection ? (item: CollectionItem) => onPushCollection(item) : undefined,
-    openSync: onOpenSync ? (item: CollectionItem) => onOpenSync(item) : undefined,
-    addExample: onAddExampleItem
-      ? (item: CollectionItem) => onAddExampleItem(actions.createExample(item))
-      : undefined,
-  }), [
-    actions, exportWithSecretCheck, exportFlowAsHtml, copyText, envMap, onRunItem,
-    onLoadTestItem, onPushCollection, onOpenSync, onAddExampleItem,
-  ])
-
   const openManageMarkers = useCallback(() => setManagingMarkers(true), [])
 
   const sensors = useSensors(
@@ -715,7 +723,7 @@ export function CollectionTree({
     // + quote" significar o óbvio — entre os marcados, os que casam com a
     // busca. A ordem inversa daria o mesmo conjunto, mas a busca é a que o
     // usuário digitou por último e recortar primeiro por ela é mais barato.
-    const byMarker = filterTreeByMarkers(filteredItems, activeFilterIds)
+    const byMarker = filterTreeByMarkers(filteredItems, activeFilterIds, 'any', revealIds)
     const seen = new Set<string>()
     const deduped = byMarker.filter((item) => {
       if (!item.id || seen.has(item.id)) return false
@@ -728,7 +736,7 @@ export function CollectionTree({
     // "Order" favoritada, nada conseguia ficar acima de "Barramento B2B -
     // Dev". As favoritas continuam acessíveis pelo dropdown de Favorites.
     return deduped
-  }, [filteredItems, activeFilterIds])
+  }, [filteredItems, activeFilterIds, revealIds])
 
   const rootIds = useMemo(() => {
     return uniqueFilteredItems.map((item) => item.id)
@@ -799,6 +807,16 @@ export function CollectionTree({
     else setExpandedIds(prev => apply(prev, open))
   }, [isSearching])
 
+  // O que está visível, achatado na ordem da tela (ver treeRows).
+  const flatRows = useMemo(
+    () => flattenVisibleTree(uniqueFilteredItems, effectiveExpandedIds),
+    [uniqueFilteredItems, effectiveExpandedIds]
+  )
+  const rowIndexById = useMemo(
+    () => new Map(flatRows.map((row, i) => [row.item.id, i])),
+    [flatRows]
+  )
+
   const expandPath = useCallback((ids: string[]) => {
     if (ids.length === 0) return
     setExpandedIds(prev => {
@@ -857,28 +875,105 @@ export function CollectionTree({
 
   const handleRenameHandled = useCallback(() => setRenamingId(null), [])
   const handleRowFocus = useCallback((id: string) => setFocusedId(id), [])
+  const typeAheadRef = useRef({ buffer: '', at: 0 })
 
-  // Linhas visíveis na ordem da tela — lidas do DOM (data-tree-row), que já
-  // reflete o que está aberto/filtrado.
-  const getVisibleRows = useCallback(() => {
-    const container = scrollRef.current
-    if (!container) return []
-    return Array.from(container.querySelectorAll<HTMLElement>('[data-tree-row]')).map(row => ({
-      id: row.dataset.treeRow!,
-      depth: Number(row.dataset.treeRowDepth ?? 0),
-    }))
-  }, [])
+  // Linhas visíveis na ordem da tela — da lista achatada, não do DOM: só a
+  // janela do scroll está desenhada.
+  const getVisibleRows = useCallback(
+    () => flatRows.map(r => ({ id: r.item.id, depth: r.depth, name: r.item.name })),
+    [flatRows]
+  )
 
-  // Mantém a linha com foco visível ao navegar.
+  /*
+   * ============================================================
+   * JANELA DO SCROLL (virtualização)
+   * ============================================================
+   * Só as linhas que cabem na tela (mais uma folga) existem no DOM. O estado
+   * guarda a FAIXA, não o scrollTop: rolar dentro da mesma faixa não
+   * re-renderiza nada.
+   */
+  const [range, setRange] = useState({ start: 0, end: 60 })
+  const updateRange = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const next = visibleRange(el.scrollTop, el.clientHeight, flatRows.length)
+    setRange(prev => (prev.start === next.start && prev.end === next.end ? prev : next))
+  }, [flatRows.length])
+
   useEffect(() => {
-    if (!focusedId) return
-    const frame = requestAnimationFrame(() => {
-      scrollRef.current
-        ?.querySelector<HTMLElement>(`[data-tree-row="${CSS.escape(focusedId)}"]`)
-        ?.scrollIntoView({ block: 'nearest' })
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [focusedId])
+    updateRange()
+    const el = scrollRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateRange)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [updateRange])
+
+  // Índices desenhados: a janela, mais a linha sendo arrastada se ela saiu
+  // da tela — o dnd-kit perde o arraste se o nó dele é desmontado.
+  const renderedIndexes = useMemo(() => {
+    const start = Math.min(range.start, flatRows.length)
+    const end = Math.min(range.end, flatRows.length)
+    const out: number[] = []
+    for (let i = start; i < end; i++) out.push(i)
+    const dragIndex = activeItem ? rowIndexById.get(activeItem.id) : undefined
+    if (dragIndex !== undefined && (dragIndex < start || dragIndex >= end)) out.push(dragIndex)
+    return out
+  }, [range, flatRows.length, activeItem, rowIndexById])
+
+  // Total de requests de cada collection SEM filtro — o contador da raiz
+  // mostra "achadas / total" durante a busca.
+  const rootRequestTotals = useMemo(
+    () => new Map(items.map(root => [root.id, countRequests(root)])),
+    [items]
+  )
+
+  const scrollRowIntoView = useCallback((id: string, smooth = false): boolean => {
+    const el = scrollRef.current
+    const index = rowIndexById.get(id)
+    if (!el || index === undefined) return false
+    const top = scrollTopToReveal(index, el.scrollTop, el.clientHeight)
+    if (top !== null) {
+      el.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' })
+      // Sem esperar o evento de scroll: ele chega depois (ou nem chega, com
+      // a janela em segundo plano) e, até lá, a linha alvo não estaria
+      // desenhada — o aria-activedescendant apontaria pra um id inexistente.
+      // No smooth, a animação dispara os scrolls que faltam.
+      if (!smooth) updateRange()
+    }
+    return true
+  }, [rowIndexById, updateRange])
+
+  // Mantém a linha com foco visível ao navegar. Rola uma vez por id: a
+  // linha pode ainda não existir (pasta abrindo), então tenta de novo quando
+  // as linhas mudam — mas, achada, não puxa mais o scroll de volta enquanto
+  // o usuário rola com o mouse e abre/fecha pastas.
+  const scrolledFocusRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!focusedId || scrolledFocusRef.current === focusedId) return
+    if (scrollRowIntoView(focusedId)) scrolledFocusRef.current = focusedId
+  }, [focusedId, treeFocused, scrollRowIntoView])
+
+  // Rola até o item ativo (a aba selecionada) quando ele muda — também uma
+  // vez por id, pelo mesmo motivo. Pula quando a troca veio de um clique na
+  // própria linha: o primeiro clique de um duplo-clique rolaria a lista
+  // embaixo do cursor e o segundo acertaria outra linha (comum com nomes
+  // repetidos, como vários "01 - Token v1" em flows diferentes).
+  const scrolledActiveRef = useRef<string | null>(null)
+  const selfClickRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!activeRequestId || scrolledActiveRef.current === activeRequestId) return
+    if (selfClickRef.current === activeRequestId) {
+      scrolledActiveRef.current = activeRequestId
+      return
+    }
+    if (scrollRowIntoView(activeRequestId, true)) scrolledActiveRef.current = activeRequestId
+  }, [activeRequestId, scrollRowIntoView])
+
+  const handleRowSelect = useCallback((item: CollectionItem) => {
+    selfClickRef.current = item.id
+    onRequestSelect?.(item)
+  }, [onRequestSelect])
 
   const focusTree = useCallback(() => {
     const rows = getVisibleRows()
@@ -891,9 +986,12 @@ export function CollectionTree({
 
   const handleTreeFocus = useCallback(() => {
     setTreeFocused(true)
+    // Voltando pra árvore, a linha com foco pode ter rolado pra fora da
+    // tela: traz de volta (o efeito de foco só rola uma vez por id).
+    scrolledFocusRef.current = null
     setFocusedId(current => {
       if (current) return current
-      if (activeRequestId && findNode(items, activeRequestId)) return activeRequestId
+      if (activeRequestId && findNodeById(items, activeRequestId)) return activeRequestId
       return getVisibleRows()[0]?.id ?? null
     })
   }, [activeRequestId, items, getVisibleRows])
@@ -907,8 +1005,21 @@ export function CollectionTree({
   // remoção e de para onde o foco vai.
   const deleteNodes = useCallback((nodes: CollectionItem[]) => {
     if (nodes.length === 0) return
+    // Guardado ANTES de apagar: o Undo reinsere cada um no lugar de onde
+    // saiu (restoreRemoved), sem desfazer o que foi editado depois.
+    const removed = captureRemoval(items, nodes.map(n => n.id))
     const updated = nodes.reduce((acc, node) => removeNode(acc, node.id), items)
     onUpdateItems(updated)
+    toast(
+      nodes.length === 1 ? `Deleted "${nodes[0].name}"` : `Deleted ${nodes.length} items`,
+      {
+        action: {
+          label: 'Undo',
+          onClick: () => onUpdateItems(restoreRemoved(itemsRef.current, removed)),
+        },
+        duration: 8000,
+      }
+    )
     setSelectedIds(new Set())
     // Foco vai pra linha anterior visível (a apagada some).
     const rows = getVisibleRows()
@@ -925,6 +1036,58 @@ export function CollectionTree({
     setPendingDelete(null)
   }, [pendingDelete, deleteNodes])
 
+  // Item recém-criado: aparece mesmo com filtro ativo (reveal), abre as
+  // pastas até ele, recebe o foco e — pra pasta/request em branco — já entra
+  // em rename. Antes o "New Request" nascia sem pedir nome e, com filtro,
+  // sumia no próprio clique.
+  const afterCreate = useCallback((parentId: string, newId: string, rename: boolean) => {
+    reveal(newId)
+    expandPath([...(findPathToItem(items, parentId) ?? []), parentId])
+    setFocusedId(newId)
+    if (rename) setRenamingId(newId)
+  }, [items, reveal, expandPath])
+
+  // Memoizado pelo mesmo motivo do `actions` do hook: desce pra todo TreeNode.
+  const actionsWithImport = useMemo(() => ({
+    ...actions,
+    createRequest: (parentId: string) => {
+      const id = actions.createRequest(parentId)
+      afterCreate(parentId, id, true)
+      return id
+    },
+    createGrpcRequest: (parentId: string) => {
+      const id = actions.createGrpcRequest(parentId)
+      afterCreate(parentId, id, true)
+      return id
+    },
+    createFolder: (parentId: string) => {
+      const id = actions.createFolder(parentId)
+      afterCreate(parentId, id, true)
+      return id
+    },
+    // Excluir pelo menu "…" passa pela mesma regra (e pelo mesmo Undo) da
+    // tecla Delete e do clique direito.
+    remove: (id: string) => {
+      const node = findNodeById(items, id)
+      if (node) deleteNodes([node])
+    },
+    export: exportWithSecretCheck,
+    exportHtml: exportFlowAsHtml,
+    copyUrl: (item: CollectionItem) => copyText(buildItemUrl(item, envMap), 'URL'),
+    copyCurl: (item: CollectionItem) => copyText(buildItemCurl(item, envMap), 'cURL'),
+    importCurl: (parentId: string) => setCurlDialogParentId(parentId),
+    run: onRunItem ? (item: CollectionItem) => onRunItem(item) : undefined,
+    loadTest: onLoadTestItem ? (item: CollectionItem) => onLoadTestItem(item) : undefined,
+    pushCollection: onPushCollection ? (item: CollectionItem) => onPushCollection(item) : undefined,
+    openSync: onOpenSync ? (item: CollectionItem) => onOpenSync(item) : undefined,
+    addExample: onAddExampleItem
+      ? (item: CollectionItem) => onAddExampleItem(actions.createExample(item))
+      : undefined,
+  }), [
+    actions, afterCreate, items, deleteNodes, exportWithSecretCheck, exportFlowAsHtml, copyText,
+    envMap, onRunItem, onLoadTestItem, onPushCollection, onOpenSync, onAddExampleItem,
+  ])
+
   const handleTreeKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (isTextInput(e.target)) return
 
@@ -932,12 +1095,26 @@ export function CollectionTree({
     if (rows.length === 0) return
     const idx = rows.findIndex(r => r.id === focusedId)
     const current = idx >= 0 ? rows[idx] : null
-    const node = current ? findNode(uniqueFilteredItems, current.id) : null
+    const node = current ? findNodeById(uniqueFilteredItems, current.id) ?? null : null
     const isOpen = !!node && effectiveExpandedIds.has(node.id)
     const canExpand = !!node && (node.type === 'folder' || (node.item?.length ?? 0) > 0)
     const mod = e.ctrlKey || e.metaKey
 
     const move = (to: number) => setFocusedId(rows[Math.max(0, Math.min(rows.length - 1, to))].id)
+
+    // Busca por digitação (como no Explorer/VS Code): letras pulam pro item
+    // cujo nome começa com o que foi digitado. F, R, N e M sozinhos são
+    // atalhos da árvore (treeShortcuts), então uma sequência não começa
+    // neles — mas, já começada, qualquer letra continua a sequência.
+    const printable = e.key.length === 1 && !mod && !e.altKey && e.key !== ' '
+    const typeAhead = typeAheadRef.current
+    const typing = typeAhead.buffer !== '' && Date.now() - typeAhead.at < TYPE_AHEAD_MS
+    const runTypeAhead = () => {
+      const buffer = (typing ? typeAhead.buffer : '') + e.key
+      typeAheadRef.current = { buffer, at: Date.now() }
+      const found = findTypeAheadMatch(rows, idx, buffer)
+      if (found >= 0) move(found)
+    }
 
     let handled = true
     switch (e.key) {
@@ -988,6 +1165,10 @@ export function CollectionTree({
         break
       }
       default:
+        if (printable && typing) {
+          runTypeAhead()
+          break
+        }
         if (mod && e.key.toLowerCase() === 'c' && !folderPickMode) {
           const count = copyItems(node?.id)
           if (count > 0) toast.success(`${count} item${count === 1 ? '' : 's'} copied`)
@@ -1022,8 +1203,8 @@ export function CollectionTree({
                 handled = false
                 break
               }
-              if (shortcut === 'addRequest') actions.createRequest(node!.id)
-              else actions.createFolder(node!.id)
+              if (shortcut === 'addRequest') actionsWithImport.createRequest(node!.id)
+              else actionsWithImport.createFolder(node!.id)
               setExpanded(node!.id, true)
               break
             case 'markers':
@@ -1041,13 +1222,18 @@ export function CollectionTree({
         }
     }
 
+    if (!handled && printable && !folderPickMode) {
+      handled = true
+      runTypeAhead()
+    }
+
     if (handled) {
       e.preventDefault()
       e.stopPropagation()
     }
   }, [
     getVisibleRows, focusedId, uniqueFilteredItems, effectiveExpandedIds, setExpanded, items,
-    folderPickMode, onPickFolder, onRequestSelect, copyItems, pasteInto, actions, onRunItem,
+    folderPickMode, onPickFolder, onRequestSelect, copyItems, pasteInto, actions, actionsWithImport, onRunItem,
     // selectedIds saiu: quem o lê agora é o deleteTargets, que já o captura.
     deleteTargets,
   ])
@@ -1072,6 +1258,7 @@ export function CollectionTree({
   const openFavorite = useCallback((item: CollectionItem) => {
     const path = findPathToItem(items, item.id) ?? []
     expandPath(item.type === 'folder' ? [...path, item.id] : path)
+    scrolledFocusRef.current = null
     setFocusedId(item.id)
     if (item.type !== 'folder') onRequestSelect?.(item)
     requestAnimationFrame(() => scrollRef.current?.focus({ preventScroll: true }))
@@ -1081,10 +1268,11 @@ export function CollectionTree({
   // que um achado do scanner de segredos tem em mãos (SecretFinding.requestId),
   // não um CollectionItem já resolvido.
   const focusItemById = useCallback((id: string) => {
-    const item = findNode(items, id)
+    const item = findNodeById(items, id)
     if (!item) return
     const path = findPathToItem(items, id) ?? []
     expandPath(item.type === 'folder' ? [...path, id] : path)
+    scrolledFocusRef.current = null
     setFocusedId(id)
     if (item.type !== 'folder') onRequestSelect?.(item)
     requestAnimationFrame(() => scrollRef.current?.focus({ preventScroll: true }))
@@ -1099,7 +1287,7 @@ export function CollectionTree({
   }, [focusRequest?.nonce])
 
   const handleDragStart = (event: DragStartEvent) => {
-    const node = findNode(uniqueFilteredItems, event.active.id as string)
+    const node = findNodeById(uniqueFilteredItems, event.active.id as string) ?? null
     setActiveItem(node)
     setDropIndicator(null)
     const activator = event.activatorEvent as PointerEvent
@@ -1118,9 +1306,8 @@ export function CollectionTree({
   // cima da linha de "Order" resolvia pra outro nó (ou pra posição errada) e
   // o drop nunca virava "irmão acima da pasta".
   //
-  // Aqui a decisão é feita por hit-test do ponteiro contra as LINHAS reais
-  // (22px, marcadas com data-tree-row em TreeNode) — exatamente o que o
-  // usuário está vendo. Também roda a cada pointermove, e não só quando o
+  // Aqui a decisão é feita por hit-test do ponteiro contra as LINHAS (22px
+  // cada, na ordem de flatRows) — exatamente o que o usuário está vendo. Também roda a cada pointermove, e não só quando o
   // alvo muda (o dnd-kit só dispara onDragOver na troca de alvo, o que
   // congelava o "dentro" ao entrar pelo meio de uma pasta).
   const updateDropIndicator = () => {
@@ -1134,49 +1321,42 @@ export function CollectionTree({
       return
     }
 
-    // As linhas da própria subárvore arrastada saem da lista: elas não são
-    // alvo válido (moveNode recusaria o ciclo) e, como vizinhas, bagunçariam
-    // o cálculo de nível abaixo — o item arrastado não vai estar ali no fim.
-    const rows = Array.from(
-      container.querySelectorAll<HTMLElement>('[data-tree-row]')
-    ).filter((row) => {
-      const id = row.dataset.treeRow
-      return !!id && !isDescendantOf(dragged, id)
-    })
-
-    const depthOf = (row: HTMLElement) => Number(row.dataset.treeRowDepth ?? 0)
-
-    let hit = -1
-    let rect: DOMRect | null = null
-
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i].getBoundingClientRect()
-      if (pointerY >= r.top && pointerY <= r.bottom) {
-        hit = i
-        rect = r
-        break
-      }
+    // Hit-test pela LISTA de linhas (flatRows), não pelo DOM: com a árvore
+    // desenhada só na janela do scroll, as linhas acima da tela não existem
+    // no DOM — e o cálculo de nível (projectSiblingDrop) precisa delas pra
+    // achar o ancestral. Toda linha tem a mesma altura, então a linha sob o
+    // ponteiro sai de uma divisão.
+    const box = container.getBoundingClientRect()
+    if (pointerY < box.top || pointerY > box.bottom) {
+      setDropIndicator(null)
+      return
     }
-
-    // Fora de qualquer linha (áreas vazias da árvore, ou em cima da própria
-    // subárvore arrastada) — sem indicador.
-    if (hit === -1 || !rect) {
+    const offsetY = pointerY - box.top + container.scrollTop
+    const rawIndex = Math.floor(offsetY / TREE_ROW_HEIGHT)
+    const hitRowAll = flatRows[rawIndex]
+    // Fora de qualquer linha (abaixo da última) ou em cima da própria
+    // subárvore arrastada — sem indicador.
+    if (!hitRowAll || isDescendantOf(dragged, hitRowAll.item.id)) {
       setDropIndicator(null)
       return
     }
 
-    const hitRow = rows[hit]
-    const hitId = hitRow.dataset.treeRow!
-    const relativeY = pointerY - rect.top
+    // As linhas da própria subárvore arrastada saem da lista: elas não são
+    // alvo válido (moveNode recusaria o ciclo) e, como vizinhas, bagunçariam
+    // o cálculo de nível abaixo — o item arrastado não vai estar ali no fim.
+    const rows = flatRows.filter((row) => !isDescendantOf(dragged, row.item.id))
+    const hit = rows.indexOf(hitRowAll)
+    const hitId = hitRowAll.item.id
+    const relativeY = offsetY - rawIndex * TREE_ROW_HEIGHT
 
     // Pasta: "dentro" ocupa o miolo da linha e sobra só uma faixa fina nas
     // bordas pra virar irmão (antes/depois). Dividir em terços dava ~7px por
     // zona numa linha de 22px e acertar o "dentro" virava sorte; a borda fixa
     // torna o gesto previsível sem tirar o espaço de soltar entre duas pastas.
     if (
-      hitRow.dataset.treeRowType === 'folder' &&
+      hitRowAll.item.type === 'folder' &&
       relativeY > FOLDER_EDGE &&
-      relativeY < rect.height - FOLDER_EDGE
+      relativeY < TREE_ROW_HEIGHT - FOLDER_EDGE
     ) {
       // Example não entra em pasta: sem indicador, em vez de um anel que o
       // drop depois ignora (ver canDropAt).
@@ -1195,7 +1375,7 @@ export function CollectionTree({
     // Fora do miolo, o drop é "entre duas linhas". Normaliza pra sempre ser
     // "depois da linha de cima": antes-da-linha-X e depois-da-linha-anterior
     // são o mesmo ponto de inserção, e tratar um caso só simplifica o resto.
-    const above = relativeY < rect.height / 2 ? hit - 1 : hit
+    const above = relativeY < TREE_ROW_HEIGHT / 2 ? hit - 1 : hit
 
     // Inserir acima de tudo: não há nível pra subir, o único destino possível
     // é virar irmão da primeira linha.
@@ -1221,7 +1401,7 @@ export function CollectionTree({
         : Math.max(0, Math.floor((startX - pointerX) / OUTDENT_STEP))
 
     const projected = projectSiblingDrop(
-      rows.map((row) => ({ id: row.dataset.treeRow!, depth: depthOf(row) })),
+      rows.map((row) => ({ id: row.item.id, depth: row.depth })),
       above,
       outdent
     )
@@ -1234,15 +1414,14 @@ export function CollectionTree({
     }
 
     const next: DropIndicator = {
-      id: rows[above].dataset.treeRow!,
+      id: rows[above].item.id,
       position: 'after',
       targetId: projected.targetId,
       indentDepth: projected.depth,
     }
 
     // Só atualiza quando algo mudou de fato: isso roda a cada movimento do
-    // ponteiro, e re-renderizar a árvore inteira nesse ritmo travaria o
-    // arraste.
+    // ponteiro, e re-renderizar nesse ritmo travaria o arraste.
     setDropIndicator((current) =>
       current &&
       current.id === next.id &&
@@ -1253,6 +1432,18 @@ export function CollectionTree({
         : next
     )
   }
+
+  // Cursor durante o arraste: "não pode" quando soltar ali não faria nada
+  // (fora das linhas, ou destino recusado por canDropAt). Antes o traço só
+  // sumia, sem dizer por quê.
+  const dropBlocked = !!activeItem && !dropIndicator
+  useEffect(() => {
+    if (!activeItem) return
+    const body = document.body
+    body.classList.toggle('tree-drag-blocked', dropBlocked)
+    body.classList.toggle('tree-dragging', !dropBlocked)
+    return () => body.classList.remove('tree-drag-blocked', 'tree-dragging')
+  }, [activeItem, dropBlocked])
 
   const handleDragOver = (_event: DragOverEvent) => updateDropIndicator()
   const handleDragMove = (_event: DragMoveEvent) => updateDropIndicator()
@@ -1280,7 +1471,7 @@ export function CollectionTree({
       targetId,
       indicator.position
     )
-    onUpdateItems(updated)
+    moveWithUndo(active.id as string, updated)
   }
 
   return (
@@ -1395,6 +1586,11 @@ export function CollectionTree({
         // Navegação por teclado: ↑↓ Home End, → abre / entra, ← fecha / sobe
         // pro pai, Enter abre, F2 renomeia, Del apaga, Ctrl+C / Ctrl+V.
         tabIndex={0}
+        role="tree"
+        aria-label="Collections"
+        aria-multiselectable
+        aria-activedescendant={treeFocused && focusedId && rowIndexById.has(focusedId) ? treeRowDomId(focusedId) : undefined}
+        onScroll={updateRange}
         onKeyDown={handleTreeKeyDown}
         onFocus={handleTreeFocus}
         onBlur={handleTreeBlur}
@@ -1428,45 +1624,59 @@ export function CollectionTree({
             onDragCancel={() => setDropIndicator(null)}
           >
             <SortableContext items={rootIds} strategy={verticalListSortingStrategy}>
-              {uniqueFilteredItems.map((item) => (
-                <TreeNode
-                  // Só o id (já sem repetidos): com o índice na chave, mover
-                  // uma collection remontava ela e todas abaixo — subárvores
-                  // de centenas de linhas recriadas, rename em curso perdido.
-                  key={item.id}
-                  item={item}
-                  depth={0}
-                  isPendingPush={pendingPushIds?.has(item.id)}
-                  activeRequestId={activeRequestId}
-                  onRequestSelect={onRequestSelect}
-                  actions={actionsWithImport}
-                  isDragging={activeItem?.id === item.id}
-                  dropIndicator={dropIndicator}
-                  selectedIds={selectedIds}
-                  onToggleSelect={handleToggleSelect}
-                  onRowContextMenu={handleRowContextMenu}
-                  expandedIds={effectiveExpandedIds}
-                  onSetExpanded={setExpanded}
-                  focusedId={treeFocused ? focusedId : null}
-                  onRowFocus={handleRowFocus}
-                  renamingId={renamingId}
-                  onRenameHandled={handleRenameHandled}
-                  searchTokens={searchTokens}
-                  markerMap={markerMap}
-                  onMarkerClick={onMarkersChange ? handleMarkerClick : undefined}
-                  markerCatalog={markerCatalog}
-                  onToggleMarker={handleToggleMarker}
-                  onCreateMarker={handleCreateMarker}
-                  onRecolorMarker={handleRecolorMarker}
-                  onManageMarkers={onMarkersChange ? openManageMarkers : undefined}
-                  onSaveDescription={handleSaveDescription}
-                  openActionMenuId={openActionMenuId}
-                  actionMenuView={actionMenuView}
-                  onActionMenuOpenChange={handleActionMenuOpenChange}
-                  folderPickMode={folderPickMode}
-                  onPickFolder={onPickFolder}
-                />
-              ))}
+              {/* Só a janela do scroll é desenhada (ver treeRows): o espaçador
+                  tem a altura da lista inteira e cada linha é posicionada no
+                  seu lugar. Com 800+ itens abertos o DOM fica em ~60 linhas. */}
+              <div role="presentation" style={{ position: 'relative', height: flatRows.length * TREE_ROW_HEIGHT }}>
+                {renderedIndexes.map(index => {
+                  const row = flatRows[index]
+                  const id = row.item.id
+                  return (
+                    <div
+                      key={id}
+                      role="none"
+                      style={{ position: 'absolute', top: index * TREE_ROW_HEIGHT, left: 0, right: 0, height: TREE_ROW_HEIGHT }}
+                    >
+                      <TreeNode
+                        item={row.item}
+                        depth={row.depth}
+                        hasChildren={row.hasChildren}
+                        isOpen={row.isOpen}
+                        posInSet={row.posInSet}
+                        setSize={row.setSize}
+                        isActive={activeRequestId === id}
+                        isSelected={selectedIds.has(id)}
+                        isFocused={treeFocused && focusedId === id}
+                        isPendingPush={row.depth === 0 ? pendingPushIds?.has(id) : undefined}
+                        totalRequests={row.depth === 0 && isSearching ? rootRequestTotals.get(id) : undefined}
+                        onRequestSelect={handleRowSelect}
+                        actions={actionsWithImport}
+                        dropIndicator={dropIndicator?.id === id ? dropIndicator : null}
+                        onToggleSelect={handleToggleSelect}
+                        onRowContextMenu={handleRowContextMenu}
+                        onSetExpanded={setExpanded}
+                        onRowFocus={handleRowFocus}
+                        renameRequested={renamingId === id}
+                        onRenameHandled={handleRenameHandled}
+                        searchTokens={searchTokens}
+                        markerMap={markerMap}
+                        onMarkerClick={onMarkersChange ? handleMarkerClick : undefined}
+                        markerCatalog={markerCatalog}
+                        onToggleMarker={handleToggleMarker}
+                        onCreateMarker={handleCreateMarker}
+                        onRecolorMarker={handleRecolorMarker}
+                        onManageMarkers={onMarkersChange ? openManageMarkers : undefined}
+                        onSaveDescription={handleSaveDescription}
+                        actionMenuOpen={openActionMenuId === id}
+                        actionMenuView={actionMenuView}
+                        onActionMenuOpenChange={handleActionMenuOpenChange}
+                        folderPickMode={folderPickMode}
+                        onPickFolder={onPickFolder}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
             </SortableContext>
 
             <DragOverlay
@@ -1573,7 +1783,7 @@ export function CollectionTree({
           itemName={openMarker.itemName}
           // Lido da árvore a cada render, não congelado na abertura: o
           // mesmo item pode ser editado por outro caminho com isto aberto.
-          note={markerNote(findNode(items, openMarker.itemId) ?? ({} as CollectionItem), openMarker.markerId)}
+          note={markerNote(findNodeById(items, openMarker.itemId) ?? ({} as CollectionItem), openMarker.markerId)}
           onSaveNote={text => handleSaveMarkerNote(openMarker.itemId, openMarker.markerId, text)}
           onRemove={() => handleRemoveMarkerHere(openMarker.itemId, openMarker.markerId)}
           onClose={() => setOpenMarker(null)}
@@ -1624,8 +1834,8 @@ export function CollectionTree({
           <div className="px-4 py-3">
             <AlertDialogDescription className="text-[12px] text-pm-text-muted leading-relaxed text-left">
               {pendingDelete?.some(n => n.type === 'folder')
-                ? 'Everything inside will be deleted too. This can’t be undone.'
-                : 'This can’t be undone.'}
+                ? 'Everything inside will be deleted too. You can undo it right after.'
+                : 'You can undo it right after.'}
             </AlertDialogDescription>
           </div>
           <div className="flex gap-2 px-4 py-3 border-t border-pm-border bg-pm-hover/20">

@@ -362,7 +362,9 @@ export function nodeMatchesMarkers(
 export function filterTreeByMarkers(
   items: CollectionItem[],
   markerIds: string[],
-  mode: MarkerFilterMode = 'any'
+  mode: MarkerFilterMode = 'any',
+  // Itens que ficam mesmo sem marcador (o recém-criado, ver filterTree).
+  keepIds?: ReadonlySet<string>
 ): CollectionItem[] {
   if (markerIds.length === 0) return items;
 
@@ -371,7 +373,7 @@ export function filterTreeByMarkers(
       .map(item => {
         const children = item.item ? walkFilter(item.item) : [];
         if (children.length > 0) return { ...item, item: children };
-        if (nodeMatchesMarkers(item, markerIds, mode)) return item;
+        if (keepIds?.has(item.id) || nodeMatchesMarkers(item, markerIds, mode)) return item;
         return null;
       })
       .filter((item): item is CollectionItem => item !== null);
