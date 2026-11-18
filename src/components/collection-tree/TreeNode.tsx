@@ -227,6 +227,11 @@ export const TreeNode = memo(function TreeNode({
   const [value, setValue] = useState(item.name)
   const inputRef = useRef<HTMLInputElement>(null)
   const rowRef = useRef<HTMLDivElement>(null)
+  // Enter/Esc já decidiram o rename; o blur que vem quando o campo some (o
+  // Chromium/WebView2 dispara blur ao remover o input focado) não pode
+  // decidir de novo. Sem isto, o onBlur — closure da renderização anterior,
+  // ainda com o texto digitado — gravava o nome novo depois do Esc.
+  const renameSettledRef = useRef(false)
   // true quando este clique É a origem de isActive virar true — pula o
   // scrollIntoView suave nesse caso (ver o efeito abaixo). Sem isso, o
   // PRIMEIRO clique de um duplo-clique já rola a árvore (o item clicado
@@ -242,6 +247,7 @@ export const TreeNode = memo(function TreeNode({
 
   // Ao entrar em modo de edição, foca e já seleciona todo o texto
   useEffect(() => {
+    if (editing) renameSettledRef.current = false
     if (editing && inputRef.current) {
       inputRef.current.focus()
       inputRef.current.select()
@@ -360,6 +366,8 @@ export const TreeNode = memo(function TreeNode({
   const refocusRow = () => requestAnimationFrame(() => rowRef.current?.focus({ preventScroll: true }))
 
   const submitRename = () => {
+    if (renameSettledRef.current) return
+    renameSettledRef.current = true
     setEditing(false)
     const trimmed = value.trim()
     if (trimmed && trimmed !== item.name) {
@@ -593,6 +601,7 @@ export const TreeNode = memo(function TreeNode({
                   refocusRow()
                 }
                 if (e.key === 'Escape') {
+                  renameSettledRef.current = true
                   setEditing(false)
                   setValue(item.name)
                   refocusRow()
