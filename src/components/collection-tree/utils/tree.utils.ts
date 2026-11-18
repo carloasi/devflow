@@ -494,15 +494,19 @@ export function pasteNodes(
   parentId: string | null,
   nodes: CollectionItem[]
 ): CollectionItem[] {
+  // O que não pode morar nesse pai (ver canPlaceNode) fica de fora.
   if (parentId === null) {
-    return [...items, ...nodes]
+    const fitting = nodes.filter(n => canPlaceNode(null, n))
+    return fitting.length ? [...items, ...fitting] : items
   }
 
   return items.map((item: CollectionItem) => {
     if (item.id === parentId) {
+      const fitting = nodes.filter(n => canPlaceNode(item, n))
+      if (fitting.length === 0) return item
       return {
         ...item,
-        item: [...(item.item || []), ...nodes],
+        item: [...(item.item || []), ...fitting],
       }
     }
 
@@ -528,6 +532,21 @@ export function pasteNodesBeside(
   nodes: CollectionItem[],
   position: 'before' | 'after'
 ): CollectionItem[] {
+  // Irmão de targetId = filho do pai dele; o que não cabe nesse pai sai.
+  const parentId = findParentId(items, targetId)
+  if (parentId === undefined) return items
+  const parent = parentId === null ? null : findNodeById(items, parentId) ?? null
+  const fitting = nodes.filter(n => canPlaceNode(parent, n))
+  if (fitting.length === 0) return items
+  return insertBeside(items, targetId, fitting, position)
+}
+
+function insertBeside(
+  items: CollectionItem[],
+  targetId: string,
+  nodes: CollectionItem[],
+  position: 'before' | 'after'
+): CollectionItem[] {
   const idx = items.findIndex((item) => item.id === targetId)
 
   if (idx !== -1) {
@@ -539,7 +558,7 @@ export function pasteNodesBeside(
 
   return items.map((item) =>
     item.item
-      ? { ...item, item: pasteNodesBeside(item.item, targetId, nodes, position) }
+      ? { ...item, item: insertBeside(item.item, targetId, nodes, position) }
       : item
   )
 }
@@ -666,9 +685,15 @@ export function canMoveDown(items: CollectionItem[], id: string): boolean {
   return index !== -1 && index < siblings.length - 1
 }
 
-/** Só dá pra sair de uma pasta quando se está dentro de alguma. */
+/**
+ * Só dá pra sair de uma pasta quando se está dentro de alguma — e quando o
+ * lugar de destino aceita o item. Um example não tem "fora": sair da request
+ * dona o deixaria solto numa pasta, sem a request que ele documenta.
+ */
 export function canMoveOut(items: CollectionItem[], id: string): boolean {
-  return !!findParentId(items, id)
+  const parentId = findParentId(items, id)
+  if (!parentId) return false
+  return canDropAt(items, id, parentId, 'after')
 }
 
 export function moveUp(items: CollectionItem[], id: string): CollectionItem[] {
@@ -717,6 +742,108 @@ export function moveOut(items: CollectionItem[], id: string): CollectionItem[] {
   return moveNode(items, id, parentId, 'after')
 }
 
+// ── Onde cada tipo de item pode morar ────────────────────────────────────
+//
+// Os filhos de uma request são os Saved Examples dela (type 'example'), e só
+// eles; examples só existem dentro de uma request. Antes nada disso era
+// conferido: soltar uma request na linha de um example (com a request aberta)
+// a enfiava entre os examples — some do Runner, do export e da contagem, e só
+// aparece abrindo a request. O caminho inverso tirava um example da request
+// pra uma pasta, onde vira uma "request" sem método. Colar sobre um example
+// fazia o mesmo que o arraste.
+
+/** `node` pode ser filho de `parent` (null = raiz)? */
+export function canPlaceNode(parent: CollectionItem | null, node: CollectionItem): boolean {
+  if (node.type === 'example') return parent?.type === 'request'
+  return parent === null || parent.type === 'folder'
+}
+
+/**
+ * Soltar `activeId` em relação a `overId` deixa a árvore válida? Mesmas
+ * regras do moveNode — existe à parte pra o indicador do arraste não
+ * desenhar um destino que o drop vai recusar.
+ */
+export function canDropAt(
+  items: CollectionItem[],
+  activeId: string,
+  overId: string,
+  position: DropPosition
+): boolean {
+  if (activeId === overId) return false
+  const active = findNodeById(items, activeId)
+  const over = findNodeById(items, overId)
+  if (!active || !over) return false
+  // Ciclo: pasta pra dentro (ou pro lado de algo de dentro) dela mesma.
+  if (findNodeById(active.item ?? [], overId)) return false
+
+  if (position === 'inside') {
+    return over.type === 'folder' && canPlaceNode(over, active)
+  }
+
+  const parentId = findParentId(items, overId)
+  if (parentId === undefined) return false
+  const parent = parentId === null ? null : findNodeById(items, parentId) ?? null
+  return canPlaceNode(parent, active)
+}
+
+/**
+ * Pai em que um colar deve cair, dado o item clicado.
+ *
+ * Pasta recebe dentro; request recebe examples dentro e manda o resto pro
+ * lado dela; example manda examples pro lado dele (na mesma request) e o
+ * resto pro lado da request dona. Sem alvo, a raiz.
+ */
+export function resolvePasteParent(
+  items: CollectionItem[],
+  target: CollectionItem | null,
+  nodes: CollectionItem[]
+): string | null {
+  if (!target) return null
+  if (target.type === 'folder') return target.id
+
+  const allExamples = nodes.length > 0 && nodes.every(n => n.type === 'example')
+  const parentOf = (id: string) => findParentId(items, id) ?? null
+
+  if (target.type === 'request') return allExamples ? target.id : parentOf(target.id)
+
+  const owner = parentOf(target.id)
+  if (allExamples) return owner
+  return owner ? parentOf(owner) : null
+}
+
+/**
+ * Ids de pastas abertas que continuam valendo depois de a árvore mudar.
+ *
+ * Tira só o que SUMIU entre a árvore anterior e a nova (item apagado aqui ou
+ * num pull). Antes a poda era "o que não está na árvore atual" — e a árvore
+ * atual é só a do workspace aberto: trocar de workspace e fechar o app
+ * apagava todas as pastas abertas do outro.
+ *
+ * Sem nenhuma collection em comum entre as duas árvores é troca de
+ * workspace, não exclusão; árvore vazia é carregamento. Nos dois casos nada
+ * sai. Devolve o mesmo Set quando nada mudou.
+ */
+export function pruneExpandedIds(
+  expanded: Set<string>,
+  prevItems: CollectionItem[],
+  nextItems: CollectionItem[]
+): Set<string> {
+  if (expanded.size === 0 || prevItems.length === 0 || nextItems.length === 0) return expanded
+  const nextRoots = new Set(nextItems.map(i => i.id))
+  if (!prevItems.some(i => nextRoots.has(i.id))) return expanded
+
+  const before = collectAllIds(prevItems)
+  const after = collectAllIds(nextItems)
+  let next: Set<string> | null = null
+  for (const id of expanded) {
+    if (before.has(id) && !after.has(id)) {
+      next ??= new Set(expanded)
+      next.delete(id)
+    }
+  }
+  return next ?? expanded
+}
+
 export function moveNode(
   items: CollectionItem[],
   activeId: string,
@@ -724,6 +851,7 @@ export function moveNode(
   position: DropPosition = 'after'
 ): CollectionItem[] {
   if (activeId === overId) return items
+  if (!canDropAt(items, activeId, overId, position)) return items
 
   // 1. Localizar e extrair o nó ativo
   let activeNode: CollectionItem | null = null

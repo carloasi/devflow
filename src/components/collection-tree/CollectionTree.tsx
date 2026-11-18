@@ -54,9 +54,11 @@ import {
   setDescription,
   collectExpandableIds,
   collectRequests,
-  collectAllIds,
   collectStarred,
   removeNode,
+  canDropAt,
+  resolvePasteParent,
+  pruneExpandedIds,
   moveUp,
   moveDown,
   moveToFirst,
@@ -129,6 +131,7 @@ interface Props {
 // Pastas abertas, persistidas entre sessões (antes tudo reabria fechado).
 const EXPANDED_STORAGE_KEY = 'devflow_tree_expanded'
 const FAVORITES_OPEN_STORAGE_KEY = 'devflow_tree_favorites_open'
+const MAX_PERSISTED_EXPANDED = 5000
 
 function loadExpandedIds(): Set<string> {
   try {
@@ -552,15 +555,9 @@ export function CollectionTree({
   const pasteInto = useCallback((target: CollectionItem | null): boolean => {
     const clipboardItems = getClipboardItems()
     if (clipboardItems.length === 0) return false
-
-    if (!target) {
-      actions.pasteItems(null, clipboardItems)
-    } else if (target.type === 'folder') {
-      actions.pasteItems(target.id, clipboardItems)
-    } else {
-      const parentId = findParentId(items, target.id)
-      actions.pasteItems(parentId ?? null, clipboardItems)
-    }
+    // Sobre um example, "o pai" é a request dona — colar requests ali as
+    // punha entre os examples (ver resolvePasteParent).
+    actions.pasteItems(resolvePasteParent(items, target, clipboardItems), clipboardItems)
     return true
   }, [items, actions])
 
@@ -575,9 +572,15 @@ export function CollectionTree({
   const pasteBeside = useCallback((target: CollectionItem, position: 'before' | 'after'): boolean => {
     const clipboardItems = getClipboardItems()
     if (clipboardItems.length === 0) return false
-    actions.pasteItemsBeside(target.id, clipboardItems, position)
+    // Requests coladas "ao lado" de um example vão pro lado da request dona:
+    // ao lado do example seria dentro da request.
+    let anchorId = target.id
+    if (target.type === 'example' && !clipboardItems.every(n => n.type === 'example')) {
+      anchorId = findParentId(items, target.id) ?? target.id
+    }
+    actions.pasteItemsBeside(anchorId, clipboardItems, position)
     return true
-  }, [actions])
+  }, [items, actions])
 
   const handlePasteBeside = useCallback((position: 'before' | 'after') => {
     if (!contextMenu?.item) return
@@ -679,7 +682,8 @@ export function CollectionTree({
     }
   }, [items])
 
-  const actionsWithImport = {
+  // Memoizado pelo mesmo motivo do `actions` do hook: desce pra todo TreeNode.
+  const actionsWithImport = useMemo(() => ({
     ...actions,
     export: exportWithSecretCheck,
     exportHtml: exportFlowAsHtml,
@@ -693,7 +697,12 @@ export function CollectionTree({
     addExample: onAddExampleItem
       ? (item: CollectionItem) => onAddExampleItem(actions.createExample(item))
       : undefined,
-  }
+  }), [
+    actions, exportWithSecretCheck, exportFlowAsHtml, copyText, envMap, onRunItem,
+    onLoadTestItem, onPushCollection, onOpenSync, onAddExampleItem,
+  ])
+
+  const openManageMarkers = useCallback(() => setManagingMarkers(true), [])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -747,19 +756,26 @@ export function CollectionTree({
     setSearchCollapsedIds(new Set())
   }, [search, activeFilterIds])
 
-  // Persiste, descartando ids que não existem mais (itens apagados). Com a
-  // árvore ainda vazia (antes das collections carregarem) não poda nada, pra
-  // não apagar o estado salvo.
+  // Descarta pastas que sumiram da árvore (apagadas aqui ou num pull). A poda
+  // compara a árvore anterior com a nova em vez de "o que não está na atual":
+  // a atual é só a do workspace aberto, e aquela regra apagava do disco as
+  // pastas abertas de todos os outros workspaces (ver pruneExpandedIds).
+  const prevItemsRef = useRef(items)
+  useEffect(() => {
+    const prev = prevItemsRef.current
+    prevItemsRef.current = items
+    if (prev === items) return
+    setExpandedIds(current => pruneExpandedIds(current, prev, items))
+  }, [items])
+
   useEffect(() => {
     try {
-      let ids = Array.from(expandedIds)
-      if (items.length > 0) {
-        const existing = collectAllIds(items)
-        ids = ids.filter(id => existing.has(id))
-      }
+      // Os mais recentes ficam (Set guarda a ordem de inserção): ids de itens
+      // apagados por fora do app não podem fazer isto crescer sem limite.
+      const ids = Array.from(expandedIds).slice(-MAX_PERSISTED_EXPANDED)
       localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify(ids))
     } catch {}
-  }, [expandedIds, items])
+  }, [expandedIds])
 
   const searchExpandableIds = useMemo(
     () => (isSearching ? collectExpandableIds(uniqueFilteredItems) : new Set<string>()),
@@ -789,6 +805,15 @@ export function CollectionTree({
       if (ids.every(id => prev.has(id))) return prev
       const next = new Set(prev)
       ids.forEach(id => next.add(id))
+      return next
+    })
+    // Durante a busca quem manda é o searchCollapsedIds: sem isto, revelar
+    // um item (aba trocada, achado do scanner de segredos) não abria uma
+    // pasta que o usuário tinha fechado nos resultados.
+    setSearchCollapsedIds(prev => {
+      if (!ids.some(id => prev.has(id))) return prev
+      const next = new Set(prev)
+      ids.forEach(id => next.delete(id))
       return next
     })
   }, [])
@@ -1153,6 +1178,12 @@ export function CollectionTree({
       relativeY > FOLDER_EDGE &&
       relativeY < rect.height - FOLDER_EDGE
     ) {
+      // Example não entra em pasta: sem indicador, em vez de um anel que o
+      // drop depois ignora (ver canDropAt).
+      if (!canDropAt(items, dragged.id, hitId, 'inside')) {
+        setDropIndicator(null)
+        return
+      }
       setDropIndicator((current) =>
         current && current.id === hitId && current.position === 'inside'
           ? current
@@ -1169,6 +1200,10 @@ export function CollectionTree({
     // Inserir acima de tudo: não há nível pra subir, o único destino possível
     // é virar irmão da primeira linha.
     if (above < 0) {
+      if (!canDropAt(items, dragged.id, hitId, 'before')) {
+        setDropIndicator(null)
+        return
+      }
       setDropIndicator((current) =>
         current && current.id === hitId && current.position === 'before'
           ? current
@@ -1190,6 +1225,13 @@ export function CollectionTree({
       above,
       outdent
     )
+
+    // Request solta entre os examples de outra (ou example fora da sua
+    // request): o drop seria recusado, então o traço não aparece.
+    if (!canDropAt(items, dragged.id, projected.targetId, 'after')) {
+      setDropIndicator(null)
+      return
+    }
 
     const next: DropIndicator = {
       id: rows[above].dataset.treeRow!,
@@ -1386,9 +1428,12 @@ export function CollectionTree({
             onDragCancel={() => setDropIndicator(null)}
           >
             <SortableContext items={rootIds} strategy={verticalListSortingStrategy}>
-              {uniqueFilteredItems.map((item, index) => (
+              {uniqueFilteredItems.map((item) => (
                 <TreeNode
-                  key={`${item.id}-${index}`}
+                  // Só o id (já sem repetidos): com o índice na chave, mover
+                  // uma collection remontava ela e todas abaixo — subárvores
+                  // de centenas de linhas recriadas, rename em curso perdido.
+                  key={item.id}
                   item={item}
                   depth={0}
                   isPendingPush={pendingPushIds?.has(item.id)}
@@ -1413,7 +1458,7 @@ export function CollectionTree({
                   onToggleMarker={handleToggleMarker}
                   onCreateMarker={handleCreateMarker}
                   onRecolorMarker={handleRecolorMarker}
-                  onManageMarkers={onMarkersChange ? () => setManagingMarkers(true) : undefined}
+                  onManageMarkers={onMarkersChange ? openManageMarkers : undefined}
                   onSaveDescription={handleSaveDescription}
                   openActionMenuId={openActionMenuId}
                   actionMenuView={actionMenuView}

@@ -457,14 +457,10 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
     await writeTextFile(filePath, json)
   }, [])
 
-    const rename = (id: string, newName: string) => {
+  const rename = useCallback((id: string, newName: string) => {
     onUpdateItems(renameNode(items, id, newName))
     onRename?.(id, newName) // avisa quem estiver ouvindo (ex: as tabs abertas)
-  }
-
-  // const rename = useCallback((id: string, name: string) => {
-  //   onUpdateItems(renameNode(items, id, name))
-  // }, [items, onUpdateItems])
+  }, [items, onUpdateItems, onRename])
 
   const remove = useCallback((id: string) => {
     onUpdateItems(removeNode(items, id))
@@ -501,25 +497,34 @@ export function useCollectionTree({ items, onUpdateItems,onRename }: Params) {
   }, [items, search])
 
 
+  // Objeto estável enquanto `items` não muda: ele desce como prop pra cada
+  // TreeNode (memo), e um objeto novo a cada render fazia as centenas de
+  // linhas re-renderizarem a cada abrir de menu, foco ou digitação.
+  const actions = useMemo(() => ({
+    createRequest,
+    createGrpcRequest,
+    createFolder,
+    createExample,
+    updateExample,
+    rename,
+    remove,
+    toggleStar,
+    duplicate,
+    export: exportCollection,
+    createRequestFromCurl,
+    pasteItems,
+    pasteItemsBeside,
+  }), [
+    createRequest, createGrpcRequest, createFolder, createExample, updateExample, rename,
+    remove, toggleStar, duplicate, exportCollection, createRequestFromCurl, pasteItems,
+    pasteItemsBeside,
+  ])
+
   return {
     search,
     setSearch,
     filteredItems,
-    actions: {
-      createRequest,
-      createGrpcRequest,
-      createFolder,
-      createExample,
-      updateExample,
-      rename,
-      remove,
-      toggleStar,
-      duplicate,
-      export: exportCollection,
-      createRequestFromCurl,
-      pasteItems,
-      pasteItemsBeside,
-    },
+    actions,
   }
 }
 
