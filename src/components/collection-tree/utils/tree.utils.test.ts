@@ -93,21 +93,21 @@ describe('pasteNodesBeside', () => {
     ({ id, name: id, type: 'request', method: 'GET' }) as CollectionItem;
 
   it('insere antes do alvo', () => {
-    const items = [req('a'), req('b'), req('c')];
+    const items = [folder('Col', [req('a'), req('b'), req('c')])];
     const next = pasteNodesBeside(items, 'b', [req('novo')], 'before');
-    expect(names(next)).toEqual(['a', 'novo', 'b', 'c']);
+    expect(names(next[0].item)).toEqual(['a', 'novo', 'b', 'c']);
   });
 
   it('insere depois do alvo', () => {
-    const items = [req('a'), req('b'), req('c')];
+    const items = [folder('Col', [req('a'), req('b'), req('c')])];
     const next = pasteNodesBeside(items, 'b', [req('novo')], 'after');
-    expect(names(next)).toEqual(['a', 'b', 'novo', 'c']);
+    expect(names(next[0].item)).toEqual(['a', 'b', 'novo', 'c']);
   });
 
   it('insere vários nós de uma vez, na ordem dada', () => {
-    const items = [req('a'), req('b')];
+    const items = [folder('Col', [req('a'), req('b')])];
     const next = pasteNodesBeside(items, 'a', [req('x'), req('y')], 'after');
-    expect(names(next)).toEqual(['a', 'x', 'y', 'b']);
+    expect(names(next[0].item)).toEqual(['a', 'x', 'y', 'b']);
   });
 
   it('acha o alvo dentro de uma subpasta', () => {
@@ -278,8 +278,8 @@ describe('mover pelo menu', () => {
 
   const ids = (items: CollectionItem[] | undefined) => (items ?? []).map(i => i.id);
 
-  // a[ x, y, z ], b
-  const tree = () => [node('a', [node('x'), node('y'), node('z')]), node('b')];
+  // a[ x, y/, z ], b/ — na raiz só pastas (collections); y é pasta pra poder sair de a.
+  const tree = () => [node('a', [node('x'), node('y', []), node('z')]), node('b', [])];
 
   describe('moveUp', () => {
     it('troca com o irmão de cima', () => {

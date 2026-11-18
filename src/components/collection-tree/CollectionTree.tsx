@@ -67,6 +67,8 @@ import {
   removeNode,
   canDropAt,
   resolvePasteParent,
+  countPlaceable,
+  topLevelInTreeOrder,
   pruneExpandedIds,
   captureRemoval,
   restoreRemoved,
@@ -203,6 +205,19 @@ const FOLDER_EDGE = 5
 const OUTDENT_STEP = 20
 
 // True se `id` está na subárvore de `node` (o próprio nó incluído).
+/**
+ * Avisa quando o colar deixou itens de fora (ver canPlaceNode): antes eles
+ * sumiam calados, e colar uma request no espaço vazio não fazia nada.
+ */
+function reportPasteSkips(total: number, pasted: number, atRoot: boolean) {
+  if (pasted === total) return
+  const where = atRoot
+    ? 'Only folders can be collections: paste requests into a collection.'
+    : "Saved examples only go inside a request, and requests can't go inside a request."
+  if (pasted === 0) toast.error(`Can't paste here. ${where}`)
+  else toast.warning(`Pasted ${pasted} of ${total} items. ${where}`)
+}
+
 function isDescendantOf(node: CollectionItem, id: string): boolean {
   if (node.id === id) return true
   return (node.item ?? []).some((child) => isDescendantOf(child, id))
@@ -359,9 +374,9 @@ export function CollectionTree({
   // `fallbackId` (linha com foco de teclado). Retorna quantos copiou.
   const copyItems = useCallback((fallbackId?: string | null): number => {
     const ids = selectedIds.size > 0 ? Array.from(selectedIds) : fallbackId ? [fallbackId] : []
-    const nodes = ids
-      .map(id => findNodeById(items, id))
-      .filter((n): n is CollectionItem => !!n)
+    // Na ordem da árvore e sem o que já vem dentro de outro escolhido: uma
+    // pasta e um filho dela selecionados colavam o filho duas vezes.
+    const nodes = topLevelInTreeOrder(items, ids)
     if (nodes.length === 0) return 0
     copyItemsToClipboard(nodes)
     return nodes.length
@@ -585,7 +600,10 @@ export function CollectionTree({
     if (clipboardItems.length === 0) return false
     // Sobre um example, "o pai" é a request dona — colar requests ali as
     // punha entre os examples (ver resolvePasteParent).
-    actions.pasteItems(resolvePasteParent(items, target, clipboardItems), clipboardItems)
+    const parentId = resolvePasteParent(items, target, clipboardItems)
+    const fits = countPlaceable(items, parentId, clipboardItems)
+    if (fits > 0) actions.pasteItems(parentId, clipboardItems)
+    reportPasteSkips(clipboardItems.length, fits, parentId === null)
     return true
   }, [items, actions])
 
@@ -606,7 +624,11 @@ export function CollectionTree({
     if (target.type === 'example' && !clipboardItems.every(n => n.type === 'example')) {
       anchorId = findParentId(items, target.id) ?? target.id
     }
-    actions.pasteItemsBeside(anchorId, clipboardItems, position)
+    const parentId = findParentId(items, anchorId)
+    if (parentId === undefined) return false
+    const fits = countPlaceable(items, parentId, clipboardItems)
+    if (fits > 0) actions.pasteItemsBeside(anchorId, clipboardItems, position)
+    reportPasteSkips(clipboardItems.length, fits, parentId === null)
     return true
   }, [items, actions])
 

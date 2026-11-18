@@ -509,8 +509,11 @@ export function applyStarMarks(
 // para cada nó — usado ao colar itens copiados, pra nunca duplicar um id já
 // existente na árvore (o que quebraria seleção, DnD, etc).
 export function cloneItemWithNewIds(node: CollectionItem): CollectionItem {
+  // A cópia não é favorita: a estrela é do original, e a âncora
+  // (starredAfterId) aponta pros irmãos dele, não pros da cópia.
+  const { starred: _starred, starredAfterId: _anchor, ...rest } = node
   const cloned: CollectionItem = {
-    ...node,
+    ...rest,
     id: crypto.randomUUID(),
   }
 
@@ -790,7 +793,33 @@ export function moveOut(items: CollectionItem[], id: string): CollectionItem[] {
 /** `node` pode ser filho de `parent` (null = raiz)? */
 export function canPlaceNode(parent: CollectionItem | null, node: CollectionItem): boolean {
   if (node.type === 'example') return parent?.type === 'request'
-  return parent === null || parent.type === 'folder'
+  // A raiz é a lista de collections: só pasta mora ali. Uma request solta na
+  // raiz aparecia como se fosse uma collection (e era sincronizada como uma)
+  // — o "Move out" de uma request direto na collection, o arraste puxado até
+  // o nível 0 e o colar no espaço vazio a punham lá. Mesma regra do MCP
+  // (treeEdit: "only folders can be at the top level").
+  if (parent === null) return node.type === 'folder'
+  return parent.type === 'folder'
+}
+
+/**
+ * Os nós de `ids` que existem, na ordem da árvore, sem os que estão dentro
+ * de outro também escolhido — esses já vêm junto com o de cima. Copiar uma
+ * pasta e um filho dela colava o filho duas vezes.
+ */
+export function topLevelInTreeOrder(items: CollectionItem[], ids: Iterable<string>): CollectionItem[] {
+  return captureRemoval(items, ids).map((entry) => entry.node)
+}
+
+/** Quantos de `nodes` cabem como filhos de `parentId` (null = raiz). */
+export function countPlaceable(
+  items: CollectionItem[],
+  parentId: string | null,
+  nodes: CollectionItem[]
+): number {
+  const parent = parentId === null ? null : findNodeById(items, parentId) ?? null
+  if (parentId !== null && !parent) return 0
+  return nodes.filter((n) => canPlaceNode(parent, n)).length
 }
 
 /**
