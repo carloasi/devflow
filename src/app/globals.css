@@ -580,3 +580,10 @@ body.tree-drag-blocked,
 body.tree-drag-blocked * {
   cursor: no-drop !important;
 }
+
+/* Guia da pasta onde está o foco (ou a aba ativa): sempre visível e mais
+   forte que as outras, pra ver de quem é cada filho em árvores fundas. */
+.tree-guide-line.tree-guide-line-active {
+  opacity: 1;
+  background-color: var(--color-pm-text-muted) !important;
+}

@@ -138,7 +138,8 @@ import type { FileShas } from '@/lib/remoteVersions';
 import { pruneEmptyGroups, type TabGroup } from '@/lib/tabGroups';
 import { applySelectedChanges } from '@/lib/applyDiff';
 import { diffEnvironments, applyEnvironmentChanges } from '@/lib/environmentDiff';
-import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, matchesSyncBase, type NodeHashes } from '@/lib/syncBase';
+import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, matchesSyncBase, pendingChanges as pendingChangesSince, type NodeHashes } from '@/lib/syncBase';
+import type { PendingDetail } from '@/components/collection-tree/CollectionTree';
 import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
@@ -1303,6 +1304,33 @@ export default function AppLayout() {
   const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
   const selectedWorkspaceRef = useRef(selectedWorkspace); 
+
+  // Quantas alterações cada collection pendente tem, e quais itens — o ponto
+  // laranja da árvore só dizia "tem algo". Comparado com a base da última
+  // sincronização (lib/syncBase.pendingChanges), lida do disco: espera a
+  // digitação parar um pouco e descarta a resposta de um workspace antigo.
+  const [pendingDetails, setPendingDetails] = useState<Map<string, PendingDetail>>(() => new Map());
+  useEffect(() => {
+    if (pendingCollectionIds.size === 0) {
+      setPendingDetails(prev => (prev.size === 0 ? prev : new Map()));
+      return;
+    }
+    const workspace = selectedWorkspace;
+    const roots = collections;
+    const timer = setTimeout(() => {
+      void loadSyncBase(workspace).then(base => {
+        if (selectedWorkspaceRef.current !== workspace) return;
+        const next = new Map<string, PendingDetail>();
+        for (const id of pendingCollectionIds) {
+          const detail = pendingChangesSince(base, roots.find(c => c.id === id));
+          if (!detail) continue;
+          next.set(id, { count: detail.changed.length + detail.deleted, changed: new Set(detail.changed) });
+        }
+        setPendingDetails(next);
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [collections, pendingCollectionIds, selectedWorkspace]);
   const [isToolsMenuOpen, setIsToolsMenuOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<Tab[]>(tabs);
@@ -6919,6 +6947,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
             <Sidebar
               collections={collections}
               pendingPushIds={pendingCollectionIds}
+              pendingChanges={pendingDetails}
+              workspaceKey={selectedWorkspace}
               //update git v2
               setCollections={setCollections}
               activeId={activeTabId || undefined}

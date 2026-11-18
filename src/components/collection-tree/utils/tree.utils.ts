@@ -1352,3 +1352,76 @@ export function collectRequests(items: CollectionItem[]): CollectionItem[] {
   walk(items)
   return out
 }
+
+// ── Mover vários de uma vez (arraste com seleção, recortar e colar) ──────
+
+/**
+ * Move os nós de `ids` em relação a `overId`, mantendo a ordem da árvore.
+ *
+ * Só vão os de cima (um filho de outro escolhido vai junto com ele) e só os
+ * que podem morar no destino (canDropAt); o alvo e o que está dentro de um
+ * dos movidos não servem de referência. 'inside' põe todos no fim da pasta;
+ * 'before' põe todos antes do alvo; 'after' encadeia, cada um depois do
+ * anterior. Devolve a mesma árvore quando nada se move.
+ */
+export function moveNodes(
+  items: CollectionItem[],
+  ids: Iterable<string>,
+  overId: string,
+  position: DropPosition
+): CollectionItem[] {
+  const nodes = topLevelInTreeOrder(items, ids)
+  if (nodes.some((n) => n.id === overId || findNodeById(n.item ?? [], overId))) return items
+  let next = items
+  let anchor = overId
+  for (const node of nodes) {
+    if (!canDropAt(next, node.id, overId, position)) continue
+    const moved = moveNode(next, node.id, anchor, position)
+    if (moved === next) continue
+    next = moved
+    if (position === 'after') anchor = node.id
+  }
+  return next
+}
+
+/**
+ * O desfazer de um mover em grupo: cada nó volta ao pai e à posição de
+ * `before` (captureRemoval tirado ANTES de mover), na versão ATUAL dele —
+ * o que foi editado depois de mover não se perde.
+ */
+export function restoreMoved(items: CollectionItem[], before: RemovedEntry[]): CollectionItem[] {
+  const current = before
+    .map((entry) => ({ ...entry, node: findNodeById(items, entry.node.id) }))
+    .filter((entry): entry is RemovedEntry => !!entry.node)
+  if (current.length === 0) return items
+  const without = current.reduce((acc, entry) => removeNode(acc, entry.node.id), items)
+  return restoreRemoved(without, current)
+}
+
+/** Raiz (collection) de onde `id` mora, ou null se não existe. */
+export function rootIdOf(items: CollectionItem[], id: string): string | null {
+  const path = findPathToItem(items, id)
+  if (path === null) return null
+  return path[0] ?? id
+}
+
+/**
+ * Move os nós pro FIM de `parentId` (null = raiz) — o colar de um recorte,
+ * que cai no mesmo lugar em que um colar de cópias cairia (pasteNodes).
+ */
+export function moveNodesInto(
+  items: CollectionItem[],
+  ids: Iterable<string>,
+  parentId: string | null
+): CollectionItem[] {
+  if (parentId === null) {
+    const last = items[items.length - 1]
+    return last ? moveNodes(items, ids, last.id, 'after') : items
+  }
+  const parent = findNodeById(items, parentId)
+  if (!parent) return items
+  if (parent.type === 'folder') return moveNodes(items, ids, parentId, 'inside')
+  // Request recebendo examples: depois do último que ela já tem.
+  const last = parent.item?.[parent.item.length - 1]
+  return last ? moveNodes(items, ids, last.id, 'after') : items
+}

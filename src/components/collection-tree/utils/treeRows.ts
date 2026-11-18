@@ -128,3 +128,45 @@ export function keepVisibleSelection(
   }
   return next ?? selected
 }
+
+/**
+ * Ids das linhas entre `anchorId` e `toId`, inclusive, na ordem da tela —
+ * o Shift+Click / Shift+seta. Âncora fora da tela começa em `toId`.
+ */
+export function rangeIds(rows: Array<{ id: string }>, anchorId: string | null, toId: string): string[] {
+  const to = rows.findIndex((r) => r.id === toId)
+  if (to < 0) return []
+  const from = anchorId ? rows.findIndex((r) => r.id === anchorId) : -1
+  if (from < 0) return [toId]
+  const [a, b] = from <= to ? [from, to] : [to, from]
+  return rows.slice(a, b + 1).map((r) => r.id)
+}
+
+/**
+ * A guia de recuo a realçar: a da pasta que contém a linha com foco (ou a
+ * da própria linha, quando é uma pasta aberta). Devolve o nível da guia e a
+ * faixa [start, end) de linhas que ela atravessa; null quando a linha está
+ * na raiz e fechada.
+ */
+export function activeGuide(
+  rows: Array<{ depth: number; isOpen: boolean }>,
+  focusIndex: number
+): { level: number; start: number; end: number } | null {
+  if (focusIndex < 0 || focusIndex >= rows.length) return null
+  let owner = focusIndex
+  if (!rows[focusIndex].isOpen) {
+    owner = -1
+    for (let i = focusIndex - 1; i >= 0; i--) {
+      if (rows[i].depth < rows[focusIndex].depth) {
+        owner = i
+        break
+      }
+    }
+  }
+  if (owner < 0) return null
+  const level = rows[owner].depth
+  let end = owner + 1
+  while (end < rows.length && rows[end].depth > level) end++
+  if (end === owner + 1) return null
+  return { level, start: owner + 1, end }
+}

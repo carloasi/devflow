@@ -26,12 +26,18 @@ interface Props {
   setSize: number
   isActive: boolean
   isSelected: boolean
+  // Recortada (Ctrl+X), esperando o colar que vai movê-la.
+  isCut?: boolean
+  // Nível da guia de recuo a realçar nesta linha (a da pasta com foco).
+  activeGuideLevel?: number
   // Foco de teclado (só true enquanto a árvore tem foco).
   isFocused: boolean
   onRequestSelect?: (item: CollectionItem) => void
   // Só chega preenchido na linha contra a qual o traço/anel é desenhado.
   dropIndicator?: DropIndicator | null
   onToggleSelect?: (id: string) => void
+  // Shift+Click: seleciona do último item escolhido até este.
+  onRangeSelect?: (id: string) => void
   onRowContextMenu?: (e: React.MouseEvent, item: CollectionItem) => void
   onSetExpanded: (id: string, open: boolean) => void
   /** `plainClick`: botão esquerdo sem Ctrl/Cmd — desfaz a seleção múltipla. */
@@ -66,6 +72,11 @@ interface Props {
   // Esta collection tem alteração local esperando push. Só chega preenchido
   // nas raízes — é a granularidade em que o pendente é rastreado.
   isPendingPush?: boolean
+  // Quantas alterações a collection tem desde a última sincronização (só
+  // nas raízes; ausente = não dá pra dizer).
+  pendingCount?: number
+  // Este item mudou desde a última sincronização.
+  isChanged?: boolean
   // Total de requests da collection SEM filtro — com a busca ativa o
   // contador vira "achadas / total". Só nas raízes.
   totalRequests?: number
@@ -197,10 +208,13 @@ export const TreeNode = memo(function TreeNode({
   setSize,
   isActive,
   isSelected,
+  isCut,
+  activeGuideLevel,
   isFocused,
   onRequestSelect,
   dropIndicator,
   onToggleSelect,
+  onRangeSelect,
   onRowContextMenu,
   onSetExpanded,
   onRowFocus,
@@ -221,6 +235,8 @@ export const TreeNode = memo(function TreeNode({
   folderPickMode,
   onPickFolder,
   isPendingPush,
+  pendingCount,
+  isChanged,
   totalRequests,
   actions,
 }: Props) {
@@ -421,7 +437,7 @@ export const TreeNode = memo(function TreeNode({
       {Array.from({ length: depth }, (_, level) => (
         <span
           key={level}
-          className="tree-guide-line"
+          className={level === activeGuideLevel ? 'tree-guide-line tree-guide-line-active' : 'tree-guide-line'}
           style={{
             position: 'absolute',
             left: Math.min(level * INDENT, MAX_INDENT) + 20,
@@ -477,7 +493,7 @@ export const TreeNode = memo(function TreeNode({
           // No modo "escolher pasta", itens que não são pasta ficam
           // esmaecidos (não são um alvo válido) — pastas continuam com
           // opacidade normal pra sinalizar que são clicáveis.
-          opacity: folderPickMode && !isFolder ? 0.4 : 1,
+          opacity: folderPickMode && !isFolder ? 0.4 : isCut ? 0.5 : 1,
           cursor: folderPickMode ? (isFolder ? 'pointer' : 'default') : 'default',
           width: 'calc(100% - 10px)',
           marginLeft: Math.min(depth * INDENT, 10),
@@ -507,7 +523,9 @@ export const TreeNode = memo(function TreeNode({
           }
           if (!isActive && !isSelected) e.currentTarget.style.backgroundColor = 'transparent'
         }}
-        onMouseDown={e => onRowFocus?.(item.id, e.button === 0 && !e.ctrlKey && !e.metaKey && !folderPickMode)}
+        // Numa linha selecionada o mousedown NÃO desfaz a seleção: pode ser o
+        // começo de arrastar o grupo. Aí quem desfaz é o clique (abaixo).
+        onMouseDown={e => onRowFocus?.(item.id, e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !folderPickMode && !isSelected)}
         onContextMenu={e => {
           if (folderPickMode) { e.preventDefault(); return }
           e.preventDefault()
@@ -636,6 +654,14 @@ export const TreeNode = memo(function TreeNode({
                   onToggleSelect?.(item.id)
                   return
                 }
+                if (e.shiftKey && onRangeSelect) {
+                  e.stopPropagation()
+                  onRangeSelect(item.id)
+                  return
+                }
+                // Clique comum numa linha da seleção (sem ter arrastado):
+                // agora sim desfaz a seleção — ver o onMouseDown da linha.
+                if (isSelected) onRowFocus?.(item.id, true)
                 if (!isFolder) {
                   onRequestSelect?.(item)
                 } else {
@@ -698,7 +724,21 @@ export const TreeNode = memo(function TreeNode({
           {isPendingPush && !editing && (
             <span
               className="shrink-0 ml-1.5 w-[6px] h-[6px] rounded-full bg-amber-400"
-              title="Local changes not pushed to GitHub yet"
+              title={
+                pendingCount
+                  ? `${pendingCount} change${pendingCount === 1 ? '' : 's'} not pushed to GitHub yet`
+                  : 'Local changes not pushed to GitHub yet'
+              }
+            />
+          )}
+
+          {/* Item mudado desde a última sincronização, dentro de uma
+              collection pendente: diz QUAL item o ponto da collection quer
+              dizer. Contorno, não ponto cheio, pra não competir com ele. */}
+          {isChanged && !isPendingPush && !editing && (
+            <span
+              className="shrink-0 ml-1.5 w-[6px] h-[6px] rounded-full border border-amber-400/80"
+              title="Changed since the last sync"
             />
           )}
 

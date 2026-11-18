@@ -15,6 +15,7 @@ import {
   ListOrdered,
   Move,
   Pencil,
+  Scissors,
   Trash2,
   X,
 } from 'lucide-react'
@@ -30,6 +31,8 @@ interface Props {
   selectionCount: number
   canPaste: boolean
   onCopy: () => void
+  // Recortar: o próximo colar MOVE os itens em vez de copiar.
+  onCut?: () => void
   // Edita o nome no lugar. Mesmo caminho do F2 — que ninguém descobre sozinho.
   onRename?: () => void
   // Ausente = árvore sem reordenação pelo menu.
@@ -82,6 +85,7 @@ export function TreeContextMenu({
   selectionCount,
   canPaste,
   onCopy,
+  onCut,
   onRename,
   onPaste,
   onPasteBeside,
@@ -221,6 +225,20 @@ export function TreeContextMenu({
           <Copy size={14} className="text-pm-text-muted" />
           Copy{selectionCount > 1 ? ` (${selectionCount})` : ''}
           <span className="ml-auto pl-3 text-[11px] text-pm-text-muted">{isMacPlatform ? '⌘C' : 'Ctrl+C'}</span>
+        </button>
+      )}
+
+      {view === 'main' && targetItem && onCut && (
+        <button
+          onClick={() => {
+            onCut()
+            onClose()
+          }}
+          className={itemClass}
+        >
+          <Scissors size={14} className="text-pm-text-muted" />
+          Cut{selectionCount > 1 ? ` (${selectionCount})` : ''}
+          <span className="ml-auto pl-3 text-[11px] text-pm-text-muted">{isMacPlatform ? '⌘X' : 'Ctrl+X'}</span>
         </button>
       )}
 

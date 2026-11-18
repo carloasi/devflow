@@ -1,5 +1,6 @@
 'use client'
 
+import type { PendingDetail } from './CollectionTree'
 import React, {
   useRef,
   useState,
@@ -35,6 +36,11 @@ interface SidebarProps {
 
   // Collections com alteração local ainda não enviada pro GitHub.
   pendingPushIds?: Set<string>
+  // O que mudou em cada uma delas desde a última sincronização (contagem
+  // no ponto e marca nos itens) — ver lib/syncBase.pendingChanges.
+  pendingChanges?: Map<string, PendingDetail>
+  // Workspace aberto: a árvore lembra filtro e rolagem de cada um.
+  workspaceKey?: string
 
   setCollections: React.Dispatch<
     React.SetStateAction<CollectionItem[]>
@@ -89,6 +95,8 @@ export default function Sidebar({
   markers,
   onMarkersChange,
   pendingPushIds,
+  pendingChanges,
+  workspaceKey,
   focusRequest,
 }: SidebarProps) {
   const { importEnvironment } = useEnvironment()
@@ -590,6 +598,8 @@ export default function Sidebar({
           onPickFolder={onPickFolder}
           collapseAllToken={collapseAllToken}
           pendingPushIds={pendingPushIds}
+          pendingChanges={pendingChanges}
+          workspaceKey={workspaceKey}
           markers={markers}
           onMarkersChange={onMarkersChange}
           focusRequest={focusRequest}

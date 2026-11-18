@@ -42,6 +42,8 @@ import {
   scrollTopToReveal,
   findTypeAheadMatch,
   keepVisibleSelection,
+  rangeIds,
+  activeGuide,
 } from './utils/treeRows'
 import { TreeSearch } from './TreeSearch'
 import { MarkersDialog } from './MarkersDialog'
@@ -70,6 +72,10 @@ import {
   resolvePasteParent,
   countPlaceable,
   topLevelInTreeOrder,
+  moveNodes,
+  restoreMoved,
+  moveNodesInto,
+  rootIdOf,
   pruneExpandedIds,
   captureRemoval,
   restoreRemoved,
@@ -93,7 +99,7 @@ import { ExportFlowHtmlDialog, type ExportFlowHtmlChoice } from './ExportFlowHtm
 import type { ActionMenuView } from './TreeActionMenu'
 import { shortcutFor } from './treeShortcuts'
 import { ImportCurlDialog } from '../SlidePanel/ImportCurlDialog'
-import { copyItemsToClipboard, getClipboardItems, hasClipboardItems } from '@/storage/treeClipboard'
+import { copyItemsToClipboard, cutItemsToClipboard, getCutIds, clearCut, getClipboardItems, hasClipboardItems } from '@/storage/treeClipboard'
 import { useEnvironment } from '@/components/EnvironmentContext'
 import {
   AlertDialog,
@@ -105,6 +111,12 @@ import {
 } from '@/components/ui/alert-dialog'
 import { buildEnvMap } from '@/lib/envMap';
 
+
+/** Pendência de uma collection desde a última sincronização. */
+export interface PendingDetail {
+  count: number
+  changed: ReadonlySet<string>
+}
 
 interface Props {
   items: CollectionItem[]
@@ -131,6 +143,11 @@ interface Props {
   // storage/pendingPushStore). Por ora só o ponto na linha; enviar a
   // collection isolada vem na etapa seguinte.
   pendingPushIds?: Set<string>
+  // Detalhe da pendência por collection: quantas alterações e quais itens
+  // (ver lib/syncBase.pendingChanges). Ausente = só o ponto.
+  pendingChanges?: Map<string, PendingDetail>
+  // Workspace aberto: filtro e rolagem são lembrados por workspace.
+  workspaceKey?: string
   // Catalogo de marcadores do workspace (ver lib/markers.ts). Vem de cima
   // porque e do WORKSPACE, nao da arvore: a mesma lista vale pra todas as
   // collections, e quem a persiste e o AppLayout.
@@ -150,6 +167,7 @@ const FAVORITES_OPEN_STORAGE_KEY = 'devflow_tree_favorites_open'
 const MAX_PERSISTED_EXPANDED = 5000
 // Pausa máxima entre teclas pra continuar a mesma busca por digitação.
 const TYPE_AHEAD_MS = 800
+const VIEW_BY_WORKSPACE_KEY = 'devflow_tree_view_by_workspace'
 
 function loadExpandedIds(): Set<string> {
   try {
@@ -245,6 +263,8 @@ export function CollectionTree({
   onPickFolder,
   collapseAllToken,
   pendingPushIds,
+  pendingChanges,
+  workspaceKey,
   markers,
   onMarkersChange,
   focusRequest,
@@ -261,6 +281,26 @@ export function CollectionTree({
   useEffect(() => {
     itemsRef.current = items
   }, [items])
+
+  // Mover vários (arraste da seleção, recortar e colar): um toast e um Undo
+  // pro grupo inteiro, cada item de volta ao lugar de antes (restoreMoved).
+  const moveGroupWithUndo = useCallback((ids: string[], next: CollectionItem[]): boolean => {
+    if (next === items) return false
+    const before = captureRemoval(items, ids)
+    const moved = before.filter(entry => {
+      const now = positionOf(next, entry.node.id)
+      return !now || now.parentId !== entry.parentId || now.index !== entry.index
+    }).length
+    onUpdateItems(next)
+    toast(moved === 1 ? `Moved "${before[0]?.node.name ?? 'Item'}"` : `Moved ${moved} items`, {
+      action: {
+        label: 'Undo',
+        onClick: () => onUpdateItems(restoreMoved(itemsRef.current, before)),
+      },
+      duration: 5000,
+    })
+    return true
+  }, [items, onUpdateItems])
 
   // Mover com desfazer: menu "Move…" e arraste. O Undo devolve só o item
   // movido ao lugar de antes (restorePosition), sem desfazer o resto.
@@ -283,6 +323,9 @@ export function CollectionTree({
   const [exportHtmlItem, setExportHtmlItem] = useState<CollectionItem | null>(null)
 
   const [activeItem, setActiveItem] = useState<CollectionItem | null>(null)
+  // Os itens arrastados juntos quando o arraste começa numa linha selecionada
+  // (vazio = só o activeItem).
+  const dragNodesRef = useRef<CollectionItem[]>([])
   const [curlDialogParentId, setCurlDialogParentId] = useState<string | null>(null)
   const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null)
 
@@ -320,7 +363,22 @@ export function CollectionTree({
     }
   }, [])
 
+  // De onde o Shift+Click / Shift+seta conta o intervalo: o último item
+  // escolhido com Ctrl+Click ou clique comum.
+  const selectionAnchorRef = useRef<string | null>(null)
+  // Linhas visíveis atuais, pros handlers estáveis abaixo (flatRows vem
+  // depois no corpo do componente).
+  const visibleIdsRef = useRef<Array<{ id: string }>>([])
+
+  const handleRangeSelect = useCallback((id: string) => {
+    const range = rangeIds(visibleIdsRef.current, selectionAnchorRef.current, id)
+    if (range.length === 0) return
+    selectionAnchorRef.current ??= id
+    setSelectedIds(new Set(range))
+  }, [])
+
   const handleToggleSelect = useCallback((id: string) => {
+    selectionAnchorRef.current = id
     setSelectedIds(prev => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -392,10 +450,45 @@ export function CollectionTree({
     const nodes = topLevelInTreeOrder(items, ids)
     if (nodes.length === 0) return 0
     copyItemsToClipboard(nodes)
+    setCutIds(prev => (prev.size === 0 ? prev : new Set()))
     return nodes.length
   }, [items, selectedIds])
 
-  // Reordenar pelo menu de contexto. O que pode ser feito é calculado na
+  // Recortar (Ctrl+X): o próximo colar MOVE estes itens (ver pasteCut). As
+  // linhas recortadas ficam esmaecidas até lá.
+  const [cutIds, setCutIds] = useState<ReadonlySet<string>>(() =>
+    typeof window === 'undefined' ? new Set() : new Set(getCutIds())
+  )
+  const cutItems = useCallback((fallbackId?: string | null): number => {
+    const ids = selectedIds.size > 0 ? Array.from(selectedIds) : fallbackId ? [fallbackId] : []
+    const nodes = topLevelInTreeOrder(items, ids)
+    if (nodes.length === 0) return 0
+    cutItemsToClipboard(nodes)
+    setCutIds(new Set(nodes.map(n => n.id)))
+    toast.success(`${nodes.length} item${nodes.length === 1 ? '' : 's'} cut. Paste to move.`)
+    return nodes.length
+  }, [items, selectedIds])
+
+  // Colar de um recorte: move os originais em vez de copiar. null = não há
+  // recorte valendo (nada recortado, ou os originais não estão nesta
+  // árvore — aí o colar segue como cópia, do que ficou no clipboard).
+  const pasteCut = useCallback((place: (ids: string[]) => CollectionItem[]): boolean | null => {
+    const present = getCutIds().filter(id => findNodeById(items, id))
+    if (present.length === 0) {
+      clearCut()
+      setCutIds(prev => (prev.size === 0 ? prev : new Set()))
+      return null
+    }
+    if (!moveGroupWithUndo(present, place(present))) {
+      toast.error("Can't move here. Collections only hold folders, and requests can't go inside a request.")
+      return false
+    }
+    clearCut()
+    setCutIds(new Set())
+    return true
+  }, [items, moveGroupWithUndo])
+
+  // Reordenar pelo menu de contexto.) O que pode ser feito é calculado na
   // abertura do menu, pra que as entradas impossíveis nasçam desabilitadas em
   // vez de não fazer nada ao serem clicadas.
   const buildMoveActions = useCallback((id: string) => ({
@@ -619,11 +712,12 @@ export function CollectionTree({
     // Sobre um example, "o pai" é a request dona — colar requests ali as
     // punha entre os examples (ver resolvePasteParent).
     const parentId = resolvePasteParent(items, target, clipboardItems)
+    if (pasteCut(ids => moveNodesInto(items, ids, parentId)) !== null) return true
     const fits = countPlaceable(items, parentId, clipboardItems)
     if (fits > 0) actions.pasteItems(parentId, clipboardItems)
     reportPasteSkips(clipboardItems.length, fits, parentId === null)
     return true
-  }, [items, actions])
+  }, [items, actions, pasteCut])
 
   const handlePaste = useCallback(() => {
     if (!contextMenu) return
@@ -644,11 +738,12 @@ export function CollectionTree({
     }
     const parentId = findParentId(items, anchorId)
     if (parentId === undefined) return false
+    if (pasteCut(ids => moveNodes(items, ids, anchorId, position)) !== null) return true
     const fits = countPlaceable(items, parentId, clipboardItems)
     if (fits > 0) actions.pasteItemsBeside(anchorId, clipboardItems, position)
     reportPasteSkips(clipboardItems.length, fits, parentId === null)
     return true
-  }, [items, actions])
+  }, [items, actions, pasteCut])
 
   const handlePasteBeside = useCallback((position: 'before' | 'after') => {
     if (!contextMenu?.item) return
@@ -847,6 +942,28 @@ export function CollectionTree({
     else setExpandedIds(prev => apply(prev, open))
   }, [isSearching])
 
+  // Fecha o nó e tudo o que está aberto dentro dele (Shift+←).
+  const collapseSubtree = useCallback((id: string) => {
+    const node = findNodeById(items, id)
+    if (!node) return
+    const inside = collectExpandableIds([node])
+    inside.add(id)
+    if (isSearching) {
+      setSearchCollapsedIds(prev => {
+        const next = new Set(prev)
+        inside.forEach(x => next.add(x))
+        return next
+      })
+    } else {
+      setExpandedIds(prev => {
+        if (![...inside].some(x => prev.has(x))) return prev
+        const next = new Set(prev)
+        inside.forEach(x => next.delete(x))
+        return next
+      })
+    }
+  }, [items, isSearching])
+
   // O que está visível, achatado na ordem da tela (ver treeRows).
   const flatRows = useMemo(
     () => flattenVisibleTree(uniqueFilteredItems, effectiveExpandedIds),
@@ -859,6 +976,7 @@ export function CollectionTree({
 
   // Selecionado é só o que está na tela (ver keepVisibleSelection).
   useEffect(() => {
+    visibleIdsRef.current = flatRows.map(r => ({ id: r.item.id }))
     setSelectedIds(prev => keepVisibleSelection(prev, rowIndexById) as Set<string>)
   }, [rowIndexById])
 
@@ -907,6 +1025,25 @@ export function CollectionTree({
    */
   const [focusedId, setFocusedId] = useState<string | null>(null)
   const [treeFocused, setTreeFocused] = useState(false)
+
+  // Guia realçada: a da pasta da linha com foco (ou da aba ativa).
+  const guide = useMemo(() => {
+    const id = focusedId ?? activeRequestId
+    const index = id ? rowIndexById.get(id) ?? -1 : -1
+    return activeGuide(flatRows, index)
+  }, [focusedId, activeRequestId, rowIndexById, flatRows])
+
+  // Caminho até a aba ativa, mostrado acima da árvore. Cada parte leva ao
+  // item na árvore.
+  const breadcrumb = useMemo(() => {
+    if (!activeRequestId) return null
+    const path = findPathToItem(items, activeRequestId)
+    if (!path) return null
+    return [...path, activeRequestId]
+      .map(id => findNodeById(items, id))
+      .filter((n): n is CollectionItem => !!n)
+  }, [items, activeRequestId])
+
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CollectionItem[] | null>(null)
   // Achados de credencial literal (JWT, Bearer...) antes de um Export —
@@ -924,6 +1061,7 @@ export function CollectionTree({
   // os itens selecionados lá atrás, não a linha recém-clicada.
   const handleRowFocus = useCallback((id: string, plainClick?: boolean) => {
     setFocusedId(id)
+    if (plainClick) selectionAnchorRef.current = id
     if (plainClick) setSelectedIds(prev => (prev.size > 0 ? new Set() : prev))
   }, [])
   const typeAheadRef = useRef({ buffer: '', at: 0 })
@@ -950,6 +1088,86 @@ export function CollectionTree({
     const next = visibleRange(el.scrollTop, el.clientHeight, flatRows.length)
     setRange(prev => (prev.start === next.start && prev.end === next.end ? prev : next))
   }, [flatRows.length])
+
+  // Itens mudados desde a última sincronização, de todas as collections.
+  const changedIds = useMemo(() => {
+    const all = new Set<string>()
+    pendingChanges?.forEach(detail => detail.changed.forEach(id => all.add(id)))
+    return all
+  }, [pendingChanges])
+
+  // Filtro e rolagem por workspace: trocar de workspace e voltar devolve a
+  // árvore como estava. Guardado no localStorage (uma entrada por
+  // workspace); sem storage, só não lembra.
+  const pendingScrollRef = useRef<number | null>(null)
+  const applyPendingScroll = () => {
+    const el = scrollRef.current
+    const top = pendingScrollRef.current
+    if (!el || top === null || (top > 0 && el.scrollHeight <= el.clientHeight)) return
+    pendingScrollRef.current = null
+    el.scrollTop = top
+    updateRange()
+  }
+  const viewByWorkspaceRef = useRef<Record<string, { search: string; scrollTop: number }> | null>(null)
+  const shownWorkspaceRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (viewByWorkspaceRef.current === null) {
+      try {
+        viewByWorkspaceRef.current = JSON.parse(localStorage.getItem(VIEW_BY_WORKSPACE_KEY) ?? '{}') ?? {}
+      } catch {
+        viewByWorkspaceRef.current = {}
+      }
+    }
+    const views = viewByWorkspaceRef.current!
+    const previous = shownWorkspaceRef.current
+    if (previous === workspaceKey) return
+    if (previous) {
+      views[previous] = { search, scrollTop: scrollRef.current?.scrollTop ?? 0 }
+      try {
+        localStorage.setItem(VIEW_BY_WORKSPACE_KEY, JSON.stringify(views))
+      } catch {
+        // sem storage: só não lembra
+      }
+    }
+    shownWorkspaceRef.current = workspaceKey
+    if (!workspaceKey) return
+    const saved = views[workspaceKey]
+    setSearch(saved?.search ?? '')
+    // A rolagem só vale depois que as linhas do workspace novo estão lá: as
+    // collections dele chegam do disco depois da troca (ver o efeito em
+    // `items` abaixo). O rAF cobre o caso de elas já estarem carregadas.
+    pendingScrollRef.current = saved?.scrollTop ?? 0
+    requestAnimationFrame(() => requestAnimationFrame(applyPendingScroll))
+    // Só a troca de workspace dispara: search/updateRange mudam o tempo todo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceKey])
+
+  useEffect(() => {
+    if (items.length > 0) requestAnimationFrame(applyPendingScroll)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
+
+  // Ao fechar o app (ou a árvore desmontar), grava a vista do workspace atual.
+  const searchRef = useRef(search)
+  searchRef.current = search
+  useEffect(() => {
+    const save = () => {
+      const key = shownWorkspaceRef.current
+      const views = viewByWorkspaceRef.current
+      if (!key || !views) return
+      views[key] = { search: searchRef.current, scrollTop: scrollRef.current?.scrollTop ?? 0 }
+      try {
+        localStorage.setItem(VIEW_BY_WORKSPACE_KEY, JSON.stringify(views))
+      } catch {
+        // sem storage: só não lembra
+      }
+    }
+    window.addEventListener('beforeunload', save)
+    return () => {
+      save()
+      window.removeEventListener('beforeunload', save)
+    }
+  }, [])
 
   useEffect(() => {
     updateRange()
@@ -1167,13 +1385,30 @@ export function CollectionTree({
       if (found >= 0) move(found)
     }
 
+    // Shift+seta: estende a seleção da âncora até a linha nova.
+    const moveAndExtend = (to: number) => {
+      const target = rows[Math.max(0, Math.min(rows.length - 1, to))]
+      if (!target) return
+      const anchor = selectionAnchorRef.current ?? current?.id ?? target.id
+      selectionAnchorRef.current = anchor
+      setFocusedId(target.id)
+      setSelectedIds(new Set(rangeIds(rows, anchor, target.id)))
+    }
+
     let handled = true
     switch (e.key) {
       case 'ArrowDown':
-        move(idx < 0 ? 0 : idx + 1)
+        if (e.shiftKey && !folderPickMode) moveAndExtend(idx < 0 ? 0 : idx + 1)
+        else move(idx < 0 ? 0 : idx + 1)
         break
       case 'ArrowUp':
-        move(idx < 0 ? 0 : idx - 1)
+        if (e.shiftKey && !folderPickMode) moveAndExtend(idx < 0 ? 0 : idx - 1)
+        else move(idx < 0 ? 0 : idx - 1)
+        break
+      case ' ':
+        // Espaço marca/desmarca a linha com foco, como o Ctrl+Click.
+        if (node && !folderPickMode) handleToggleSelect(node.id)
+        else handled = false
         break
       case 'Home':
         move(0)
@@ -1188,6 +1423,16 @@ export function CollectionTree({
         break
       case 'ArrowLeft': {
         if (!node) break
+        if (e.shiftKey) {
+          // Shift+←: fecha a collection inteira do item (ela e tudo o que
+          // está aberto dentro) e põe o foco nela.
+          const rootId = rootIdOf(items, node.id)
+          if (rootId) {
+            collapseSubtree(rootId)
+            setFocusedId(rootId)
+          }
+          break
+        }
         if (canExpand && isOpen) {
           setExpanded(node.id, false)
         } else {
@@ -1223,6 +1468,16 @@ export function CollectionTree({
         if (mod && e.key.toLowerCase() === 'c' && !folderPickMode) {
           const count = copyItems(node?.id)
           if (count > 0) toast.success(`${count} item${count === 1 ? '' : 's'} copied`)
+        } else if (mod && e.key.toLowerCase() === 'x' && !folderPickMode) {
+          cutItems(node?.id)
+        } else if (mod && e.key.toLowerCase() === 'a' && !folderPickMode) {
+          // Ctrl+A: todos os irmãos visíveis da linha com foco.
+          if (current) {
+            const parentId = findParentId(items, current.id) ?? null
+            const siblings = flatRows.filter(r => r.parentId === parentId).map(r => r.item.id)
+            setSelectedIds(new Set(siblings))
+            selectionAnchorRef.current = siblings[0] ?? null
+          }
         } else if (mod && e.key.toLowerCase() === 'v' && !folderPickMode) {
           if (!pasteInto(node)) toast.info('Nothing to paste')
         } else if (mod && e.key.toLowerCase() === 'd' && !folderPickMode) {
@@ -1284,7 +1539,7 @@ export function CollectionTree({
     }
   }, [
     getVisibleRows, focusedId, uniqueFilteredItems, effectiveExpandedIds, setExpanded, items,
-    folderPickMode, onPickFolder, onRequestSelect, copyItems, pasteInto, actions, actionsWithImport, onRunItem,
+    folderPickMode, onPickFolder, onRequestSelect, copyItems, cutItems, pasteInto, flatRows, handleToggleSelect, collapseSubtree, actions, actionsWithImport, onRunItem,
     // selectedIds saiu: quem o lê agora é o deleteTargets, que já o captura.
     deleteTargets,
   ])
@@ -1339,6 +1594,12 @@ export function CollectionTree({
 
   const handleDragStart = (event: DragStartEvent) => {
     const node = findNodeById(uniqueFilteredItems, event.active.id as string) ?? null
+    // Arrastar uma linha que faz parte da seleção leva a seleção inteira
+    // (só os de cima — o que está dentro vai junto). Fora dela, só a linha.
+    dragNodesRef.current =
+      node && selectedIds.has(node.id) && selectedIds.size > 1
+        ? topLevelInTreeOrder(items, selectedIds)
+        : []
     setActiveItem(node)
     setDropIndicator(null)
     const activator = event.activatorEvent as PointerEvent
@@ -1371,6 +1632,10 @@ export function CollectionTree({
       setDropIndicator(null)
       return
     }
+    // Com seleção, arrasta o grupo: as linhas de TODOS os arrastados (e o
+    // que está dentro deles) saem dos alvos possíveis.
+    const dragNodes = dragNodesRef.current.length ? dragNodesRef.current : [dragged]
+    const inDragged = (id: string) => dragNodes.some((n) => isDescendantOf(n, id))
 
     // Hit-test pela LISTA de linhas (flatRows), não pelo DOM: com a árvore
     // desenhada só na janela do scroll, as linhas acima da tela não existem
@@ -1387,7 +1652,7 @@ export function CollectionTree({
     const hitRowAll = flatRows[rawIndex]
     // Fora de qualquer linha (abaixo da última) ou em cima da própria
     // subárvore arrastada — sem indicador.
-    if (!hitRowAll || isDescendantOf(dragged, hitRowAll.item.id)) {
+    if (!hitRowAll || inDragged(hitRowAll.item.id)) {
       setDropIndicator(null)
       return
     }
@@ -1395,7 +1660,7 @@ export function CollectionTree({
     // As linhas da própria subárvore arrastada saem da lista: elas não são
     // alvo válido (moveNode recusaria o ciclo) e, como vizinhas, bagunçariam
     // o cálculo de nível abaixo — o item arrastado não vai estar ali no fim.
-    const rows = flatRows.filter((row) => !isDescendantOf(dragged, row.item.id))
+    const rows = flatRows.filter((row) => !inDragged(row.item.id))
     const hit = rows.indexOf(hitRowAll)
     const hitId = hitRowAll.item.id
     const relativeY = offsetY - rawIndex * TREE_ROW_HEIGHT
@@ -1514,6 +1779,7 @@ export function CollectionTree({
   // não saía do body e o traço voltava a seguir o mouse até o próximo
   // arraste.
   const resetDrag = () => {
+    dragNodesRef.current = []
     setActiveItem(null)
     setDropIndicator(null)
     pointerYRef.current = null
@@ -1524,6 +1790,7 @@ export function CollectionTree({
   const handleDragEnd = (event: DragEndEvent) => {
     const { active } = event
     const indicator = dropIndicator
+    const group = dragNodesRef.current
 
     resetDrag()
 
@@ -1533,6 +1800,12 @@ export function CollectionTree({
 
     const targetId = indicator.targetId ?? indicator.id
     if (active.id === targetId) return
+
+    if (group.length > 1) {
+      const ids = group.map((n) => n.id)
+      moveGroupWithUndo(ids, moveNodes(items, ids, targetId, indicator.targetPosition ?? indicator.position))
+      return
+    }
 
     const updated = moveNode(
       items,
@@ -1546,6 +1819,29 @@ export function CollectionTree({
   return (
     <div className="h-full flex flex-col pb-2"> 
       <TreeSearch value={search} onChange={setSearch} onArrowDown={focusTree} />
+
+      {/* Onde está a aba aberta: Collection › Pasta › Request. Cada parte
+          leva até o item na árvore (abre as pastas e rola até ele). */}
+      {breadcrumb && breadcrumb.length > 1 && !folderPickMode && (
+        <nav
+          aria-label="Open item location"
+          className="flex items-center gap-0.5 px-3 pb-1 text-[11px] text-pm-text-muted min-w-0 overflow-hidden"
+        >
+          {breadcrumb.map((node, i) => (
+            <span key={node.id} className={`flex items-center gap-0.5 ${i === breadcrumb.length - 1 ? 'min-w-0 shrink' : 'min-w-0 shrink-[2]'}`}>
+              {i > 0 && <ChevronRight size={10} className="shrink-0 opacity-60" />}
+              <button
+                type="button"
+                onClick={() => focusItemById(node.id)}
+                title={node.name}
+                className={`truncate hover:text-pm-text hover:underline cursor-pointer ${i === breadcrumb.length - 1 ? 'text-pm-text-secondary' : ''}`}
+              >
+                {node.name}
+              </button>
+            </span>
+          ))}
+        </nav>
+      )}
 
       {/* Barra de marcadores: só os que estão em uso, logo abaixo da busca.
           Chip aceso = filtrando. Vários acesos é OU — "flaky ou smoke" é o
@@ -1715,13 +2011,18 @@ export function CollectionTree({
                         setSize={row.setSize}
                         isActive={activeRequestId === id}
                         isSelected={selectedIds.has(id)}
+                        isCut={cutIds.has(id)}
+                        activeGuideLevel={guide && index >= guide.start && index < guide.end ? guide.level : undefined}
                         isFocused={treeFocused && focusedId === id}
                         isPendingPush={row.depth === 0 ? pendingPushIds?.has(id) : undefined}
+                        pendingCount={row.depth === 0 ? pendingChanges?.get(id)?.count : undefined}
+                        isChanged={row.depth > 0 && changedIds.has(id)}
                         totalRequests={row.depth === 0 && isSearching ? rootRequestTotals.get(id) : undefined}
                         onRequestSelect={handleRowSelect}
                         actions={actionsWithImport}
                         dropIndicator={dropIndicator?.id === id ? dropIndicator : null}
                         onToggleSelect={handleToggleSelect}
+                        onRangeSelect={handleRangeSelect}
                         onRowContextMenu={handleRowContextMenu}
                         onSetExpanded={setExpanded}
                         onRowFocus={handleRowFocus}
@@ -1795,6 +2096,11 @@ export function CollectionTree({
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {activeItem.name}
                   </span>
+                  {dragNodesRef.current.length > 1 && (
+                    <span className="ml-auto shrink-0 rounded px-1 text-[10px] font-semibold" style={{ background: "#3c89e0", color: "#fff" }}>
+                      {dragNodesRef.current.length} items
+                    </span>
+                  )}
                 </div>
               )}
             </DragOverlay>
@@ -1822,6 +2128,7 @@ export function CollectionTree({
           selectionCount={selectionCount}
           canPaste={contextMenu.canPaste}
           onCopy={() => handleCopySelected(contextMenu.item?.id)}
+          onCut={folderPickMode ? undefined : () => cutItems(contextMenu.item?.id)}
           onRename={
             contextMenu.item ? () => setRenamingId(contextMenu.item!.id) : undefined
           }

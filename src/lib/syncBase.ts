@@ -277,3 +277,40 @@ export function matchesSyncBase(base: NodeHashes | null, root: CollectionItem | 
   }
   return true;
 }
+
+/**
+ * O que mudou na collection desde a última sincronização: os nós
+ * alterados ou criados (ids) e quantos a base tinha nela e sumiram. Serve
+ * ao ponto de pendência da árvore, que até então só dizia "tem algo".
+ * Sem base, ou base que não conhece a collection: null (não dá pra dizer).
+ */
+export function pendingChanges(
+  base: NodeHashes | null,
+  root: CollectionItem | undefined
+): { changed: string[]; deleted: number } | null {
+  if (!base || !root?.id || base[root.id] === undefined) return null;
+
+  const changed: string[] = [];
+  const present = new Set<string>();
+  const walk = (node: CollectionItem, parentId: string) => {
+    present.add(node.id);
+    const own = changedSinceBase(base, node.id, node) === true;
+    const order = node.item?.length ? JSON.stringify(node.item.map(c => c.id)) : undefined;
+    const moved =
+      base[node.id] !== undefined &&
+      ((base[fieldHashKey(node.id, PARENT_FIELD)] ?? '') !== parentId ||
+        (base[fieldHashKey(node.id, ORDER_FIELD)] ?? undefined) !== order);
+    const fields = Object.entries(fieldHashesOf(node)).some(([k, v]) => base[k] !== v);
+    if (own || moved || fields) changed.push(node.id);
+    node.item?.forEach(child => walk(child, node.id));
+  };
+  walk(root, '');
+
+  const suffix = `#${ROOT_FIELD}`;
+  let deleted = 0;
+  for (const [key, value] of Object.entries(base)) {
+    if (value !== root.id || !key.endsWith(suffix)) continue;
+    if (!present.has(key.slice(0, -suffix.length))) deleted++;
+  }
+  return { changed, deleted };
+}
