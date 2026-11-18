@@ -1,7 +1,7 @@
 'use client'
 
-import { Fragment, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ArrowDown, ArrowUp, PencilLine, Undo2 } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { AlertTriangle, ArrowDown, ArrowUp, ExternalLink, PencilLine, Undo2 } from 'lucide-react'
 import {
   chunkResult,
   composeMerge,
@@ -46,6 +46,16 @@ interface Props {
    * só o que se vê no Resultado — nada é aplicado, e não há edição à mão.
    */
   simulation?: boolean
+  /**
+   * Simulação: leva pra revisão de verdade, com este campo já em edição à
+   * mão (ver lib/sync/reviewEditHint). Sem isto, a simulação não oferece
+   * edição — o texto dela é mascarado/cortado.
+   */
+  onEditInReview?: () => void
+  /** Abre já editando o resultado à mão (pedido pelo "Editar na revisão"). */
+  startEditing?: boolean
+  /** Avisa que o pedido de `startEditing` foi atendido (ou não cabia). */
+  onStartedEditing?: () => void
 }
 
 const NONE: ChunkPick = { theirs: false, mine: false }
@@ -88,7 +98,10 @@ function Line({ n, text, tone = '', gutter }: { n?: number; text?: string; tone?
   )
 }
 
-export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly, crlf, onPicks, onManualText, onBackToBoxes, simulation = false }: Props) {
+export function ThreeWayMergeView({
+  chunks, picks, manualText, twoWay, readOnly, crlf, onPicks, onManualText, onBackToBoxes,
+  simulation = false, onEditInReview, startEditing = false, onStartedEditing,
+}: Props) {
   const t = useSyncDiffStrings()
   // Largura de cada coluna (GitHub | sua versão), guardada entre aberturas.
   const split = useSplitRatio('devflow_merge_columns', 0.5, { minLeft: 140, minRight: 140 })
@@ -104,6 +117,38 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
   const composed = composeMerge(chunks, current, crlf)
   const unresolved = manual ? 0 : composed.unresolved
   const autoJoined = chunks.filter(c => c.kind === 'theirs' || c.kind === 'mine').length
+
+  // Edição à mão do resultado: pra acrescentar algo que nenhum dos lados tem,
+  // ou quando o merge fica complexo demais pras caixinhas. Começa do que as
+  // caixinhas montaram até aqui.
+  const canEditByHand = !readOnly && !simulation
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const focusTextarea = useRef(false)
+  const editByHand = () => {
+    if (!canEditByHand || manual) return
+    focusTextarea.current = true
+    onManualText(composed.text)
+  }
+  useEffect(() => {
+    if (!manual || !focusTextarea.current) return
+    focusTextarea.current = false
+    textareaRef.current?.focus()
+  }, [manual])
+
+  // "Editar na revisão" chegou aqui: entra em edição uma vez, se der (item em
+  // Minha sem poder virar Merge fica só leitura — aí só avisa que tentou).
+  const startedRef = useRef(false)
+  useEffect(() => {
+    if (!startEditing || startedRef.current) return
+    startedRef.current = true
+    if (canEditByHand && !manual) {
+      focusTextarea.current = true
+      onManualText(composed.text)
+    }
+    onStartedEditing?.()
+    // Uma vez por pedido; composed/manual mudam a cada tecla.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startEditing])
 
   // Número da primeira linha de cada trecho, em cada lado e no resultado.
   const numbers = useMemo(() => {
@@ -162,6 +207,8 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
     <button
       type="button"
       onClick={() => expand(key)}
+      // Expandir linhas no Resultado não é pedir pra editá-lo.
+      onDoubleClick={e => e.stopPropagation()}
       className="w-full py-0.5 text-center text-[10px] italic text-pm-text-muted/70 bg-pm-hover/30 hover:text-pm-text cursor-pointer border-none"
     >
       {t.mvShowLines(hidden)}
@@ -293,21 +340,28 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
         <span className="rounded px-1 bg-pm-hover text-pm-text-secondary font-semibold">{t.mvResult}</span>
         <span className="text-pm-text-muted">{t.mvResultSub}</span>
         <span className="flex-1" />
-        {!readOnly && !simulation && (manual ? (
+        {canEditByHand && (manual ? (
           <button type="button" onClick={onBackToBoxes}
             className="flex items-center gap-1 text-pm-text-muted hover:text-pm-text cursor-pointer">
             <Undo2 size={10} /> {t.mvBackToBoxes}
           </button>
         ) : (
-          <button type="button" onClick={() => onManualText(composed.text)}
-            className="flex items-center gap-1 text-pm-text-muted hover:text-pm-text cursor-pointer">
+          <button type="button" onClick={editByHand} title={t.mvEditResultTitle}
+            className="flex items-center gap-1 rounded border border-pm-border px-1.5 py-px text-pm-text-secondary hover:bg-pm-hover hover:text-pm-text cursor-pointer">
             <PencilLine size={10} /> {t.mvEditResult}
           </button>
         ))}
+        {simulation && onEditInReview && (
+          <button type="button" onClick={onEditInReview} title={t.mvEditInReviewTitle}
+            className="flex items-center gap-1 rounded border border-pm-border px-1.5 py-px text-pm-text-secondary hover:bg-pm-hover hover:text-pm-text cursor-pointer">
+            <ExternalLink size={10} /> {t.mvEditInReview}
+          </button>
+        )}
       </div>
       {manual ? (
         <div className="p-1.5">
           <textarea
+            ref={textareaRef}
             value={manualText}
             onChange={e => onManualText(e.target.value)}
             readOnly={readOnly}
@@ -318,7 +372,13 @@ export function ThreeWayMergeView({ chunks, picks, manualText, twoWay, readOnly,
           <p className="mt-0.5 text-[10px] text-pm-text-muted/70">{t.mvManualNote}</p>
         </div>
       ) : (
-        <div className="font-mono text-[10.5px] leading-[17px] text-pm-text">
+        <div
+          className={`font-mono text-[10.5px] leading-[17px] text-pm-text ${canEditByHand ? 'cursor-text' : ''}`}
+          // Duplo clique, não clique: um clique pra selecionar/copiar um
+          // trecho não pode tirar o campo das caixinhas sem querer.
+          onDoubleClick={canEditByHand ? editByHand : undefined}
+          title={canEditByHand ? t.mvEditResultTitle : undefined}
+        >
           {blocks.map(block => {
             if (block.type === 'stable') {
               const { head, hidden, tail } = visibleStable(block)

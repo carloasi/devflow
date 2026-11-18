@@ -164,6 +164,10 @@ const en = {
   mvUnresolved: 'Unresolved conflict — tick one side above',
   mvTwoWay: 'No last synced version to compare with: every difference needs your decision.',
   mvEditResult: 'Edit result',
+  mvEditResultTitle: 'Type the result by hand — to add something or untangle a complex merge (or double-click the result)',
+  mvEditInReview: 'Edit in the review',
+  mvEditInReviewTitle:
+    'This window is a preview: secrets are masked and long text is cut, so it cannot be edited here. Opens the merge review on this item, with the result ready to edit.',
   mvBackToBoxes: 'Back to the checkboxes',
   mvManualNote: 'Edited by hand — the checkboxes no longer apply.',
   mvShowLines: (n: number) => `Show ${n} unchanged line(s)`,
@@ -615,6 +619,10 @@ const ptBR: SyncDiffStrings = {
   mvUnresolved: 'Conflito sem decisão — marque um dos lados acima',
   mvTwoWay: 'Sem a versão da última sincronização pra comparar: toda diferença precisa da sua decisão.',
   mvEditResult: 'Editar resultado',
+  mvEditResultTitle: 'Digitar o resultado à mão — pra acrescentar algo ou desatar um merge complexo (ou dê duplo clique no resultado)',
+  mvEditInReview: 'Editar na revisão',
+  mvEditInReviewTitle:
+    'Esta janela é uma prévia: segredos aparecem mascarados e texto longo é cortado, então não dá pra editar aqui. Abre a revisão do merge neste item, com o resultado pronto pra editar.',
   mvBackToBoxes: 'Voltar às caixinhas',
   mvManualNote: 'Editado à mão — as caixinhas deixaram de valer.',
   mvShowLines: (n: number) => `Mostrar ${n} linha(s) sem mudança`,

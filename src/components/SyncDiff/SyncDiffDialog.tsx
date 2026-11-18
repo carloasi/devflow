@@ -45,6 +45,7 @@ import {
   type MergeChunk,
 } from '@/lib/sync/mergeChunks'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
+import { takeReviewEdit, type ReviewEditHint } from '@/lib/sync/reviewEditHint'
 import { REST, restOf } from '@/lib/sync/fieldMerge'
 import { sameContent } from '@/lib/canonicalCompare'
 import { useSyncDiffStrings, type SyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
@@ -849,6 +850,21 @@ export function SyncDiffDialog({
 
   const [focusedId, setFocusedId] = useState<string | null>(null)
 
+  // "Editar na revisão" da janela de diferença (simulação): abre já no item
+  // e com o resultado do campo em edição à mão — aqui, sobre os valores
+  // reais (lá eles vêm mascarados/cortados; ver lib/sync/reviewEditHint).
+  const [reviewEdit, setReviewEdit] = useState<ReviewEditHint | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const hint = takeReviewEdit(id => nodes.some(n => n.id === id))
+    if (!hint) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- recado de fora (store de módulo), lido uma vez por abertura
+    setFocusedId(hint.itemId)
+    setReviewEdit(hint)
+    // Uma vez por abertura (openKey muda a cada comparação nova).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, openKey])
+
   // Texto das caixas de resultado, por nó e campo. Guardado como TEXTO, não
   // como valor: enquanto o JSON está pela metade ele não converte, e perder o
   // que foi digitado a cada tecla inválida tornaria a edição inviável.
@@ -1197,6 +1213,8 @@ export function SyncDiffDialog({
         onPicks={next => pickChunks(node, field.field, chunks, next, crlf)}
         onManualText={text => editMergeResult(node, field.field, text)}
         onBackToBoxes={() => pickChunks(node, field.field, chunks, defaultPicks(chunks), crlf)}
+        startEditing={reviewEdit?.itemId === node.id && reviewEdit.field === field.field}
+        onStartedEditing={() => setReviewEdit(null)}
       />
     )
   }

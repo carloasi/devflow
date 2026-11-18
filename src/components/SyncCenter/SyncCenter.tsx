@@ -18,6 +18,7 @@ import { useDraggableDialog } from '@/components/helper/useDraggableDialog'
 import { useResizableDialog, type ResizeEdge } from '@/components/helper/useResizableDialog'
 import { DevFlowLoader, DevFlowMark, DevFlowSpinner, ProgressStrip } from '@/components/helper/DevFlowLoader'
 import { openMergeDiff } from '@/lib/sync/mergeDiffStore'
+import { requestReviewEdit } from '@/lib/sync/reviewEditHint'
 import {
   closeSyncCenter,
   isSyncCenterBusy,
@@ -1037,6 +1038,16 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
             onSelect={id => {
               diffSelectedRef.current = id
             }}
+            // Conflito se resolve na revisão do merge: "Editar na revisão"
+            // abre ela (o mesmo "Resolver" da aba) já editando este campo.
+            onEditInReview={
+              busy
+                ? undefined
+                : (itemId, field) => {
+                    requestReviewEdit({ itemId, field })
+                    void run('resolve')
+                  }
+            }
           />
         </>
       ) : (

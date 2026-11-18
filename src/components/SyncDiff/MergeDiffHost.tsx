@@ -5,6 +5,7 @@ import { X } from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 import { closeMergeDiff, useMergeDiff, type MergeDiffRequest } from '@/lib/sync/mergeDiffStore'
+import { requestReviewEdit } from '@/lib/sync/reviewEditHint'
 import { defaultPicks, mergeChunks, type ChunkPick } from '@/lib/sync/mergeChunks'
 import type { RemoteChangeItem, RemoteFieldPreview } from '@/lib/sync/remoteChangeAlert'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
@@ -30,7 +31,7 @@ const BADGE: Record<string, string> = {
   reordered: 'bg-pm-hover text-pm-text-secondary',
 }
 
-function FieldDiff({ field }: { field: RemoteFieldPreview }) {
+function FieldDiff({ field, onEditInReview }: { field: RemoteFieldPreview; onEditInReview?: () => void }) {
   const t = useSyncDiffStrings()
   const twoWay = field.base === undefined || field.base === null
   const chunks = useMemo(
@@ -54,6 +55,7 @@ function FieldDiff({ field }: { field: RemoteFieldPreview }) {
         readOnly={false}
         crlf={field.before.includes('\r\n')}
         simulation
+        onEditInReview={onEditInReview}
         onPicks={setPicks}
         onManualText={() => {}}
         onBackToBoxes={() => setPicks(defaultPicks(chunks))}
@@ -71,11 +73,17 @@ export function MergeDiffPanel({
   items,
   focusId,
   onSelect,
+  onEditInReview,
 }: {
   items: RemoteChangeItem[]
   focusId?: string
   /** Avisa qual item está aberto (a Central o leva pra janela separada). */
   onSelect?: (id: string) => void
+  /**
+   * "Editar na revisão" de um campo — só nos itens em CONFLITO, que são os
+   * que a revisão do merge abre pra decidir. Ausente = sem o botão.
+   */
+  onEditInReview?: (itemId: string, field: string) => void
 }) {
   const t = useSyncDiffStrings()
   const [selectedId, setSelected] = useState<string | null>(
@@ -131,7 +139,15 @@ export function MergeDiffPanel({
               {selected.fields.length === 0 ? (
                 <p className="text-[11px] text-pm-text-muted">{t.mdNoFields}</p>
               ) : (
-                selected.fields.map(field => <FieldDiff key={`${selected.id}:${field.field}`} field={field} />)
+                selected.fields.map(field => (
+                  <FieldDiff
+                    key={`${selected.id}:${field.field}`}
+                    field={field}
+                    onEditInReview={
+                      onEditInReview && selected.conflict ? () => onEditInReview(selected.id, field.field) : undefined
+                    }
+                  />
+                ))
               )}
             </div>
           ) : null}
@@ -163,7 +179,21 @@ function MergeDiffBody({ request }: { request: MergeDiffRequest }) {
         {t.mdSimulation}
       </div>
 
-      <MergeDiffPanel items={request.items} focusId={request.focusId} />
+      <MergeDiffPanel
+        items={request.items}
+        focusId={request.focusId}
+        // A ação de quem abriu (o "Resolver agora" do aviso) é o Pull com
+        // revisão: deixa o recado de qual campo editar e segue por ela.
+        onEditInReview={
+          request.action
+            ? (itemId, field) => {
+                requestReviewEdit({ itemId, field })
+                closeMergeDiff()
+                request.action!.onClick()
+              }
+            : undefined
+        }
+      />
 
       <div className="shrink-0 flex items-center justify-end gap-2 px-4 py-2.5 border-t border-pm-border">
         <button
