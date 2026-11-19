@@ -143,6 +143,7 @@ import type { PendingDetail } from '@/components/collection-tree/CollectionTree'
 import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
+import { mergeTabSave } from '@/lib/sync/tabSaveMerge';
 import { exampleNameFor } from '@/lib/exampleName';
 import { withLocalOnlyValues } from '@/lib/sync/pulledEnvironments';
 import { buildSyncOverview, namePathTo, withContentPreviews, type SyncOverview } from '@/lib/sync/syncOverview';
@@ -525,6 +526,15 @@ function updateItemInTree(list: CollectionItem[], tabId: string, updates: Partia
   return list.map(item => {
     if (item.id === tabId) return applyTabUpdatesToItem(item, updates);
     if (item.item) return { ...item, item: updateItemInTree(item.item, tabId, updates) };
+    return item;
+  });
+}
+
+/** Troca o nó `id` por `next` (o Save de uma aba mesclada com o sync). */
+function replaceItemInTree(list: CollectionItem[], id: string, next: CollectionItem): CollectionItem[] {
+  return list.map(item => {
+    if (item.id === id) return next;
+    if (item.item) return { ...item, item: replaceItemInTree(item.item, id, next) };
     return item;
   });
 }
@@ -1351,6 +1361,12 @@ export default function AppLayout() {
   const [isToolsMenuOpen, setIsToolsMenuOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef<Tab[]>(tabs);
+  // Abas com edição não salva cuja request mudou num sync: a request como
+  // estava ANTES dele (a base da edição). O Save junta a aba com o que
+  // chegou (lib/sync/tabSaveMerge) em vez de gravar por cima.
+  const syncedUnderTabRef = useRef(new Map<string, CollectionItem>());
+  // O Save "mesmo assim" do aviso de conflito chama o saveTabsList de agora.
+  const saveTabsListRef = useRef<((tabs: Tab[]) => Promise<void>) | null>(null);
   // Mesma razão do tabsRef: os callbacks de sync têm deps vazias e leriam
   // uma árvore congelada na primeira renderização.
   const collectionsRef = useRef<CollectionItem[]>(collections);
@@ -2389,17 +2405,70 @@ const saveTabsList = useCallback(async (
   }
 
   let updatedCollections = tree;
+  // Abas cuja request mudou num sync enquanto tinham edição: juntam com o
+  // que chegou (merge de três vias). Conflito no mesmo campo não salva —
+  // pergunta. Gravar a aba inteira por cima apagava a mudança do colega.
+  const mergedTabs = new Map<string, CollectionItem>();
+  const conflicted: { tab: Tab; fields: string[] }[] = [];
   savable.forEach(t => {
+    const base = syncedUnderTabRef.current.get(t.id);
+    const theirs = base ? findNodeById(updatedCollections, t.id) : null;
+    if (base && theirs) {
+      const merge = mergeTabSave({
+        base,
+        mineBase: applyTabUpdatesToItem(base, buildTabFromItem(base)),
+        mine: applyTabUpdatesToItem(base, t),
+        theirs,
+      });
+      if (!merge.ok) {
+        conflicted.push({ tab: t, fields: merge.conflicts });
+        return;
+      }
+      mergedTabs.set(t.id, merge.item);
+      updatedCollections = replaceItemInTree(updatedCollections, t.id, merge.item);
+      return;
+    }
     updatedCollections = updateItemInTree(updatedCollections, t.id, t);
   });
+  const saved = savable.filter(t => !conflicted.some(c => c.tab.id === t.id));
+
+  for (const { tab, fields } of conflicted) {
+    toast.warning(`"${tab.name}" changed in the last sync, and you edited the same part`, {
+      description: `Not saved — both sides changed: ${fields.join(', ')}. Reload the tab to see the new version, or save yours over it.`,
+      duration: 20000,
+      action: {
+        label: 'Save mine anyway',
+        onClick: () => {
+          syncedUnderTabRef.current.delete(tab.id);
+          const current = tabsRef.current.find(x => x.id === tab.id) ?? tab;
+          void saveTabsListRef.current?.([current]);
+        },
+      },
+    });
+  }
+  if (saved.length === 0) {
+    if (treeChanged) {
+      setCollections(updatedCollections);
+      await saveWorkspaceCollections(selectedWorkspaceRef.current, updatedCollections);
+    }
+    return;
+  }
 
   setCollections(updatedCollections);
   await saveWorkspaceCollections(selectedWorkspaceRef.current, updatedCollections);
 
-  // Só o que realmente foi gravado perde o "não salvo" e o rascunho.
-  const savedIds = new Set(savable.map(t => t.id));
-  setTabs(prev => prev.map(t => savedIds.has(t.id) ? { ...t, isDirty: false } : t));
-  removeTabDrafts(savable.map(t => t.id));
+  // Só o que realmente foi gravado perde o "não salvo" e o rascunho. A aba
+  // mesclada passa a mostrar o resultado (com o que veio do colega).
+  const savedIds = new Set(saved.map(t => t.id));
+  for (const id of savedIds) syncedUnderTabRef.current.delete(id);
+  setTabs(prev =>
+    prev.map(t => {
+      if (!savedIds.has(t.id)) return t;
+      const merged = mergedTabs.get(t.id);
+      return merged ? reloadedTab(t, merged, buildTabFromItem) : { ...t, isDirty: false };
+    })
+  );
+  removeTabDrafts(saved.map(t => t.id));
 
   // Save agora é SÓ local — o push virou ação explícita (botão de push do
   // workspace ou o Push do painel de sync). Antes cada Ctrl+S disparava um
@@ -2411,6 +2480,10 @@ const saveTabsList = useCallback(async (
   // a árvore e marca exatamente a(s) collection(s) tocada(s). Marcar também
   // neste ponto só repetiria o trabalho, e sem saber qual collection era.
 }, [collections, selectedWorkspace]); // ✅
+
+useEffect(() => {
+  saveTabsListRef.current = tabs => saveTabsList(tabs);
+}, [saveTabsList]);
 
 // Salvar a aba em TODAS as requests com o mesmo nome.
 //
@@ -2847,20 +2920,31 @@ const refreshOpenTabsAfterSync = (before: CollectionItem[], after: CollectionIte
     setTabs(prev => prev.map(t => (!t.isDirty && byId.has(t.id) ? byId.get(t.id)! : t)));
     toast.info(syncText.tabsReloaded(reloaded.length, reloaded[0].name));
   }
+  // Recarregada = a aba já mostra a versão nova: não há mais base a guardar.
+  for (const tab of reloaded) syncedUnderTabRef.current.delete(tab.id);
   if (dirty.length > 0) {
     const ids = new Set(dirty.map(t => t.id));
+    // A base da edição de cada aba: a request de ANTES deste sync — ou de um
+    // anterior, se ela já tinha mudado embaixo da aba (a aba é dessa).
+    for (const tab of dirty) {
+      if (syncedUnderTabRef.current.has(tab.id)) continue;
+      const was = findNodeById(before, tab.id);
+      if (was) syncedUnderTabRef.current.set(tab.id, was);
+    }
     toast.warning(syncText.tabsDirtyChanged(dirty.length, dirty[0].name), {
       duration: 20000,
       action: {
         label: syncText.tabsReload,
-        onClick: () =>
+        onClick: () => {
+          for (const id of ids) syncedUnderTabRef.current.delete(id);
           setTabs(prev =>
             prev.map(t => {
               if (!ids.has(t.id)) return t;
               const item = findNodeById(collectionsRef.current, t.id);
               return item ? reloadedTab(t, item, buildTabFromItem) : t;
             })
-          ),
+          );
+        },
       },
     });
   }

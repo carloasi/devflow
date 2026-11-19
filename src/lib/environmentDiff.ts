@@ -183,15 +183,37 @@ export function applyEnvironmentChanges(
       if (at === undefined) {
         values.push({ ...remoteValue, id: crypto.randomUUID(), value: next, enabled: true });
       } else {
-        values[at] = { ...values[at], value: next, description: remoteValue.description ?? values[at].description };
+        // O tipo (secret ou não) vem junto: senão marcar como secret lá nunca chegava.
+        values[at] = {
+          ...values[at],
+          value: next,
+          description: remoteValue.description ?? values[at].description,
+          type: remoteValue.type ?? values[at].type,
+        };
       }
     }
 
-    // Removidas: existem aqui e não lá. Aceitar tira só a entrada habilitada.
+    // Removidas: existem (habilitadas) aqui e não lá. Aceitar tira só a
+    // entrada habilitada — a não ser que lá ela continue existindo,
+    // DESABILITADA: aí o colega desabilitou, não apagou. Apagar aqui fazia o
+    // push seguinte apagar do GitHub a variável que ele só tinha desligado.
+    const remoteDisabled = new Map<string, EnvironmentValue>();
+    for (const v of pair.remote.values ?? []) {
+      if (v.key && !v.enabled && !remoteDisabled.has(v.key)) remoteDisabled.set(v.key, v);
+    }
     for (const [key, at] of localIndex) {
       if (remoteValues.has(key)) continue;
       if (!selected.has(nodeId(envId, key))) continue;
-      values[at] = { ...values[at], __removed: true } as EnvironmentValue & { __removed: true };
+      const disabled = remoteDisabled.get(key);
+      values[at] = disabled
+        ? {
+            ...values[at],
+            value: String(disabled.value ?? ''),
+            description: disabled.description ?? values[at].description,
+            type: disabled.type ?? values[at].type,
+            enabled: false,
+          }
+        : ({ ...values[at], __removed: true } as EnvironmentValue & { __removed: true });
     }
 
     result.push({

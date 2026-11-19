@@ -60,8 +60,8 @@ const en = {
     n === 1 ? `"${name}" was open and got the merged version` : `${n} open tabs got the merged version`,
   tabsDirtyChanged: (n: number, name: string) =>
     n === 1
-      ? `"${name}" changed in the merge, but the tab has unsaved edits — it still shows your version.`
-      : `${n} open tabs changed in the merge, but have unsaved edits — they still show your version.`,
+      ? `"${name}" changed in the merge, but the tab has unsaved edits — it still shows your version. Saving joins your edits with what came in (and asks if you both changed the same part).`
+      : `${n} open tabs changed in the merge, but have unsaved edits — they still show your version. Saving joins your edits with what came in (and asks if you both changed the same part).`,
   tabsReload: 'Reload (discard edits)',
   undoLosesEdits: 'You edited things after the pull. Undoing goes back to before the pull and discards those edits too.',
   undoAnyway: 'Undo anyway',
@@ -517,8 +517,8 @@ const ptBR: SyncDiffStrings = {
     n === 1 ? `"${name}" estava aberta e foi atualizada com a versão do merge` : `${n} abas abertas foram atualizadas com a versão do merge`,
   tabsDirtyChanged: (n: number, name: string) =>
     n === 1
-      ? `"${name}" mudou no merge, mas a aba tem edições não salvas — ela continua com a sua versão.`
-      : `${n} abas abertas mudaram no merge, mas têm edições não salvas — continuam com a sua versão.`,
+      ? `"${name}" mudou no merge, mas a aba tem edições não salvas — ela continua com a sua versão. Ao salvar, suas edições se juntam ao que chegou (e o app pergunta se os dois mexeram na mesma parte).`
+      : `${n} abas abertas mudaram no merge, mas têm edições não salvas — continuam com a sua versão. Ao salvar, suas edições se juntam ao que chegou (e o app pergunta se os dois mexeram na mesma parte).`,
   tabsReload: 'Recarregar (descarta edições)',
   undoLosesEdits: 'Você editou coisas depois do pull. Desfazer volta ao estado de antes dele e descarta essas edições também.',
   undoAnyway: 'Desfazer mesmo assim',
