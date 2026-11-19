@@ -20,7 +20,7 @@ import { encryptData, decryptData, clearDerivedKeyCache, MissingPassphraseError 
 import { diffCollection, diffEnvironment, fileTitle, prettyContent, FileChange } from "@/lib/commitDiff";
 import { CommitChangesView } from "@/components/CommitChangesView";
 import { ModalCard } from "@/components/ui/modal-card";
-import { catalogForPush, MARKER_BASE_PREFIX, markerBaseAfterPush, type Marker } from "@/lib/markers";
+import { catalogForPush, MARKER_BASE_PREFIX, markerBaseAfterPush, remapMarkers, withRemoteTwins, type Marker } from "@/lib/markers";
 import { loadSyncBase, recordSyncBase } from "@/lib/syncBase";
 import {
   applyShaChanges,
@@ -1463,7 +1463,7 @@ async function markersForPush(
   remotePath: string,
   workspaceName: string,
   local: Marker[]
-): Promise<{ send: Marker[]; base: Record<string, string> } | null> {
+): Promise<{ send: Marker[]; base: Record<string, string>; remapped: Map<string, string> } | null> {
   let remote: Marker[] | null;
   try {
     remote = await fetchRemoteMarkersStrict(storage, remotePath);
@@ -1472,8 +1472,11 @@ async function markersForPush(
     return null;
   }
   const previous = await loadSyncBase(workspaceName);
-  const send = catalogForPush(local, remote, previous);
-  return { send, base: markerBaseAfterPush(local, send, previous) };
+  // Marcador daqui com o mesmo nome de um de lá (outro id): vale o id de lá,
+  // e quem envia troca o id nas marcas da árvore (remapped) antes de gravar.
+  const { catalog: mine, remapped } = withRemoteTwins(local, remote);
+  const send = catalogForPush(mine, remote, previous);
+  return { send, base: markerBaseAfterPush(mine, send, previous), remapped };
 }
 
 async function fetchRemoteWorkspace(
@@ -1619,6 +1622,15 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   // desenhado dentro do popover do GitHub Sync — que está fechado nessa hora.
   const [singleOp, setSingleOp] = useState<string | null>(null);
   const singleOpBusy = singleOp !== null;
+  // Trava ÚNICA das gravações no GitHub (pushes, rename, exclusão do
+  // workspace remoto). O `singleOpBusy` acima é estado: lido numa closure de
+  // um render anterior, ele ainda dizia "livre" — e o push completo nem o
+  // checava. Dois pushes ao mesmo tempo se atropelavam: o segundo diálogo de
+  // exclusão tomava o lugar do primeiro (que ficava pendurado pra sempre,
+  // com a operação presa), e o segundo commit partia de uma leitura que o
+  // primeiro já tinha tornado velha. O ref vale na hora, sem render.
+  const syncOpRef = useRef<string | null>(null);
+  const SYNC_BUSY_MESSAGE = "Another save/download is already in progress. Wait for it to finish.";
   const [status, setStatus] = useState<SyncStatus>({ type: null, message: "" });
   const [showToken, setShowToken] = useState(false);
   const [collectionPaths, setCollectionPaths] = useState<string[]>([]);
@@ -1766,7 +1778,12 @@ const handleRequestDeleteRemoteWorkspace = useCallback(async () => {
 
 const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
   if (!pendingDeleteWorkspace) return;
+  if (syncOpRef.current) {
+    showStatus("error", SYNC_BUSY_MESSAGE);
+    return;
+  }
 
+  syncOpRef.current = "delete workspace";
   setDeletingWorkspace(true);
   showStatus("info", "Deleting workspace from GitHub...");
   try {
@@ -1785,6 +1802,7 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
     console.error("❌ Erro ao excluir workspace remoto:", e);
     showStatus("error", `✗ Delete failed: ${e.message}`);
   } finally {
+    syncOpRef.current = null;
     setDeletingWorkspace(false);
   }
 }, [pendingDeleteWorkspace, client, workspace]);
@@ -1829,6 +1847,22 @@ useEffect(() => {
   // pull, revisão) — a listagem compara antes de gravar o resultado.
   const shaGenerationRef = useRef(0);
 
+  // De qual workspace (e repositório) são os paths guardados. Ao trocar, a
+  // lista do anterior sai NA HORA: antes ela ficava até a listagem nova
+  // chegar — e pra sempre, se a listagem falhasse —, e o push de uma
+  // collection ou environment a usava pra propor apagar "arquivos que você
+  // removeu aqui", que eram de OUTRO workspace.
+  const listingKey = `${repoKeyOf(config)}|${remotePath}`;
+  const listingKeyRef = useRef(listingKey);
+  // Antes do efeito que relista (declarado abaixo): roda primeiro.
+  useEffect(() => {
+    listingKeyRef.current = listingKey;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- descarta a lista de outro workspace/repositório ao trocar
+    setCollectionPaths([]);
+    setEnvPaths([]);
+    setRemoteShas(null);
+  }, [listingKey]);
+
   // ── Resolve os arquivos remotos do workspace atual sempre que o
   //    workspace (prop, controlado pelo AppLayout) ou a config mudam.
   // `quiet`: atualização de fundo (ao abrir o painel) — sem o overlay que
@@ -1846,6 +1880,7 @@ useEffect(() => {
     // sha ANTIGO do arquivo que acabou de subir — gravá-la fazia o aviso
     // dizer "X changed on GitHub" sobre o seu próprio push.
     const generation = shaGenerationRef.current;
+    const listingKey = listingKeyRef.current;
     if (!quiet) setResolvingFiles(true);
     try {
       // Estrita (falha em vez de devolver []): com a pasta environments
@@ -1880,6 +1915,9 @@ useEffect(() => {
       // Um push/pull registrou versões no meio: esta listagem já nasceu velha.
       // A próxima checagem (ou a abertura do painel) traz a atual.
       if (shaGenerationRef.current !== generation) return;
+      // Trocou de workspace (ou de repositório) no meio: é a listagem do
+      // anterior, e gravá-la punha os arquivos dele no lugar dos deste.
+      if (listingKeyRef.current !== listingKey) return;
       setCollectionPaths(collectionFiles.map((f) => f.path));
       setEnvPaths(foundEnvPaths);
       // Pasta do workspace que não existe lá (404): nada pra comparar.
@@ -2251,6 +2289,9 @@ useEffect(() => {
 
   function askDeleteConfirmation(paths: string[]): Promise<boolean> {
     return new Promise((resolve) => {
+      // Um diálogo anterior ainda aberto (não deveria, com a trava acima):
+      // responde "manter" a ele em vez de deixá-lo pendurado pra sempre.
+      deleteConfirmResolveRef.current?.(false);
       deleteConfirmResolveRef.current = resolve;
       setPendingDelete({ paths });
     });
@@ -2463,7 +2504,15 @@ useEffect(() => {
   ): Promise<
     | { status: "collision"; message: string }
     | { status: "conflict"; paths: string[] }
-    | { status: "pushed"; collectionPaths: string[]; envPaths: string[]; removed: string[]; keptStale: string[] }
+    | {
+        status: "pushed";
+        collectionPaths: string[];
+        envPaths: string[];
+        removed: string[];
+        keptStale: string[];
+        /** As collections como subiram (ids de marcador já trocados, se precisou). */
+        collections: unknown[];
+      }
   > {
     const wsRemotePath = `${WORKSPACES_ROOT}/${input.workspaceName}`;
     const existing = await storage.resolveWorkspaceFilePaths(wsRemotePath);
@@ -2473,9 +2522,14 @@ useEffect(() => {
     // o que o colega renomeou não é desfeito (lib/markers). Sem conseguir
     // ler o de lá, o catálogo fica fora deste push.
     const markers = await markersForPush(storage, wsRemotePath, input.workspaceName, input.markers);
+    // Marcador com o mesmo nome de um do GitHub (outro id): a árvore sobe já
+    // com o id de lá, o mesmo que o catálogo enviado leva.
+    const collections = markers && markers.remapped.size > 0
+      ? remapMarkers(input.collections as CollectionItem[], markers.remapped)
+      : input.collections;
     const plan = buildPushPlan({
       wsRemotePath,
-      collections: input.collections,
+      collections,
       // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
       environments: withoutSessionTokens(input.environments),
       markers: markers?.send ?? null,
@@ -2511,6 +2565,9 @@ useEffect(() => {
     if (!result.ok) return { status: "conflict", paths: result.conflicts };
     // A base do catálogo: o que ficou igual dos dois lados (markerBaseAfterPush).
     if (markers) await recordSyncBase(input.workspaceName, markers.base, [MARKER_BASE_PREFIX]);
+    // Trocou id de marcador: o daqui passa a ser o que subiu (catálogo e
+    // marcas da árvore), pelo mesmo merge do pull.
+    if (markers && markers.remapped.size > 0) await onPullMarkers?.(input.workspaceName, markers.send);
 
     const isEnv = (path: string) => path.startsWith(`${wsRemotePath}/environments/`);
     const kept = new Set(keptStale);
@@ -2526,6 +2583,7 @@ useEffect(() => {
       ],
       removed,
       keptStale,
+      collections,
     };
   }
 
@@ -2543,11 +2601,12 @@ useEffect(() => {
 
     if (!requirePassphrase()) return;
 
-    if (singleOpBusy) {
-      showStatus("error", "Another save/download is already in progress. Wait for it to finish.");
+    if (singleOpBusy || syncOpRef.current) {
+      showStatus("error", SYNC_BUSY_MESSAGE);
       return;
     }
 
+    syncOpRef.current = `push ${workspaceName}`;
     setSingleOp(`Sending "${workspaceName}"...`);
     showStatus("info", `Encrypting and sending "${workspaceName}"...`);
 
@@ -2654,7 +2713,8 @@ useEffect(() => {
       // — antes voltava aqui, e o que tinha subido continuava "pendente", com
       // a base velha gerando conflitos falsos depois.
       onPushCompleted?.(workspaceName, {
-        collections: collectionsToPush,
+        // Como subiu (com os ids de marcador do time, se precisou trocar).
+        collections: result.collections,
         environments: withoutSessionTokens(envsToPush),
         keptStale: result.keptStale.length > 0,
       });
@@ -2669,6 +2729,7 @@ useEffect(() => {
         showStatus("error", `Push failed: ${e.message}`);
       }
     } finally {
+      syncOpRef.current = null;
       setSingleOp(null);
     }
   }, [isConfigValid, workspace, client, showStatus, singleOpBusy, requirePassphrase, onWorkspacePushConflict, onRebasePush]);
@@ -2710,11 +2771,12 @@ useEffect(() => {
       return;
     }
 
-    if (singleOpBusy) {
-      showStatus("error", "✗ Another save/download is already in progress. Wait for it to finish.");
+    if (singleOpBusy || syncOpRef.current) {
+      showStatus("error", SYNC_BUSY_MESSAGE);
       return;
     }
 
+    syncOpRef.current = `rename ${oldName}`;
     setSingleOp(`Renaming "${oldName}" on GitHub...`);
     showStatus("info", `Renaming "${oldName}" to "${newName}" on GitHub...`);
 
@@ -2743,6 +2805,7 @@ useEffect(() => {
       console.error(`❌ Erro ao renomear a pasta remota de "${oldName}" para "${newName}":`, e);
       throw e;
     } finally {
+      syncOpRef.current = null;
       setSingleOp(null);
     }
   }, [isConfigValid, client, passphrase, showStatus, singleOpBusy]);
@@ -2829,14 +2892,17 @@ useEffect(() => {
     // do painel de sync continua usando `loading` normalmente.
     const silent = options?.silent ?? false;
 
-    if (silent && singleOpBusy) {
-      showStatus("error", "✗ Another save/download is already in progress. Wait for it to finish.");
+    // Vale pros dois modos: o push completo também não pode começar com outra
+    // gravação em curso (antes só o silencioso checava).
+    if ((silent && singleOpBusy) || syncOpRef.current) {
+      showStatus("error", SYNC_BUSY_MESSAGE);
       return;
     }
 
     const collectionsData = collectionsOverride !== undefined ? collectionsOverride : currentCollections;
     const environmentsData = environmentsOverride !== undefined ? environmentsOverride : currentEnvironments;
 
+    syncOpRef.current = "push";
     if (silent) setSingleOp("Saving to GitHub..."); else setLoading(true);
     setPushConflict(null);
 
@@ -2968,7 +3034,8 @@ useEffect(() => {
       setEnvPaths(result.envPaths);
       // Ver pushSingleWorkspace: mantendo arquivos lá, o push vale do mesmo jeito.
       onPushCompleted?.(workspace, {
-        collections: collectionsToSend,
+        // Como subiu (com os ids de marcador do time, se precisou trocar).
+        collections: result.collections,
         environments: withoutSessionTokens(environmentsToSend),
         keptStale: result.keptStale.length > 0,
       });
@@ -2978,6 +3045,7 @@ useEffect(() => {
       console.error("❌ Erro no Push:", e);
       showStatus("error", `Push failed: ${e.message}`);
     } finally {
+      syncOpRef.current = null;
       if (silent) setSingleOp(null); else setLoading(false);
     }
   }
@@ -2993,11 +3061,12 @@ useEffect(() => {
 
   // Não usa `loading` (que travaria a tela inteira via isBlocking) — só
   // impede que outro save/pull pontual comece em paralelo.
-  if (singleOpBusy) {
-    showStatus("error", "✗ Another save/download is already in progress. Wait for it to finish.");
+  if (singleOpBusy || syncOpRef.current) {
+    showStatus("error", SYNC_BUSY_MESSAGE);
     throw new Error("Another sync is already in progress.");
   }
 
+  syncOpRef.current = `push environment ${env.name}`;
   setSingleOp(`Sending environment "${env.name}"...`);
   showStatus("info", `Sending environment "${env.name}"...`);
 
@@ -3027,7 +3096,8 @@ useEffect(() => {
     const { renamed, ask: stale } = await staleToRemove(
       storage,
       workspace,
-      envPaths.filter((path) => path !== targetEnvPath && !expected.has(path)),
+      // Só arquivos DESTE workspace (ver o push de uma collection).
+      envPaths.filter((path) => path.startsWith(`${remotePath}/`) && path !== targetEnvPath && !expected.has(path)),
       new Set(env?.id ? [env.id] : [])
     );
     const removed = [...renamed, ...(stale.length > 0 && (await askDeleteConfirmation(stale)) ? stale : [])];
@@ -3049,6 +3119,7 @@ useEffect(() => {
     }
     throw e;
   } finally {
+    syncOpRef.current = null;
     setSingleOp(null);
   }
 }
@@ -3073,8 +3144,8 @@ useEffect(() => {
       throw new MissingPassphraseError();
     }
 
-    if (singleOpBusy) {
-      showStatus("error", "✗ Another save/download is already in progress. Wait for it to finish.");
+    if (singleOpBusy || syncOpRef.current) {
+      showStatus("error", SYNC_BUSY_MESSAGE);
       throw new Error("Another sync is already in progress.");
     }
 
@@ -3104,6 +3175,8 @@ useEffect(() => {
     }
 
     const what = partOf ? `"${partOf}" (in "${rawName}")` : `"${rawName}"`;
+    // Depois das checagens que lançam acima (sem await desde a checagem da trava).
+    syncOpRef.current = `push collection ${rawName}`;
     setSingleOp(`Sending ${what}...`);
     showStatus("info", `Sending ${what}...`);
 
@@ -3137,7 +3210,10 @@ useEffect(() => {
         : await staleToRemove(
             storage,
             workspace,
-            collectionPaths.filter((p) => p !== targetPath && !expectedPaths.has(p)),
+            // Só arquivos DESTE workspace: logo depois de trocar de workspace
+            // (ou com a listagem falhando) a lista ainda pode ser do anterior,
+            // e o diálogo propunha apagar arquivos de outra pasta.
+            collectionPaths.filter((p) => p.startsWith(`${remotePath}/`) && p !== targetPath && !expectedPaths.has(p)),
             new Set(col?.id ? [col.id] : [])
           );
       const removed = [...renamed, ...(stalePaths.length > 0 && (await askDeleteConfirmation(stalePaths)) ? stalePaths : [])];
@@ -3147,9 +3223,11 @@ useEffect(() => {
       // chegaria ao GitHub num push do workspace inteiro.
       // Sem conseguir ler o catálogo de lá, ele fica fora deste envio.
       const markers = await markersForPush(storage, remotePath, workspace, currentMarkers ?? []);
+      // Marcador com o mesmo nome de um do GitHub (outro id): sobe com o de lá.
+      const sent = markers && markers.remapped.size > 0 ? remapMarkers([col], markers.remapped)[0] : col;
       const result = await storage.commitFiles(
         [
-          { path: targetPath, content: stripStarredFlags(col) },
+          { path: targetPath, content: stripStarredFlags(sent) },
           ...(markers ? [{ path: markersFilePath(remotePath), content: { markers: markers.send }, noCheck: true }] : []),
           ...removed.map((path) => ({ path, delete: true })),
         ],
@@ -3160,6 +3238,9 @@ useEffect(() => {
       // Quem chamou (AppLayout) abre a revisão ao ver o conflito.
       if (!result.ok) throw new GitHubConflictError(result.conflicts[0]);
       if (markers) await recordSyncBase(workspace, markers.base, [MARKER_BASE_PREFIX]);
+      // Trocou id de marcador: o catálogo e as marcas daqui passam a ser os
+      // que subiram (mesmo merge do pull).
+      if (markers && markers.remapped.size > 0) await onPullMarkers?.(workspace, markers.send);
 
       setCollectionPaths(prev =>
         [...prev.filter((p) => !removed.includes(p)), ...(prev.includes(targetPath) ? [] : [targetPath])]
@@ -3167,7 +3248,7 @@ useEffect(() => {
       if (partOf) {
         showStatus("success", `"${partOf}" pushed to GitHub. Your other changes in "${rawName}" are still waiting to be pushed.`);
       } else {
-        onCollectionPushed?.(col?.id, col);
+        onCollectionPushed?.(col?.id, sent);
         showStatus("success", `Collection "${rawName}" pushed to GitHub.`);
       }
     } catch (e) {
@@ -3181,6 +3262,7 @@ useEffect(() => {
       }
       throw e;
     } finally {
+      syncOpRef.current = null;
       setSingleOp(null);
     }
   }

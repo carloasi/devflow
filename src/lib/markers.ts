@@ -507,13 +507,16 @@ export function mergeCatalogs(
 
   for (const mine of local) {
     if (byId.has(mine.id)) continue;
-    // Apagado no GitHub: a base tinha, lá sumiu, e aqui ninguém mexeu.
-    if (withBase && !remoteIds.has(mine.id) && baseOf(base, mine.id) !== undefined && !changedSince(base, mine)) continue;
+    // O gêmeo pelo nome ANTES da regra de "apagado no GitHub": quando alguém
+    // envia um "flaky" com outro id, o daqui some de lá — e sem o remap as
+    // marcas dele nos itens viravam órfãs (e o purgeOrphans as apagava).
     const twin = byName.get(normalizeName(mine.name).toLowerCase());
     if (twin) {
       remapped.set(mine.id, twin.id);
       continue;
     }
+    // Apagado no GitHub: a base tinha, lá sumiu, e aqui ninguém mexeu.
+    if (withBase && !remoteIds.has(mine.id) && baseOf(base, mine.id) !== undefined && !changedSince(base, mine)) continue;
     catalog.push(mine);
     byId.set(mine.id, mine);
     byName.set(normalizeName(mine.name).toLowerCase(), mine);
@@ -579,10 +582,44 @@ export function markerChangeCount(changes: MarkerChanges): number {
  * `base`: com ela, o que você apagou não volta (o do GitHub não é somado de
  * novo), e o que apagaram no GitHub não é reenviado por você.
  */
+/**
+ * Marcadores daqui que têm no GitHub um GÊMEO pelo nome com outro id (duas
+ * pessoas criaram "flaky" cada uma na sua máquina): o id de lá é o do time.
+ * Devolve o catálogo daqui com o gêmeo de lá no lugar e o remap daqui → de
+ * lá, que quem envia aplica na árvore (remapMarkers) antes de gravar.
+ *
+ * Sem isto o push gravava só o id daqui e o de lá sumia do catálogo: as
+ * marcas do colega nos itens ficavam órfãs e eram apagadas no pull dele.
+ */
+export function withRemoteTwins(
+  local: Marker[],
+  remote: Marker[] | null
+): { catalog: Marker[]; remapped: Map<string, string> } {
+  const remapped = new Map<string, string>();
+  if (!remote || remote.length === 0) return { catalog: local, remapped };
+  const remoteIds = new Set(remote.map(m => m.id));
+  const remoteByName = new Map(remote.map(m => [normalizeName(m.name).toLowerCase(), m]));
+  const localIds = new Set(local.map(m => m.id));
+  const catalog: Marker[] = [];
+  for (const mine of local) {
+    const twin = remoteIds.has(mine.id) ? undefined : remoteByName.get(normalizeName(mine.name).toLowerCase());
+    if (!twin || twin.id === mine.id) {
+      catalog.push(mine);
+      continue;
+    }
+    remapped.set(mine.id, twin.id);
+    // O gêmeo já pode estar aqui também (com o id dele): não duplica.
+    if (!localIds.has(twin.id) && !catalog.some(m => m.id === twin.id)) catalog.push(twin);
+  }
+  return { catalog, remapped };
+}
+
 export function catalogForPush(local: Marker[], remote: Marker[] | null, base?: MarkerBase): Marker[] {
   // Só sem arquivo lá: catálogo VAZIO lá (apagaram todos) segue a base —
   // com o atalho, o push devolvia todos os que o colega tinha apagado.
   if (!remote) return local;
+  // Gêmeo pelo nome com outro id: vale o id de lá (ver withRemoteTwins).
+  local = withRemoteTwins(local, remote).catalog;
   const withBase = hasMarkerBase(base);
   const remoteById = new Map(remote.map(m => [m.id, m]));
   const ids = new Set(local.map(m => m.id));

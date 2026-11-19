@@ -268,9 +268,11 @@ describe('markers > catálogo enviado no push', () => {
     const old = { id: 'm1', name: 'Instável', color: MARKER_COLORS[5] };
     expect(catalogForPush([mine], [old])).toEqual([mine]);
   });
-  it('mesmo nome com outro id não duplica', () => {
+  it('mesmo nome com outro id não duplica — e fica o id do time (o de lá)', () => {
+    // Enviar o daqui tirava o do colega do catálogo, e as marcas dele nos
+    // itens viravam órfãs. Quem envia troca o id na árvore (withRemoteTwins).
     const twin = { id: 'x', name: 'flaky', color: MARKER_COLORS[1] };
-    expect(catalogForPush([mine], [twin])).toEqual([mine]);
+    expect(catalogForPush([mine], [twin])).toEqual([twin]);
   });
   it('sem leitura do GitHub, fica o daqui', () => {
     expect(catalogForPush([mine], null)).toEqual([mine]);

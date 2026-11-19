@@ -979,9 +979,14 @@ export default function AppLayout() {
     if (cleaned !== tree) await saveWorkspaceCollections(workspaceName, cleaned);
 
     if (isActive) {
+      // Os refs já na hora: o push que troca id de marcador chama este merge
+      // e logo depois o handlePushCompleted compara a árvore (collectionsRef)
+      // com a que subiu — antes do próximo render.
+      markersRef.current = catalog;
       setMarkers(catalog);
       if (cleaned !== tree) {
         suppressPendingMarkRef.current = true;
+        collectionsRef.current = cleaned;
         setCollections(cleaned);
       }
     }
