@@ -47,9 +47,12 @@ export function DevFlowLoader({ label, detail, size = 64 }: { label: string; det
 }
 
 /**
- * A mesma animação em tamanho de botão ou de linha: o ícone respirando com
- * um anel fino girando em volta. Substitui os spinners genéricos do app
- * (Loader2, bolinha girando) — todo carregamento tem a cara do DevFlow.
+ * Carregando em tamanho de botão ou de linha: só o anel fino girando.
+ *
+ * Sem o ícone do DevFlow no meio: em 12–16px ele não se lia como ícone, e
+ * sim como uma bolinha azul pulsando ao lado dos botões — parecia a logo
+ * fora do lugar. O ícone fica só no carregamento grande (DevFlowLoader), onde
+ * tem tamanho pra ser reconhecido.
  */
 export function DevFlowSpinner({ size = 16, className = '' }: { size?: number; className?: string }) {
   const border = size >= 28 ? 2.5 : size >= 18 ? 2 : 1.5
@@ -57,16 +60,9 @@ export function DevFlowSpinner({ size = 16, className = '' }: { size?: number; c
     <span
       role="status"
       aria-label="Loading"
-      className={`relative inline-flex shrink-0 items-center justify-center ${className}`}
-      style={{ width: size, height: size }}
-    >
-      <span
-        aria-hidden="true"
-        className="devflow-ring absolute inset-0 rounded-full border-[#1e6bff]/20 border-t-[#4fc3ff] border-r-[#1e6bff]"
-        style={{ borderWidth: border, borderStyle: 'solid' }}
-      />
-      <DevFlowMark size={Math.max(8, Math.round(size * 0.62))} />
-    </span>
+      className={`devflow-ring inline-block shrink-0 rounded-full border-[#1e6bff]/20 border-t-[#4fc3ff] border-r-[#1e6bff] ${className}`}
+      style={{ width: size, height: size, borderWidth: border, borderStyle: 'solid' }}
+    />
   )
 }
 
