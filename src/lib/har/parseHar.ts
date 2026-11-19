@@ -1,8 +1,10 @@
 import type { CollectionItem } from '@/app/types/CollectionItem';
+import { normalizeExampleLanguage } from '@/lib/exampleLanguage';
 
 // ─────────────────────────────────────────────────────────────────────────
 // HAR (HTTP Archive 1.2) → collection: uma request por entrada de
-// `log.entries`, na ordem do arquivo. É o caminho inverso de
+// `log.entries`, na ordem do arquivo, com a resposta gravada (quando há)
+// como Saved Example da request. É o caminho inverso de
 // lib/flowHtml/buildFlowHar.ts — mesmo mapeamento de campos (método, URL,
 // headers, postData), só que lendo.
 //
@@ -99,6 +101,53 @@ function bodyOf(
   return params.map(p => `${encodeURIComponent(str(p.name))}=${encodeURIComponent(str(p.value))}`).join('&');
 }
 
+const BINARY_MIME = /^(image|audio|video|font)\/|octet-stream|zip|pdf|wasm|protobuf/i;
+
+/** Corpo da resposta como texto; base64 é decodificado como UTF-8. */
+function responseBodyOf(content: unknown): string {
+  if (!isRecord(content)) return '';
+  const text = str(content.text);
+  if (!text) return '';
+  if (BINARY_MIME.test(str(content.mimeType))) return '';
+  if (str(content.encoding).toLowerCase() !== 'base64') return text;
+  try {
+    const bytes = Uint8Array.from(atob(text), c => c.charCodeAt(0));
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return ''; // base64 inválido ou bytes que não são texto
+  }
+}
+
+/**
+ * A resposta gravada no HAR vira um Saved Example da request (mesma forma
+ * que o import do Postman usa pra `item.response[]`). Sem resposta real
+ * (status 0 — ex.: HAR do buildFlowHar, ou request cancelada) não há example.
+ */
+function exampleOf(entry: Json, method: string, request: CollectionItem['request']): CollectionItem | null {
+  const response = entry.response;
+  if (!isRecord(response)) return null;
+  const code = Number(response.status) || 0;
+  if (code <= 0) return null;
+
+  const headers = Array.isArray(response.headers)
+    ? response.headers
+        .filter(isRecord)
+        .map(h => ({ key: str(h.name), value: str(h.value), enabled: true }))
+        .filter(h => h.key && !h.key.startsWith(':'))
+    : [];
+  const body = responseBodyOf(response.content);
+  const status = str(response.statusText) || (code >= 200 && code < 300 ? 'OK' : String(code));
+
+  return {
+    id: crypto.randomUUID(),
+    name: `${code} ${status}`,
+    type: 'example',
+    method: method as CollectionItem['method'],
+    request: { ...request!, headers: request!.headers.map(h => ({ ...h })) },
+    example: { status, code, headers, body, previewLanguage: normalizeExampleLanguage(undefined, headers, body) },
+  };
+}
+
 /** "GET /api/v1/users" — método + path, sem query. */
 function requestName(method: string, url: string): string {
   try {
@@ -145,6 +194,16 @@ export function parseHar(doc: unknown, name = 'HAR import'): HarImportResult {
     const method = (str(request.method) || 'GET').toUpperCase();
     const headers = headersOf(request.headers);
     const body = bodyOf(request.postData, headers, msg => warnings.push(msg));
+    const details: CollectionItem['request'] = {
+      url,
+      urlexport: { raw: url, host: [], path: [], variable: [] },
+      headers,
+      body,
+      bodyType: body ? 'raw' : 'none',
+      auth: { type: 'none' },
+      scripts: { preRequest: '', postResponse: '' },
+    };
+    const example = exampleOf(entry, method, details);
 
     requests.push({
       host: hostOf(url),
@@ -155,15 +214,8 @@ export function parseHar(doc: unknown, name = 'HAR import'): HarImportResult {
         // HEAD/OPTIONS também chegam aqui — o tipo só lista os 5 comuns,
         // mesmo cast do import de OpenAPI.
         method: method as CollectionItem['method'],
-        request: {
-          url,
-          urlexport: { raw: url, host: [], path: [], variable: [] },
-          headers,
-          body,
-          bodyType: body ? 'raw' : 'none',
-          auth: { type: 'none' },
-          scripts: { preRequest: '', postResponse: '' },
-        },
+        request: details,
+        ...(example ? { item: [example] } : {}),
         ...(str(entry.comment) ? { description: str(entry.comment) } : {}),
       } as CollectionItem,
     });

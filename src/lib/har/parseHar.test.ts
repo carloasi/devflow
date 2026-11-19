@@ -138,6 +138,61 @@ describe('parseHar', () => {
     expect(req.request?.url).toBe('https://x.io/a/b?id=1%202');
   });
 
+  it('brings the recorded response as a saved example of the request', () => {
+    const { collection } = parseHar({
+      log: {
+        entries: [
+          {
+            request: { method: 'POST', url: 'https://x.io/search', headers: [{ name: 'Accept', value: 'application/json' }], postData: { mimeType: 'application/json', text: '{"q":1}' } },
+            response: {
+              status: 200,
+              statusText: '',
+              headers: [{ name: ':status', value: '200' }, { name: 'content-type', value: 'application/json; charset=utf-8' }],
+              content: { size: 30, mimeType: 'application/json', text: '{"data":null,"notifications":[]}' },
+            },
+          },
+          {
+            request: { method: 'GET', url: 'https://x.io/b64' },
+            response: {
+              status: 404,
+              statusText: 'Not Found',
+              headers: [{ name: 'Content-Type', value: 'text/plain' }],
+              content: { mimeType: 'text/plain', encoding: 'base64', text: Buffer.from('não achou').toString('base64') },
+            },
+          },
+          {
+            request: { method: 'GET', url: 'https://x.io/logo' },
+            response: { status: 200, statusText: 'OK', headers: [], content: { mimeType: 'image/png', encoding: 'base64', text: 'iVBORw0KGgo=' } },
+          },
+          { request: { method: 'GET', url: 'https://x.io/cancelled' }, response: { status: 0, content: {} } },
+        ],
+      },
+    });
+    const [search, notFound, logo, cancelled] = collection!.item!;
+
+    const [example] = search.item!;
+    expect(example.type).toBe('example');
+    expect(example.name).toBe('200 OK');
+    expect(example.method).toBe('POST');
+    expect(example.request?.body).toBe('{"q":1}');
+    expect(example.example).toEqual({
+      status: 'OK',
+      code: 200,
+      headers: [{ key: 'content-type', value: 'application/json; charset=utf-8', enabled: true }],
+      body: '{"data":null,"notifications":[]}',
+      previewLanguage: 'json',
+    });
+    // O example é um snapshot: editar a request não muda o example.
+    expect(example.request?.headers).not.toBe(search.request?.headers);
+
+    expect(notFound.item![0].name).toBe('404 Not Found');
+    expect(notFound.item![0].example?.body).toBe('não achou');
+    expect(notFound.item![0].example?.previewLanguage).toBe('text');
+
+    expect(logo.item![0].example?.body).toBe('');
+    expect(cancelled.item).toBeUndefined();
+  });
+
   it('reports a HAR with no HTTP request', () => {
     const result = parseHar({ log: { entries: [] } });
     expect(result.collection).toBeNull();
