@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import dynamic from 'next/dynamic';
 import type { Monaco } from '@monaco-editor/react';
-import { Plus, Trash2, Play, Rows2, Columns2 } from 'lucide-react';
+import { Plus, Trash2, Play, Rows2, Columns2, WandSparkles } from 'lucide-react';
+import { prettyBodyPreservingTemplates } from './CollectionRunner/payloadOverride';
 import { ExampleData } from '@/app/types/CollectionItem';
 import { useTheme } from './ThemeContext';
 import { getMonacoThemeName, registerDevflowMonacoThemes } from '@/lib/monacoThemes';
@@ -48,6 +49,7 @@ export function ExampleResponseEditor({ draft, onChange, onTry, responseLayout, 
   const [tab, setTab] = useState<'body' | 'headers'>('body');
   const language = draft.previewLanguage ?? 'json';
   const ok = draft.code >= 200 && draft.code < 300;
+  const prettyBody = language === 'json' ? prettyBodyPreservingTemplates(draft.body) : draft.body;
 
   const setCode = (raw: string) => {
     const code = Math.max(0, Math.min(999, Number(raw.replace(/\D/g, '')) || 0));
@@ -112,6 +114,22 @@ export function ExampleResponseEditor({ draft, onChange, onTry, responseLayout, 
               className="h-full w-[150px] border-l border-current/20 bg-transparent px-1.5 font-semibold outline-none"
             />
           </div>
+
+          {tab === 'body' && language === 'json' && (
+            // Reindenta o body salvo (respostas de HAR costumam vir numa
+            // linha só). Muda o texto do example, como qualquer edição; com
+            // JSON quebrado ou já formatado, não há o que fazer.
+            <button
+              type="button"
+              onClick={() => onChange({ ...draft, body: prettyBody })}
+              disabled={prettyBody === draft.body}
+              title={prettyBody === draft.body ? 'Already formatted (or not valid JSON)' : 'Pretty-print this JSON'}
+              className="flex h-7 cursor-pointer items-center gap-1 rounded-md border border-pm-border bg-pm-hover px-2 text-[11px] font-medium text-pm-text transition-colors hover:bg-pm-row-active disabled:cursor-default disabled:opacity-40 disabled:hover:bg-pm-hover"
+            >
+              <WandSparkles size={11} />
+              Prettify
+            </button>
+          )}
 
           {tab === 'body' && (
             <select
