@@ -1781,10 +1781,38 @@ const handleSelectWorkspace = useCallback(async (path: string) => {
   }
 }, [setEnvironments, setSelectedEnvId]);
 
+// Esquece o estado de sincronização de um workspace (pelo nome): a base da
+// última sincronização, a pendência de push, as versões dos arquivos tidas
+// como sincronizadas, os marcadores, os grupos de abas e a env ativa.
+//
+// Excluir um workspace apagava só abas, collections e environments. Criado
+// (ou importado do GitHub) de novo com o MESMO nome — o jeito natural de
+// "baixar limpo" —, ele herdava a base velha: o Pull lia tudo o que está no
+// GitHub como "apagado aqui" e não trazia nada, e o push seguinte propunha
+// apagar do GitHub os arquivos do time.
+const forgetWorkspaceSyncState = async (path: string) => {
+  if (!path) return;
+  await Promise.all([
+    clearSyncBase(path),
+    saveWorkspaceMarkers(path, []),
+    saveTabGroups(path, []),
+    saveActiveEnvironmentId(path, null),
+  ]);
+  clearWorkspacePendingPush(path);
+  try {
+    await githubSyncRef.current?.restoreSynced(path, {});
+  } catch {
+    /* sem GitHub configurado: nada registrado */
+  }
+};
+
 const handleCreateWorkspace = useCallback(async (workspace: WorkspaceInfo) => {
   isSwitchingWorkspaceRef.current = true;
   try {
     const previousWorkspace = selectedWorkspaceRef.current;
+    // Workspace novo nasce sem passado: um que já existiu com este nome (e
+    // foi excluído antes da correção acima) não pode deixar a base dele.
+    await forgetWorkspaceSyncState(workspace.path);
 
     if (tabsHydrated.current) {
       await saveTabs(previousWorkspace, tabsRef.current);
@@ -1875,10 +1903,21 @@ const handleRenameWorkspaceLocal = useCallback(async (oldPath: string, newWorksp
       saveWorkspaceMarkers(oldPath, []),
     ]);
 
+    // A pendência de push também é por nome. Sem migrá-la, o "↑ para
+    // enviar" do nome novo ficava vazio, a exclusão pendente se perdia e o
+    // "Pull de todos" deixava de pular este workspace — substituindo o que
+    // ainda não tinha sido enviado.
+    const oldPending = readPendingPush(oldPath);
+    if (oldPending.collections.length) markCollectionsPendingPush(newPath, oldPending.collections);
+    if (oldPending.environments.length) markEnvironmentsPendingPush(newPath, oldPending.environments);
+    if (oldPending.requiresFullPush) markFullPushRequired(newPath);
+    clearWorkspacePendingPush(oldPath);
+
     if (selectedWorkspaceRef.current === oldPath) {
       selectedWorkspaceRef.current = newPath;
       setSelectedWorkspace(newPath);
       await persistSelectedWorkspace(newPath);
+      setPendingPush(readPendingPush(newPath));
     }
   } catch (err) {
     // Se a migração falhar no meio do caminho, o registro do workspace já foi
@@ -6318,6 +6357,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
       saveWorkspaceCollections(path, []),
       saveWorkspaceEnvironments(path, []),
     ]);
+    // E o estado de sincronização dele (ver forgetWorkspaceSyncState).
+    await forgetWorkspaceSyncState(path);
 
     await deleteWorkspaceStore(path);
 
