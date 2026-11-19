@@ -4084,6 +4084,21 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     clearWorkspacePendingPush(workspaceName);
     if (keepLocalEnvironments && envPendingBefore.length > 0) markEnvironmentsPendingPush(workspaceName, envPendingBefore);
 
+    // Restaurar um commit é o contrário de um pull: o que voltou é a versão
+    // ANTIGA, diferente do GitHub de hoje, e precisa subir. Antes a pendência
+    // era zerada como num pull — nada aparecia em "↑ para enviar", e o "Pull
+    // de todos" seguinte via o workspace como sem alteração e substituía o
+    // que tinha sido restaurado sem perguntar. Marca tudo o que voltou (o
+    // push mescla e não envia o que já for igual) e, se alguma collection
+    // daqui não existia naquele commit, a exclusão também fica pendente.
+    if (options?.fromCommit) {
+      if (collections.length > 0) markCollectionsPendingPush(workspaceName, collections.map(c => c.id));
+      if (!keepLocalEnvironments && environments.length > 0) markEnvironmentsPendingPush(workspaceName, environments.map(e => e.id));
+      const restoredIds = new Set(collections.map(c => c.id));
+      const before = Array.isArray(existingCollections) ? (existingCollections as CollectionItem[]) : [];
+      if (before.some(c => c?.id && !restoredIds.has(c.id))) markFullPushRequired(workspaceName);
+    }
+
     // E o que veio vira a base (substituindo a anterior) — senão o merge
     // seguinte lia como "alterado aqui" o que só tinha vindo de lá.
     // A base dos environments: sem os tokens de sessão (o que está lá), e

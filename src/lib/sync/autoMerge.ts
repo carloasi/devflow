@@ -4,7 +4,7 @@ import { sameContent } from '@/lib/canonicalCompare';
 import { classifyNode, type NodeOrigin } from '@/lib/diffOrigin';
 import type { NodeHashes } from '@/lib/syncBase';
 import { diffableText, lcsTable, MAX_CELLS } from '@/lib/textDiff';
-import { fieldOrigin, fieldValue, MERGE_FIELDS, REST, restOf, type FieldOrigin, type MergeField } from './fieldMerge';
+import { fieldOrigin, fieldValue, MERGE_FIELDS, REST, REST_DIFF_FIELDS, restOf, type FieldOrigin, type MergeField } from './fieldMerge';
 import { orderDecision } from './rebase';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -267,6 +267,7 @@ export function resolveNode(node: DiffNode, ctx: AutoMergeContext, origin?: Node
   const conflicts: string[] = [];
   let fromGithub = false;
   let orderMine = false;
+  const originByField: Record<string, string> = {};
 
   for (const diff of node.fields) {
     const field = diff.field;
@@ -277,12 +278,16 @@ export function resolveNode(node: DiffNode, ctx: AutoMergeContext, origin?: Node
       else conflicts.push(field);
       continue;
     }
+    // Tipo de body, gRPC, variáveis da collection…: o REST (abaixo) decide.
+    if (REST_DIFF_FIELDS.has(field)) continue;
     if (!(MERGE_FIELDS as readonly string[]).includes(field)) {
       conflicts.push(field);
       continue;
     }
     const baseValue = baseOf(item => fieldValue(item, field as MergeField));
-    switch (originOf(ctx.base, node.id, field, diff.local, diff.remote, baseValue)) {
+    const origin = originOf(ctx.base, node.id, field, diff.local, diff.remote, baseValue);
+    originByField[field] = origin;
+    switch (origin) {
       case 'same':
         break;
       case 'github':
@@ -316,6 +321,9 @@ export function resolveNode(node: DiffNode, ctx: AutoMergeContext, origin?: Node
   if (rest === 'github') fromGithub = true;
   else if (rest === 'both' || rest === 'unknown') conflicts.push(REST);
 
+  // A URL daqui leva os path params daqui (urlexport inteiro): se foi o
+  // GitHub que os mudou, é conflito (ver fieldMergePlan).
+  if (originByField.url === 'here' && originByField.pathParams === 'github') conflicts.push('pathParams');
   if (conflicts.length > 0) return { kind: 'conflict', fields: conflicts };
   // Tudo o que mudou é seu: a sua versão inteira já é o resultado.
   if (!fromGithub) return { kind: 'mine' };

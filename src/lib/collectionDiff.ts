@@ -88,6 +88,23 @@ export function fieldDiffs(local: CollectionItem, remote: CollectionItem): Field
   compare('markers', local.markers, remote.markers);
   compare('markerNotes', local.markerNotes, remote.markerNotes);
 
+  // O resto do que a request guarda. Antes não entrava aqui: mudar SÓ o
+  // valor de um path param (`:id` = 5 → 7, mesma URL), o tipo do body, a
+  // request gRPC, as variáveis da collection ou os headers padrão desligados
+  // não gerava diferença nenhuma — o pull dizia "em dia" sem trazer a
+  // mudança do colega, e o push seguinte gravava a versão antiga por cima.
+  // Ausente, vazio e o valor padrão contam como iguais: são a mesma coisa
+  // pro app, e não podem virar diferença em todo item.
+  const optional = (field: string, a: unknown, b: unknown) => {
+    if (!same({ v: a }, { v: b })) out.push({ field, local: a, remote: b });
+  };
+  optional('pathParams', local.request?.urlexport?.variable, remote.request?.urlexport?.variable);
+  optional('bodyType', local.request?.bodyType ?? 'raw', remote.request?.bodyType ?? 'raw');
+  optional('disabledDefaultHeaders', local.request?.disabledDefaultHeaders, remote.request?.disabledDefaultHeaders);
+  optional('protocol', local.protocol ?? 'http', remote.protocol ?? 'http');
+  optional('grpc', local.grpc, remote.grpc);
+  optional('variable', local.variable, remote.variable);
+
   return out;
 }
 

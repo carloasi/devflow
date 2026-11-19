@@ -31,7 +31,24 @@ export const MERGE_FIELDS = [
   'description',
   'markers',
   'markerNotes',
+  // Valores dos path params (urlexport.variable). Fora do REST (o urlexport
+  // viaja com a URL), então sem campo próprio a mudança de um `:id` com a
+  // mesma URL não era de ninguém: no merge por campo valia a versão de lá.
+  'pathParams',
 ] as const;
+
+/**
+ * Campos do diff (collectionDiff.fieldDiffs) que o REST cobre: não têm caixa
+ * própria no merge por campo — mudam junto com o resto do conteúdo, de um
+ * lado inteiro (ver fieldMergePlan e o Auto merge).
+ */
+export const REST_DIFF_FIELDS: ReadonlySet<string> = new Set([
+  'bodyType',
+  'disabledDefaultHeaders',
+  'protocol',
+  'grpc',
+  'variable',
+]);
 
 export type MergeField = (typeof MERGE_FIELDS)[number];
 
@@ -67,6 +84,7 @@ export function fieldValue(item: CollectionItem, field: MergeField): unknown {
     case 'description': return item.description;
     case 'markers': return item.markers;
     case 'markerNotes': return item.markerNotes;
+    case 'pathParams': return item.request?.urlexport?.variable;
   }
 }
 
@@ -106,7 +124,9 @@ export function fieldOrigin(
   localValue: unknown,
   remoteValue: unknown
 ): FieldOrigin {
-  if (sameContent(localValue, remoteValue)) return 'same';
+  // Embrulhado: ausente e vazio ([] / {}) são o mesmo valor — sem isto um
+  // `undefined` contra `[]` (path params, por exemplo) parecia mudança.
+  if (sameContent({ v: localValue }, { v: remoteValue })) return 'same';
   const recorded = base?.[fieldHashKey(nodeId, field)];
   if (recorded === undefined) return 'unknown';
   const changedHere = hashContent(localValue) !== recorded;
@@ -133,14 +153,20 @@ export function fieldMergePlan(
   if (rest === 'both' || rest === 'here' || rest === 'unknown') return null;
 
   const overrides: Record<string, unknown> = {};
+  const origins: Partial<Record<MergeField, FieldOrigin>> = {};
   for (const field of MERGE_FIELDS) {
     const origin = fieldOrigin(base, nodeId, field, fieldValue(local, field), fieldValue(remote, field));
     if (origin === 'both' || origin === 'unknown') return null;
+    origins[field] = origin;
     if (origin !== 'here') continue;
     overrides[field] = fieldValue(local, field);
     // A URL leva junto o urlexport daqui (host/path/variáveis derivados
     // dela) — só o `raw` deixaria o resto apontando pra URL do GitHub.
     if (field === 'url' && local.request?.urlexport) overrides.urlexport = local.request.urlexport;
   }
+  // A URL daqui leva o urlexport daqui inteiro — com os path params daqui.
+  // Se foi o GitHub que mudou os path params, levá-los apagaria a mudança
+  // dele: é conflito (os dois mexeram no endereço da request).
+  if (origins.url === 'here' && origins.pathParams === 'github') return null;
   return overrides;
 }

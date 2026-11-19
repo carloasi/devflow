@@ -332,7 +332,13 @@ export function matchesSyncBase(base: NodeHashes | null, root: CollectionItem | 
 
   const local = nodeHashes([root]);
   for (const [key, value] of Object.entries(local)) {
-    if (base[key] !== value) return false;
+    if (base[key] === value) continue;
+    // Campo que a base ainda não registra (base gravada antes de o campo
+    // existir, como `pathParams`): o hash do nó inteiro, acima, já diz se
+    // ele mudou — não é motivo pra deixar a pendência acesa.
+    const hash = key.indexOf('#');
+    if (base[key] === undefined && hash > 0 && base[key.slice(0, hash)] !== undefined) continue;
+    return false;
   }
 
   // Nó que a base tinha nesta collection e que não existe mais aqui.
@@ -379,7 +385,9 @@ export function pendingChanges(
         (before.length === ids.length &&
           before.some((id, i) => id !== ids[i]) &&
           before.every(id => ids.includes(id))));
-    const fields = Object.entries(fieldHashesOf(node)).some(([k, v]) => base[k] !== v);
+    // Campo sem registro na base (gravada antes de ele existir): o hash do
+    // nó (`own`) já cobre — sem isto todo item contaria como mudado.
+    const fields = Object.entries(fieldHashesOf(node)).some(([k, v]) => base[k] !== undefined && base[k] !== v);
     if (own || moved || reordered || fields) changed.push(node.id);
     node.item?.forEach(child => walk(child, node.id));
   };

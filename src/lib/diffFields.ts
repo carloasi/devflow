@@ -97,6 +97,14 @@ export function applyFieldOverride(
     // Não editável na tela (não está em TEXT/JSON_FIELDS): é o merge
     // automático por campo (lib/sync/fieldMerge) que leva o urlexport junto
     // com a URL, aplicado DEPOIS dela.
+    case 'pathParams': {
+      // Só os valores dos path params; o resto do urlexport fica.
+      type UrlExport = NonNullable<CollectionItem['request']>['urlexport'];
+      const variable = (Array.isArray(value) ? value : []) as UrlExport['variable'];
+      next.request = { ...request, urlexport: { ...request.urlexport, variable } };
+      return next;
+    }
+
     case 'urlexport':
       if (value && typeof value === 'object') {
         next.request = { ...request, urlexport: value as NonNullable<CollectionItem['request']>['urlexport'] };
