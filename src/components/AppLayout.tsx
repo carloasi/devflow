@@ -46,6 +46,7 @@ import { buildRequestHeaders, requestHasBody } from '@/lib/defaultHeaders';
 import { resolveAfterPreRequest } from '@/lib/preRequestResolution';
 import { ExampleResponseEditor, STATUS_TEXT } from './ExampleResponseEditor';
 import { normalizeExampleLanguage } from '@/lib/exampleLanguage';
+import { prettyBodyPreservingTemplates } from './CollectionRunner/payloadOverride';
 import { listen } from '@tauri-apps/api/event';
 import { GrpcRequestPanel } from './Grpc/GrpcRequestPanel';
 import { GrpcResponsePanel } from './Grpc/GrpcResponsePanel';
@@ -879,12 +880,17 @@ function buildTabFromItem(item: CollectionItem): Tab {
 // Cópia editável da resposta de um example (com defaults pra examples
 // antigos/incompletos).
 function toExampleDraft(example: ExampleData | undefined): ExampleData {
+  const body = example?.body ?? '';
+  const previewLanguage = normalizeExampleLanguage(example?.previewLanguage, example?.headers, body);
   return {
     status: example?.status ?? 'OK',
     code: example?.code ?? 200,
     headers: (example?.headers ?? []).map(h => ({ ...h })),
-    body: example?.body ?? '',
-    previewLanguage: normalizeExampleLanguage(example?.previewLanguage, example?.headers, example?.body),
+    // JSON abre sempre formatado (respostas de HAR e de APIs costumam vir
+    // numa linha só). Só o rascunho da aba muda: o example salvo continua
+    // como estava até alguém editar e salvar. JSON quebrado volta igual.
+    body: previewLanguage === 'json' ? prettyBodyPreservingTemplates(body) : body,
+    previewLanguage,
   };
 }
 
