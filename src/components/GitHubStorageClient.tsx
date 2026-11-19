@@ -2521,20 +2521,26 @@ useEffect(() => {
     // a base: marcador apagado aqui não volta, apagado lá não é reenviado, e
     // o que o colega renomeou não é desfeito (lib/markers). Sem conseguir
     // ler o de lá, o catálogo fica fora deste push.
-    const markers = await markersForPush(storage, wsRemotePath, input.workspaceName, input.markers);
-    // Marcador com o mesmo nome de um do GitHub (outro id): a árvore sobe já
-    // com o id de lá, o mesmo que o catálogo enviado leva.
-    const collections = markers && markers.remapped.size > 0
-      ? remapMarkers(input.collections as CollectionItem[], markers.remapped)
-      : input.collections;
-    const plan = buildPushPlan({
-      wsRemotePath,
-      collections,
-      // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
-      environments: withoutSessionTokens(input.environments),
-      markers: markers?.send ?? null,
-      existingPaths: [...existing.collectionPaths, ...existing.envPaths],
-    });
+    // Catálogo, árvore e plano saem juntos de UMA leitura do catálogo de lá —
+    // e são refeitos se ele mudar no meio do envio (ver o laço do commit).
+    const prepare = async () => {
+      const markers = await markersForPush(storage, wsRemotePath, input.workspaceName, input.markers);
+      // Marcador com o mesmo nome de um do GitHub (outro id): a árvore sobe
+      // já com o id de lá, o mesmo que o catálogo enviado leva.
+      const collections = markers && markers.remapped.size > 0
+        ? remapMarkers(input.collections as CollectionItem[], markers.remapped)
+        : input.collections;
+      const plan = buildPushPlan({
+        wsRemotePath,
+        collections,
+        // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
+        environments: withoutSessionTokens(input.environments),
+        markers: markers?.send ?? null,
+        existingPaths: [...existing.collectionPaths, ...existing.envPaths],
+      });
+      return { markers, collections, plan };
+    };
+    let { markers, collections, plan } = await prepare();
     // Só propõe apagar o que já esteve sincronizado aqui (você apagou). Um
     // arquivo que nunca foi sincronizado é NOVO no GitHub — de um colega —, e
     // o diálogo dizia "You removed this here" sobre ele.
@@ -2554,14 +2560,25 @@ useEffect(() => {
       else keptStale = stalePaths;
     }
 
-    const result = await storage.commitFiles(
-      [
-        // O catálogo é mesclado no pull, não revisado: sem checagem de versão.
-        ...plan.files.map((f) => ({ path: f.path, content: f.content, noCheck: f.kind === "markers" })),
-        ...removed.map((path) => ({ path, delete: true })),
-      ],
-      pushCommitMessage(input.workspaceName, plan, removed.length)
-    );
+    // O catálogo também passa pela checagem de versão. Sem ela, quem enviasse
+    // por último gravava o catálogo calculado ANTES do commit do outro — e o
+    // marcador que o outro acabou de criar sumia de lá (no pull seguinte
+    // dele, sumia também daqui, junto com as marcas nos itens).
+    // Se só ele mudou no meio, não é conflito pra revisar: ele é mesclado
+    // (catalogForPush). Relê, recalcula e tenta de novo.
+    const markersPath = markersFilePath(wsRemotePath);
+    let result: Awaited<ReturnType<typeof storage.commitFiles>>;
+    for (let attempt = 0; ; attempt++) {
+      result = await storage.commitFiles(
+        [
+          ...plan.files.map((f) => ({ path: f.path, content: f.content })),
+          ...removed.map((path) => ({ path, delete: true })),
+        ],
+        pushCommitMessage(input.workspaceName, plan, removed.length)
+      );
+      if (result.ok || attempt >= 2 || !result.conflicts.every((path) => path === markersPath)) break;
+      ({ markers, collections, plan } = await prepare());
+    }
     if (!result.ok) return { status: "conflict", paths: result.conflicts };
     // A base do catálogo: o que ficou igual dos dois lados (markerBaseAfterPush).
     if (markers) await recordSyncBase(input.workspaceName, markers.base, [MARKER_BASE_PREFIX]);
@@ -3222,19 +3239,28 @@ useEffect(() => {
       // junto, no mesmo commit, senão renomear/recolorir um marcador só
       // chegaria ao GitHub num push do workspace inteiro.
       // Sem conseguir ler o catálogo de lá, ele fica fora deste envio.
-      const markers = await markersForPush(storage, remotePath, workspace, currentMarkers ?? []);
-      // Marcador com o mesmo nome de um do GitHub (outro id): sobe com o de lá.
-      const sent = markers && markers.remapped.size > 0 ? remapMarkers([col], markers.remapped)[0] : col;
-      const result = await storage.commitFiles(
-        [
-          { path: targetPath, content: stripStarredFlags(sent) },
-          ...(markers ? [{ path: markersFilePath(remotePath), content: { markers: markers.send }, noCheck: true }] : []),
-          ...removed.map((path) => ({ path, delete: true })),
-        ],
-        partOf
-          ? `sync(${workspace}): "${partOf}" in collection "${rawName}"`
-          : `sync(${workspace}): collection "${rawName}"${removed.length > 0 ? `, ${removed.length} file(s) removed` : ""}`
-      );
+      // Com checagem de versão, como no push do workspace (runWorkspacePush):
+      // se só o catálogo mudou lá no meio, relê, recalcula e tenta de novo.
+      const markersPath = markersFilePath(remotePath);
+      let markers: Awaited<ReturnType<typeof markersForPush>> = null;
+      let sent: CollectionItem = col;
+      let result: Awaited<ReturnType<typeof storage.commitFiles>>;
+      for (let attempt = 0; ; attempt++) {
+        markers = await markersForPush(storage, remotePath, workspace, currentMarkers ?? []);
+        // Marcador com o mesmo nome de um do GitHub (outro id): sobe com o de lá.
+        sent = markers && markers.remapped.size > 0 ? remapMarkers([col], markers.remapped)[0] : col;
+        result = await storage.commitFiles(
+          [
+            { path: targetPath, content: stripStarredFlags(sent) },
+            ...(markers ? [{ path: markersPath, content: { markers: markers.send } }] : []),
+            ...removed.map((path) => ({ path, delete: true })),
+          ],
+          partOf
+            ? `sync(${workspace}): "${partOf}" in collection "${rawName}"`
+            : `sync(${workspace}): collection "${rawName}"${removed.length > 0 ? `, ${removed.length} file(s) removed` : ""}`
+        );
+        if (result.ok || attempt >= 2 || !result.conflicts.every((path) => path === markersPath)) break;
+      }
       // Quem chamou (AppLayout) abre a revisão ao ver o conflito.
       if (!result.ok) throw new GitHubConflictError(result.conflicts[0]);
       if (markers) await recordSyncBase(workspace, markers.base, [MARKER_BASE_PREFIX]);
