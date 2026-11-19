@@ -138,7 +138,7 @@ import type { FileShas } from '@/lib/remoteVersions';
 import { pruneEmptyGroups, type TabGroup } from '@/lib/tabGroups';
 import { applySelectedChanges } from '@/lib/applyDiff';
 import { diffEnvironments, applyEnvironmentChanges } from '@/lib/environmentDiff';
-import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, matchesSyncBase, pendingChanges as pendingChangesSince, type NodeHashes } from '@/lib/syncBase';
+import { nodeHashes, recordSyncBase, loadSyncBase, clearSyncBase, reviewedBase, matchesSyncBase, adoptedRemoteBase, pendingChanges as pendingChangesSince, type NodeHashes } from '@/lib/syncBase';
 import type { PendingDetail } from '@/components/collection-tree/CollectionTree';
 import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
@@ -150,7 +150,14 @@ import { discardEnvironmentChange, discardLocalChange } from '@/lib/sync/discard
 import { asCancelled, isSyncCancelRequested, requestSyncCancel, resetSyncCancel, SYNC_CANCELLED_MESSAGE, throwIfSyncCancelled, captureSyncStatus, withoutActions, markResumeAfterReview, openSyncCenter, reportSyncStatus, setKnownConflicts, setSyncCenterBusy, takeResumeAfterReview, type SyncAction, type SyncActionResult, type SyncActionScope, type SyncCenterTab } from '@/lib/sync/syncCenterStore';
 import { SyncCenter } from '@/components/SyncCenter/SyncCenter';
 import { isInSubtree, withSubtreeFrom } from '@/lib/sync/subtreePush';
-import { ENV_BASE_PREFIX, environmentHashes, rebaseEnvironments } from '@/lib/sync/envMerge';
+import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, rebaseEnvironments } from '@/lib/sync/envMerge';
+
+// Grava na base o que o merge automático do push acabou de trazer pra cá
+// (ver adoptedRemoteBase / adoptedRemoteEnvBase).
+async function recordAdoptedBase(workspace: string, adopted: { hashes: NodeHashes; dropKeys: string[] }) {
+  if (Object.keys(adopted.hashes).length === 0 && adopted.dropKeys.length === 0) return;
+  await recordSyncBase(workspace, adopted.hashes, [], [], adopted.dropKeys);
+}
 import type { RebaseOutcome } from '@/components/GitHubStorageClient';
 import type { OverrideMap } from '@/lib/diffFields';
 import { SyncDiffDialog } from '@/components/SyncDiff/SyncDiffDialog';
@@ -4305,6 +4312,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       } else {
         await saveWorkspaceEnvironments(workspaceName, envResult.merged);
       }
+      // A base acompanha o que entrou aqui — vale mesmo se o commit falhar
+      // (ver adoptedRemoteEnvBase).
+      await recordAdoptedBase(workspaceName, adoptedRemoteEnvBase(envResult.merged, remoteEnvs, base));
     }
 
     if (!result) {
@@ -4344,6 +4354,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // O que veio do GitHub entra aqui também: depois do push, local e remoto
     // são a mesma árvore. Sem marcar pendência — não é edição local.
     await saveWorkspaceCollections(workspaceName, result.merged);
+    // A base acompanha o que entrou aqui, já agora: se o commit falhar, o que
+    // veio do GitHub não pode passar por mudança sua (ver adoptedRemoteBase).
+    await recordAdoptedBase(workspaceName, adoptedRemoteBase(result.merged, remoteTree, base));
     if (isCurrent) {
       suppressPendingMarkRef.current = true;
       // O ref já na hora: handlePushCompleted grava a base a partir dele, e
@@ -4959,6 +4972,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
             environmentsRef.current = next;
             setEnvironments(next);
             toSend = merged;
+            await recordAdoptedBase(workspace, adoptedRemoteEnvBase([merged], remoteEnv ? [remoteEnv] : [], base));
           }
         }
       } catch (e) {
@@ -5621,6 +5635,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         collectionsRef.current = next;
         setCollections(next);
         await saveWorkspaceCollections(workspace, next);
+        await recordAdoptedBase(workspace, adoptedRemoteBase([mergedRoot], [remoteRoot], base));
       }
 
       try {
@@ -5707,6 +5722,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
             collectionsRef.current = next;
             setCollections(next);
             await saveWorkspaceCollections(workspace, next);
+            await recordAdoptedBase(workspace, adoptedRemoteBase([mergedRoot], remoteRoot ? [remoteRoot] : [], base));
             toSend = mergedRoot;
           }
         }

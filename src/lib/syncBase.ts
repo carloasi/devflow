@@ -69,7 +69,10 @@ export async function recordSyncBase(
   // que foi apagado ficava na base pra sempre — e um item que alguém
   // restaurasse no GitHub era lido como "apagado aqui", e o push seguinte
   // desfazia a restauração.
-  replaceRoots: 'all' | string[] = []
+  replaceRoots: 'all' | string[] = [],
+  // Chaves exatas que saem (ver adoptedRemoteBase: o que foi apagado dos
+  // dois lados não pode continuar na base).
+  dropKeys: string[] = []
 ): Promise<void> {
   if (!workspace) return;
   // Em fila por workspace: é ler → mesclar → gravar, e duas chamadas
@@ -80,6 +83,7 @@ export async function recordSyncBase(
   const next = previous.then(async () => {
     try {
       const current = dropReplaced({ ...((await loadSyncBase(workspace)) ?? {}) }, replacePrefixes, replaceRoots);
+      for (const key of dropKeys) delete current[key];
       await store.set(KEY_PREFIX + workspace, { ...current, ...hashes });
     } catch (e) {
       // Perder a base não pode derrubar o push que acabou de dar certo: a
@@ -127,6 +131,57 @@ export function reviewedBase(
     return { hashes: nodeHashes(remoteTree.filter(root => roots.has(root.id))), replaceRoots: scope.rootIds };
   }
   return { hashes: pickNodeHashes(nodeHashes(remoteTree), new Set(scope.nodeIds)), replaceRoots: [] };
+}
+
+/**
+ * A base depois de trazer pra cá, ANTES do push, o que veio do GitHub (o
+ * merge automático do push, lib/sync/rebase).
+ *
+ * A árvore mesclada é gravada aqui antes do commit. Sem atualizar a base
+ * junto, se o commit falhasse (rede, cancelar, alguém enviando sem parar), o
+ * que veio de lá ficava aqui como se fosse SEU: um item que o colega criou e
+ * depois apagou era lido como "novo aqui" e voltava pro GitHub no push
+ * seguinte; um campo que ele mudou duas vezes virava conflito falso.
+ *
+ * Regra por chave da base (nó, campo, pai, ordem): onde a árvore mesclada
+ * ficou IGUAL ao GitHub, aquela parte está sincronizada com a versão que foi
+ * lida — vira base. Onde ainda difere, é mudança sua e a base antiga fica.
+ * Nó que a base tinha nestas collections e que não existe mais em nenhum dos
+ * dois lados (apagado lá e aqui) sai da base.
+ *
+ * `merged` e `remote`: as mesmas collections dos dois lados (pode ser só uma).
+ */
+export function adoptedRemoteBase(
+  merged: CollectionItem[] | null | undefined,
+  remote: CollectionItem[] | null | undefined,
+  base: NodeHashes | null
+): { hashes: NodeHashes; dropKeys: string[] } {
+  const mergedHashes = nodeHashes(merged);
+  const remoteHashes = nodeHashes(remote);
+  const hashes: NodeHashes = {};
+  for (const [key, value] of Object.entries(remoteHashes)) {
+    if (mergedHashes[key] === value && base?.[key] !== value) hashes[key] = value;
+  }
+
+  const dropKeys: string[] = [];
+  if (base) {
+    // Só nós destas collections: as outras não entraram na conta.
+    const roots = new Set([...(merged ?? []), ...(remote ?? [])].map(root => root?.id).filter(Boolean));
+    const suffix = `#${ROOT_FIELD}`;
+    const gone = new Set<string>();
+    for (const [key, value] of Object.entries(base)) {
+      if (!key.endsWith(suffix) || !roots.has(value)) continue;
+      const id = key.slice(0, -suffix.length);
+      if (mergedHashes[id] === undefined && remoteHashes[id] === undefined) gone.add(id);
+    }
+    if (gone.size > 0) {
+      for (const key of Object.keys(base)) {
+        const hash = key.indexOf('#');
+        if (gone.has(hash < 0 ? key : key.slice(0, hash))) dropKeys.push(key);
+      }
+    }
+  }
+  return { hashes, dropKeys };
 }
 
 export async function clearSyncBase(workspace: string): Promise<void> {

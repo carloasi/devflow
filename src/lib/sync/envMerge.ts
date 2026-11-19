@@ -66,6 +66,46 @@ export function environmentHashes(environments: Environment[] | null | undefined
 }
 
 /**
+ * A base dos environments depois de trazer pra cá, ANTES do push, o que veio
+ * do GitHub (rebaseEnvironments) — mesmo motivo de adoptedRemoteBase
+ * (lib/syncBase): sem isto, se o commit falhasse, a variável que veio de lá
+ * ficava aqui como se fosse sua, e o push seguinte desfazia o que o colega
+ * mudou ou apagou depois.
+ *
+ * Onde o environment mesclado ficou igual ao do GitHub (pelo mesmo id), a
+ * variável vira base. Variável que a base tinha e que não existe mais em
+ * nenhum dos dois lados sai — só nos environments presentes dos dois lados:
+ * `merged` e `remote` podem ser só um environment, e a ausência dos outros
+ * não diz nada. Tokens de sessão nunca entram (sobem vazios, lib/jwt).
+ */
+export function adoptedRemoteEnvBase(
+  merged: Environment[] | null | undefined,
+  remote: Environment[] | null | undefined,
+  base: NodeHashes | null
+): { hashes: NodeHashes; dropKeys: string[] } {
+  const remoteEnvs = withoutSessionTokens(remote ?? []);
+  const mergedHashes = environmentHashes(merged);
+  const remoteHashes = environmentHashes(remoteEnvs);
+  const hashes: NodeHashes = {};
+  for (const [key, value] of Object.entries(remoteHashes)) {
+    if (mergedHashes[key] === value && base?.[key] !== value) hashes[key] = value;
+  }
+
+  const dropKeys: string[] = [];
+  if (base) {
+    const mergedIds = new Set((merged ?? []).map(env => env?.id).filter(Boolean));
+    for (const env of remoteEnvs) {
+      if (!env?.id || !mergedIds.has(env.id)) continue;
+      const prefix = `${envKey(env.id)}:`;
+      for (const key of Object.keys(base)) {
+        if (key.startsWith(prefix) && mergedHashes[key] === undefined && remoteHashes[key] === undefined) dropKeys.push(key);
+      }
+    }
+  }
+  return { hashes, dropKeys };
+}
+
+/**
  * Ids (do diffEnvironments) que, numa REVISÃO de environments, devem
  * começar em "Mine": variável sua alterada desde a base (ou sem base pra
  * dizer), e variável/environment que você apagou aqui. Sem isto a revisão
