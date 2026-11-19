@@ -166,9 +166,9 @@ const en = {
   mvEditResult: 'Edit result',
   mvEditResultTitle: 'Type the result by hand — to add something or untangle a complex merge (or double-click the result)',
   mvManualNotePreview:
-    'Edited by hand — kept for this item: when you Resolve, the merge review starts with this text in the field (you can still change it there).',
+    'Edited by hand — kept for this item: when you Resolve, the merge review starts with this text in the field (you can still change it there). Undecided conflicts stay marked between <<<<<<< and >>>>>>> until you remove the markers.',
   mvBackToBoxes: 'Back to the checkboxes',
-  mvManualNote: 'Edited by hand — the checkboxes no longer apply.',
+  mvManualNote: 'Edited by hand — the checkboxes no longer apply. Undecided conflicts are marked between <<<<<<< and >>>>>>>: keep the right text and delete the markers.',
   mvShowLines: (n: number) => `Show ${n} unchanged line(s)`,
   mvResolveFirst: (n: number) => `Resolve ${n} conflict(s) in the merge first`,
 
@@ -620,9 +620,9 @@ const ptBR: SyncDiffStrings = {
   mvEditResult: 'Editar resultado',
   mvEditResultTitle: 'Digitar o resultado à mão — pra acrescentar algo ou desatar um merge complexo (ou dê duplo clique no resultado)',
   mvManualNotePreview:
-    'Editado à mão — fica guardado neste item: ao Resolver, a revisão do merge já abre com este texto no campo (dá pra ajustar lá).',
+    'Editado à mão — fica guardado neste item: ao Resolver, a revisão do merge já abre com este texto no campo (dá pra ajustar lá). Conflitos sem decisão ficam marcados entre <<<<<<< e >>>>>>> até você apagar as marcas.',
   mvBackToBoxes: 'Voltar às caixinhas',
-  mvManualNote: 'Editado à mão — as caixinhas deixaram de valer.',
+  mvManualNote: 'Editado à mão — as caixinhas deixaram de valer. Conflitos sem decisão ficam marcados entre <<<<<<< e >>>>>>>: deixe o texto certo e apague as marcas.',
   mvShowLines: (n: number) => `Mostrar ${n} linha(s) sem mudança`,
   mvResolveFirst: (n: number) => `Resolva antes ${n} conflito(s) no merge`,
 

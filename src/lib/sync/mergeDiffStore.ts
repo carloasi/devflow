@@ -16,6 +16,8 @@ export interface MergeDiffRequest {
   items: RemoteChangeItem[];
   /** Item aberto primeiro. */
   focusId?: string;
+  /** Workspace dos itens — a edição à mão vale só pra revisão dele. */
+  workspace?: string;
   /** Ação de quem abriu (ex. "Resolver agora" do aviso), no rodapé da janela. */
   action?: { label: string; onClick: () => void };
 }

@@ -37,6 +37,7 @@ import { MIN_LEFT, MIN_RIGHT, useSplitRatio } from '@/components/helper/useSplit
 import { autoMerge, mergePrefill, selectionAfter, TEXT_MERGE_FIELDS, type AutoMergeSummary, type NodeResolution } from '@/lib/sync/autoMerge'
 import {
   composeMerge,
+  conflictMarkerCount,
   defaultPicks,
   inferPicks,
   mergeChunks,
@@ -45,7 +46,12 @@ import {
   type MergeChunk,
 } from '@/lib/sync/mergeChunks'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
-import { draftsFromPreparedEdits, takePreparedEdits } from '@/lib/sync/preparedMergeEdits'
+import {
+  clearPreparedEdits,
+  draftsFromPreparedEdits,
+  preparedEditsFor,
+  preparedEditStamp,
+} from '@/lib/sync/preparedMergeEdits'
 import { REST, restOf } from '@/lib/sync/fieldMerge'
 import { sameContent } from '@/lib/canonicalCompare'
 import { useSyncDiffStrings, type SyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
@@ -211,6 +217,8 @@ interface Props {
    * compara as versões. `searched` = quantos commits olhou.
    */
   whoChangedItem?: (rootId: string, nodeId: string) => Promise<{ change: ItemChange | null; searched: number } | null>
+  /** Workspace revisado — só as edições preparadas na prévia DELE entram aqui. */
+  workspace?: string
 }
 
 // Chave do grupo "direto na raiz da collection". Caractere que nome de pasta
@@ -777,6 +785,7 @@ export function SyncDiffDialog({
   onApply,
   onShowHistory,
   whoChangedItem,
+  workspace,
 }: Props) {
   const isPush = mode === 'push'
   const t = useSyncDiffStrings()
@@ -853,11 +862,18 @@ export function SyncDiffDialog({
   // Resultado editado à mão na janela de diferença (prévia do aviso / da
   // Central): entra aqui como rascunho do campo, igual a digitar nesta tela —
   // marca o item, aparece como "editado" e dá pra voltar atrás. Os textos são
-  // os reais (ver lib/sync/preparedMergeEdits).
+  // os reais (ver lib/sync/preparedMergeEdits). Só as deste workspace e
+  // feitas sobre as MESMAS versões do campo (as daqui e do GitHub): se uma
+  // mudou desde a prévia, a edição já não vale. Saem do store só ao aplicar.
   useEffect(() => {
     if (!open) return
     const byId = new Map(nodes.map(n => [n.id, n]))
-    const prepared = takePreparedEdits(id => byId.get(id)?.change === 'modified')
+    const prepared = preparedEditsFor(workspace, (id, fieldName) => {
+      const node = byId.get(id)
+      if (node?.change !== 'modified') return undefined
+      const field = node.fields.find(f => f.field === fieldName)
+      return field ? preparedEditStamp(diffableText(field.local), diffableText(field.remote)) : undefined
+    })
     if (!prepared.length) return
     const seeded = draftsFromPreparedEdits(prepared, id => byId.get(id), {
       isEditable: isEditableField,
@@ -1173,10 +1189,18 @@ export function SyncDiffDialog({
   // Conflitos sem decisão no editor de três painéis, nos itens em Merge: o
   // texto deles ainda tem a linha da base no lugar do conflito, então o
   // Apply espera (como o "Accept merge" do Visual Studio).
-  const unresolvedCount = Object.entries(fieldPicks).reduce((acc, [key, { unresolved }]) => {
-    const [nodeId, field] = key.split('|')
-    return choiceOf(nodeId) === 'merged' && drafts[nodeId]?.[field] !== undefined ? acc + unresolved : acc
-  }, 0)
+  const unresolvedCount =
+    Object.entries(fieldPicks).reduce((acc, [key, { unresolved }]) => {
+      const [nodeId, field] = key.split('|')
+      return choiceOf(nodeId) === 'merged' && drafts[nodeId]?.[field] !== undefined ? acc + unresolved : acc
+    }, 0) +
+    // Editado à mão: o conflito pendente fica marcado no texto
+    // (composeForEditing) e conta até a marca sair.
+    [...manualFields].reduce((acc, key) => {
+      const [nodeId, field] = key.split('|')
+      const draft = drafts[nodeId]?.[field]
+      return choiceOf(nodeId) === 'merged' && draft !== undefined ? acc + conflictMarkerCount(draft) : acc
+    }, 0)
   const focused = nodes.find(n => n.id === focusedId) ?? null
 
   // Trechos do editor de três painéis, por campo de texto do item aberto.
@@ -1963,7 +1987,9 @@ export function SyncDiffDialog({
               {isPush ? t.cancelPush : t.close}
             </button>
             <button
-              onClick={() =>
+              onClick={() => {
+                // As edições da prévia destes itens entraram (ou foram trocadas).
+                clearPreparedEdits(workspace, nodes.map(n => n.id))
                 onApply(
                   selected,
                   appliedOverrides,
@@ -1980,7 +2006,7 @@ export function SyncDiffDialog({
                       }
                     })
                 )
-              }
+              }}
               disabled={errorCount > 0 || unresolvedCount > 0}
               title={
                 errorCount > 0

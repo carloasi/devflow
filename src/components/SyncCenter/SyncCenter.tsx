@@ -736,6 +736,7 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
       title: `${tabLabel[activeTab]} — ${workspace}`,
       items: forMergeDiff(items),
       focusId: diffSelectedRef.current ?? diffFocusId ?? undefined,
+      workspace,
     })
     setDiffFocusId(null)
   }
@@ -1034,6 +1035,7 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
             key={`${activeTab}:${diffFocusId}`}
             items={forMergeDiff(items)}
             focusId={diffFocusId}
+            workspace={workspace}
             onSelect={id => {
               diffSelectedRef.current = id
             }}

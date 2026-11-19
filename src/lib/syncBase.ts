@@ -133,6 +133,17 @@ export function reviewedBase(
   return { hashes: pickNodeHashes(nodeHashes(remoteTree), new Set(scope.nodeIds)), replaceRoots: [] };
 }
 
+/** Ordem dos filhos gravada na base: [] sem registro, `null` se ilegível. */
+function parseOrder(recorded: string | undefined): string[] | null {
+  if (!recorded) return [];
+  try {
+    const ids: unknown = JSON.parse(recorded);
+    return Array.isArray(ids) && ids.every(id => typeof id === 'string') ? ids : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * A base depois de trazer pra cá, ANTES do push, o que veio do GitHub (o
  * merge automático do push, lib/sync/rebase).
@@ -358,12 +369,16 @@ export function pendingChanges(
     // senão mover um item contava 3 (ele e as duas pastas).
     const ids = node.item?.map(c => c.id) ?? [];
     const recorded = base[fieldHashKey(node.id, ORDER_FIELD)];
-    const before: string[] = recorded ? JSON.parse(recorded) : [];
+    // Ordem gravada ilegível (base corrompida ou editada à mão): antes o
+    // JSON.parse estourava e a contagem inteira nunca saía. Conta a pasta
+    // como mudada — na dúvida, a pendência fica à vista.
+    const before = parseOrder(recorded);
     const reordered =
       known &&
-      before.length === ids.length &&
-      before.some((id, i) => id !== ids[i]) &&
-      before.every(id => ids.includes(id));
+      (before === null ||
+        (before.length === ids.length &&
+          before.some((id, i) => id !== ids[i]) &&
+          before.every(id => ids.includes(id))));
     const fields = Object.entries(fieldHashesOf(node)).some(([k, v]) => base[k] !== v);
     if (own || moved || reordered || fields) changed.push(node.id);
     node.item?.forEach(child => walk(child, node.id));

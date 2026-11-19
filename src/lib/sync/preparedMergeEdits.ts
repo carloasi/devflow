@@ -1,18 +1,25 @@
+import { hashText } from '@/lib/contentHash';
+
 // ─────────────────────────────────────────────────────────────────────────
 // Resultado de merge editado à mão na janela de diferença (prévia), à
 // espera da revisão que vai aplicá-lo.
 //
 // A prévia (aviso de mudança no GitHub, Central de Sincronização) não aplica
 // nada: quem aplica é a revisão do merge (SyncDiffDialog), aberta pelo
-// "Resolver". Editar o resultado na prévia guarda o texto aqui, por item e
-// campo; a revisão, ao abrir, pega o que for dos itens dela e usa como
-// rascunho daquele campo — o mesmo que digitar lá.
+// "Resolver". Editar o resultado na prévia guarda o texto aqui, por
+// workspace, item e campo; a revisão, ao abrir, pega o que for dos itens dela
+// e usa como rascunho daquele campo — o mesmo que digitar lá.
+//
+// Cada edição leva o CARIMBO das duas versões sobre as quais foi feita (a
+// daqui e a do GitHub). Se uma delas mudou até a revisão abrir (o colega
+// enviou de novo, você editou o item), a edição é descartada: aplicada, ela
+// desfaria em silêncio o que mudou depois.
+//
+// Só sai daqui quando a revisão é APLICADA (clearPreparedEdits): abrir e
+// fechar a revisão sem aplicar não perde a edição.
 //
 // O texto guardado é o REAL (sem máscara de segredo, sem corte): é o que vai
-// ser salvo. Fica só em memória, nunca em storage.
-//
-// Vence depois de um tempo: uma edição esquecida não pode reaparecer numa
-// revisão aberta dias depois, sobre uma versão que já é outra.
+// ser salvo. Fica só em memória, nunca em storage, e vence depois de um tempo.
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface PreparedMergeEdit {
@@ -21,46 +28,102 @@ export interface PreparedMergeEdit {
   text: string;
 }
 
-export const PREPARED_EDIT_TTL_MS = 30 * 60_000;
-
-const edits = new Map<string, PreparedMergeEdit & { at: number }>();
-const keyOf = (itemId: string, field: string) => `${itemId}\u0000${field}`;
-
-/** Guarda (ou, com `undefined`, descarta) a edição de um campo. */
-export function setPreparedEdit(itemId: string, field: string, text: string | undefined, now: number = Date.now()): void {
-  const key = keyOf(itemId, field);
-  if (text === undefined) edits.delete(key);
-  else edits.set(key, { itemId, field, text, at: now });
+interface StoredEdit extends PreparedMergeEdit {
+  /** Workspace da prévia. Ausente = não se sabia (vale o carimbo). */
+  workspace?: string;
+  /** preparedEditStamp das versões daqui e do GitHub quando foi editada. */
+  stamp?: string;
+  at: number;
 }
 
-/** A edição guardada de um campo, se ainda vale — pra a prévia reabrir com ela. */
-export function getPreparedEdit(itemId: string, field: string, now: number = Date.now()): string | undefined {
-  const key = keyOf(itemId, field);
+export const PREPARED_EDIT_TTL_MS = 30 * 60_000;
+
+const edits = new Map<string, StoredEdit>();
+const keyOf = (workspace: string | undefined, itemId: string, field: string) =>
+  `${workspace ?? ''}\u0000${itemId}\u0000${field}`;
+const lf = (text: string) => text.replace(/\r\n/g, '\n');
+
+/** Carimbo das duas versões de um campo (a daqui e a do GitHub), como texto. */
+export function preparedEditStamp(local: string, remote: string): string {
+  return hashText(`${lf(local)}\u0000${lf(remote)}`);
+}
+
+export interface PreparedEditScope {
+  workspace?: string;
+  stamp?: string;
+}
+
+/** Guarda (ou, com `undefined`, descarta) a edição de um campo. */
+export function setPreparedEdit(
+  itemId: string,
+  field: string,
+  text: string | undefined,
+  scope: PreparedEditScope = {},
+  now: number = Date.now()
+): void {
+  const key = keyOf(scope.workspace, itemId, field);
+  if (text === undefined) edits.delete(key);
+  else edits.set(key, { itemId, field, text, workspace: scope.workspace, stamp: scope.stamp, at: now });
+}
+
+/**
+ * A edição guardada de um campo, se ainda vale — pra a prévia reabrir com
+ * ela. Com `stamp`, só se foi feita sobre as mesmas versões.
+ */
+export function getPreparedEdit(
+  itemId: string,
+  field: string,
+  scope: PreparedEditScope = {},
+  now: number = Date.now()
+): string | undefined {
+  const key = keyOf(scope.workspace, itemId, field);
   const edit = edits.get(key);
   if (!edit) return undefined;
   if (now - edit.at > PREPARED_EDIT_TTL_MS) {
     edits.delete(key);
     return undefined;
   }
+  if (scope.stamp !== undefined && edit.stamp !== undefined && edit.stamp !== scope.stamp) return undefined;
   return edit.text;
 }
 
 /**
- * Entrega e remove as edições dos itens que a revisão tem. As de outros itens
- * ficam (podem ser de outra revisão); as vencidas saem.
+ * As edições que valem pra uma revisão, SEM tirá-las daqui (quem tira é
+ * clearPreparedEdits, ao aplicar). `stampOf` dá o carimbo atual do campo na
+ * revisão — `undefined` quando o item/campo não está nela. Edição de outro
+ * workspace fica; edição feita sobre outra versão sai (já não vale).
  */
-export function takePreparedEdits(hasItem: (itemId: string) => boolean, now: number = Date.now()): PreparedMergeEdit[] {
+export function preparedEditsFor(
+  workspace: string | undefined,
+  stampOf: (itemId: string, field: string) => string | undefined,
+  now: number = Date.now()
+): PreparedMergeEdit[] {
   const out: PreparedMergeEdit[] = [];
   for (const [key, edit] of edits) {
     if (now - edit.at > PREPARED_EDIT_TTL_MS) {
       edits.delete(key);
       continue;
     }
-    if (!hasItem(edit.itemId)) continue;
-    edits.delete(key);
+    if (edit.workspace !== undefined && workspace !== undefined && edit.workspace !== workspace) continue;
+    const current = stampOf(edit.itemId, edit.field);
+    if (current === undefined) continue;
+    if (edit.stamp !== undefined && edit.stamp !== current) {
+      edits.delete(key);
+      continue;
+    }
     out.push({ itemId: edit.itemId, field: edit.field, text: edit.text });
   }
   return out;
+}
+
+/** A revisão foi aplicada: as edições destes itens já entraram (ou foram trocadas). */
+export function clearPreparedEdits(workspace: string | undefined, itemIds: Iterable<string>): void {
+  const ids = new Set(itemIds);
+  for (const [key, edit] of edits) {
+    if (!ids.has(edit.itemId)) continue;
+    if (edit.workspace !== undefined && workspace !== undefined && edit.workspace !== workspace) continue;
+    edits.delete(key);
+  }
 }
 
 /**

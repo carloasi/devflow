@@ -158,6 +158,56 @@ export function composeMerge(chunks: MergeChunk[], picks: ChunkPick[], crlf = fa
   return { text: crlf ? text.replace(/\n/g, '\r\n') : text, unresolved };
 }
 
+// ─── Edição à mão com conflito pendente ──────────────────────────────────
+// Ao trocar as caixinhas pelo texto, o conflito sem decisão entrava com as
+// linhas da BASE — as duas mudanças daquele trecho sumiam, e o contador de
+// conflitos zerava. Agora ele entra como no git, com os dois lados entre
+// marcas, e enquanto houver marca o Apply espera.
+
+export const CONFLICT_START = '<<<<<<< GitHub';
+export const CONFLICT_MID = '=======';
+export const CONFLICT_END = '>>>>>>> Mine';
+
+/**
+ * O texto com que a edição à mão começa: o das caixinhas, com cada conflito
+ * ainda sem decisão escrito entre marcas (os dois lados, o do GitHub antes).
+ */
+export function composeForEditing(chunks: MergeChunk[], picks: ChunkPick[], crlf = false): string {
+  const lines: string[] = [];
+  chunks.forEach((chunk, i) => {
+    const result = chunkResult(chunk, picks[i] ?? NONE);
+    if (result) lines.push(...result);
+    else lines.push(CONFLICT_START, ...chunk.theirs, CONFLICT_MID, ...chunk.mine, CONFLICT_END);
+  });
+  const text = lines.join('\n');
+  return crlf ? text.replace(/\n/g, '\r\n') : text;
+}
+
+/** Quantos conflitos marcados (composeForEditing) ainda restam num texto editado à mão. */
+export function conflictMarkerCount(text: string): number {
+  let count = 0;
+  for (const line of lf(text).split('\n')) if (line.startsWith('<<<<<<<')) count++;
+  return count;
+}
+
+/**
+ * Os dois conjuntos de trechos têm a mesma forma (tipo e tamanho de cada
+ * trecho)? Só então as marcas de um valem pro outro — mesmo número de
+ * trechos não basta, os cortes podem cair em lugares diferentes.
+ */
+export function sameChunkShape(a: MergeChunk[], b: MergeChunk[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (chunk, i) =>
+        chunk.kind === b[i].kind &&
+        chunk.base.length === b[i].base.length &&
+        chunk.mine.length === b[i].mine.length &&
+        chunk.theirs.length === b[i].theirs.length
+    )
+  );
+}
+
 /**
  * Marcas que reproduzem um texto já existente (um rascunho salvo, o Auto
  * merge, "Use mine"), ou `null` se ele foi editado à mão. Só tenta as marcas

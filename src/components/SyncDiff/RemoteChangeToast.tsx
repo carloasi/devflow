@@ -158,6 +158,7 @@ export function RemoteChangeToast({ workspace, commits, otherFiles, preview, onP
         : undefined,
       items,
       focusId,
+      workspace,
       action: onPull ? { label: conflicts > 0 ? t.rcResolve : t.rcPull, onClick: onPull } : undefined,
     })
   }

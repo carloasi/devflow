@@ -7532,6 +7532,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
 
 <SyncDiffDialog
   open={diffOpen}
+  workspace={pushWorkspaceAfterDiff ?? selectedWorkspace}
   nodes={diffNodes}
   pendingCollectionIds={pendingCollectionIds}
   base={diffSnapshotLabel ? null : diffBase}

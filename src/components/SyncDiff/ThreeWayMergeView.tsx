@@ -4,7 +4,9 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ArrowDown, ArrowUp, PencilLine, Undo2 } from 'lucide-react'
 import {
   chunkResult,
+  composeForEditing,
   composeMerge,
+  conflictMarkerCount,
   pickConflicts,
   type ChunkPick,
   type MergeChunk,
@@ -114,7 +116,9 @@ export function ThreeWayMergeView({
 
   const conflictIndexes = chunks.map((c, i) => (c.kind === 'conflict' ? i : -1)).filter(i => i >= 0)
   const composed = composeMerge(chunks, current, crlf)
-  const unresolved = manual ? 0 : composed.unresolved
+  // À mão, o conflito pendente fica marcado no texto (composeForEditing):
+  // conta enquanto a marca estiver lá.
+  const unresolved = manual ? conflictMarkerCount(manualText) : composed.unresolved
   const autoJoined = chunks.filter(c => c.kind === 'theirs' || c.kind === 'mine').length
 
   // Edição à mão do resultado: pra acrescentar algo que nenhum dos lados tem,
@@ -126,7 +130,7 @@ export function ThreeWayMergeView({
   const editByHand = () => {
     if (!canEditByHand || manual) return
     focusTextarea.current = true
-    onManualText(manualSeed ? manualSeed() : composed.text)
+    onManualText(manualSeed ? manualSeed() : composeForEditing(chunks, current, crlf))
   }
   useEffect(() => {
     if (!manual || !focusTextarea.current) return

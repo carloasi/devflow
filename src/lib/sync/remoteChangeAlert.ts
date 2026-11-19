@@ -38,6 +38,8 @@ export interface RemoteFieldPreview {
    * então o token real nunca acaba num storage por tabela.
    */
   raw?: () => RawFieldTexts;
+  /** A prévia mascarou um segredo neste campo (auth, header com credencial). */
+  masked?: boolean;
 }
 
 export interface RawFieldTexts {
@@ -107,6 +109,10 @@ function fieldsOf(node: DiffNode | undefined, only: string[], baseItemOf?: BaseI
     .map(f => {
       const known = baseItem !== undefined && (MERGE_FIELDS as readonly string[]).includes(f.field);
       const baseValue = known && baseItem ? fieldValue(baseItem, f.field as MergeField) : undefined;
+      // A prévia escondeu algum segredo? Então editar ali mostraria o valor
+      // real: a janela de diferença não oferece a edição à mão neste campo.
+      const hides = (value: unknown) => safeFieldText(f.field, value) !== diffableText(value);
+      const masked = hides(f.local) || hides(f.remote) || (known && !!baseItem && hides(baseValue));
       return {
         field: f.field,
         before: clip(safeFieldText(f.field, f.local)),
@@ -118,6 +124,7 @@ function fieldsOf(node: DiffNode | undefined, only: string[], baseItemOf?: BaseI
           after: diffableText(f.remote),
           base: known ? (baseItem ? diffableText(baseValue) : '') : null,
         }),
+        ...(masked ? { masked: true } : {}),
       };
     })
     .filter(f => f.before !== f.after);

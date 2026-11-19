@@ -5,9 +5,9 @@ import { X } from 'lucide-react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { useSyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
 import { closeMergeDiff, useMergeDiff, type MergeDiffRequest } from '@/lib/sync/mergeDiffStore'
-import { getPreparedEdit, setPreparedEdit } from '@/lib/sync/preparedMergeEdits'
+import { getPreparedEdit, preparedEditStamp, setPreparedEdit } from '@/lib/sync/preparedMergeEdits'
 import { isEditableField } from '@/lib/diffFields'
-import { composeMerge, defaultPicks, mergeChunks, type ChunkPick } from '@/lib/sync/mergeChunks'
+import { composeForEditing, defaultPicks, mergeChunks, sameChunkShape, type ChunkPick } from '@/lib/sync/mergeChunks'
 import type { RemoteChangeItem, RemoteFieldPreview } from '@/lib/sync/remoteChangeAlert'
 import { ThreeWayMergeView } from './ThreeWayMergeView'
 import { useSplitRatio } from '@/components/helper/useSplitRatio'
@@ -34,7 +34,17 @@ const BADGE: Record<string, string> = {
   reordered: 'bg-pm-hover text-pm-text-secondary',
 }
 
-function FieldDiff({ itemId, field, editable }: { itemId: string; field: RemoteFieldPreview; editable: boolean }) {
+function FieldDiff({
+  itemId,
+  field,
+  editable,
+  workspace,
+}: {
+  itemId: string
+  field: RemoteFieldPreview
+  editable: boolean
+  workspace?: string
+}) {
   const t = useSyncDiffStrings()
   const twoWay = field.base === undefined || field.base === null
   const chunks = useMemo(
@@ -43,28 +53,38 @@ function FieldDiff({ itemId, field, editable }: { itemId: string; field: RemoteF
   )
   // Começa como o merge automático faria: cada trecho com o lado que mudou.
   const [picks, setPicks] = useState<ChunkPick[] | null>(() => (chunks ? defaultPicks(chunks) : null))
+  // A edição vale só sobre estas versões do campo (a daqui e a do GitHub):
+  // se uma mudar até a revisão abrir, ela é descartada lá.
+  const raw = field.raw
+  const scope = useMemo(() => {
+    if (!raw) return { workspace }
+    const real = raw()
+    return { workspace, stamp: preparedEditStamp(real.before, real.after) }
+  }, [raw, workspace])
   // Resultado editado à mão, aqui mesmo. Fica guardado (preparedMergeEdits) e
   // a revisão do merge o usa como rascunho do campo ao "Resolver"; reabrir a
   // janela mostra a edição de novo.
-  const [manualText, setManualText] = useState<string | null>(() => getPreparedEdit(itemId, field.field) ?? null)
+  const [manualText, setManualText] = useState<string | null>(() =>
+    editable ? getPreparedEdit(itemId, field.field, scope) ?? null : null
+  )
   const setManual = (text: string | null) => {
     setManualText(text)
-    setPreparedEdit(itemId, field.field, text ?? undefined)
+    setPreparedEdit(itemId, field.field, text ?? undefined, scope)
   }
   // A edição parte do texto REAL (sem máscara de segredo, sem corte) com o
   // que as caixinhas marcaram — nunca da prévia, cuja máscara viraria o valor
-  // salvo.
-  const raw = field.raw
+  // salvo. Conflito ainda sem decisão entra marcado (composeForEditing).
   const manualSeed =
     editable && raw
       ? () => {
           const real = raw()
           const realChunks = mergeChunks(real.base, real.before, real.after)
           if (!realChunks) return real.before
-          // Mesmos trechos que a prévia (o comum): valem as mesmas marcas.
+          // As marcas da prévia só valem se os trechos têm a mesma forma: o
+          // corte do texto longo pode deslocá-los sem mudar quantos são.
           const current = picks ?? defaultPicks(chunks ?? [])
-          const realPicks = chunks && realChunks.length === chunks.length ? current : defaultPicks(realChunks)
-          return composeMerge(realChunks, realPicks, real.before.includes('\r\n')).text
+          const realPicks = chunks && sameChunkShape(chunks, realChunks) ? current : defaultPicks(realChunks)
+          return composeForEditing(realChunks, realPicks, real.before.includes('\r\n'))
         }
       : undefined
   if (!chunks) return null
@@ -104,9 +124,12 @@ export function MergeDiffPanel({
   items,
   focusId,
   onSelect,
+  workspace,
 }: {
   items: RemoteChangeItem[]
   focusId?: string
+  /** Workspace dos itens — a edição à mão fica guardada só pra revisão dele. */
+  workspace?: string
   /** Avisa qual item está aberto (a Central o leva pra janela separada). */
   onSelect?: (id: string) => void
 }) {
@@ -171,8 +194,11 @@ export function MergeDiffPanel({
                     field={field}
                     // Só em CONFLITO: é o item que a revisão do merge abre ao
                     // "Resolver" — e é ela que aplica a edição. O que entra
-                    // sozinho no Pull não passa por ela.
-                    editable={selected.conflict && isEditableField(field.field)}
+                    // sozinho no Pull não passa por ela. Nem em campo com
+                    // segredo mascarado na prévia: editar mostraria o valor
+                    // real aqui (a revisão continua permitindo).
+                    editable={selected.conflict && isEditableField(field.field) && !field.masked}
+                    workspace={workspace}
                   />
                 ))
               )}
@@ -206,7 +232,7 @@ function MergeDiffBody({ request }: { request: MergeDiffRequest }) {
         {t.mdSimulation}
       </div>
 
-      <MergeDiffPanel items={request.items} focusId={request.focusId} />
+      <MergeDiffPanel items={request.items} focusId={request.focusId} workspace={request.workspace} />
 
       <div className="shrink-0 flex items-center justify-end gap-2 px-4 py-2.5 border-t border-pm-border">
         <button
