@@ -144,6 +144,7 @@ import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
 import { mergeTabSave } from '@/lib/sync/tabSaveMerge';
+import { sameContent } from '@/lib/canonicalCompare';
 import { exampleNameFor } from '@/lib/exampleName';
 import { withLocalOnlyValues } from '@/lib/sync/pulledEnvironments';
 import { buildSyncOverview, namePathTo, withContentPreviews, type SyncOverview } from '@/lib/sync/syncOverview';
@@ -528,6 +529,13 @@ function updateItemInTree(list: CollectionItem[], tabId: string, updates: Partia
     if (item.item) return { ...item, item: updateItemInTree(item.item, tabId, updates) };
     return item;
   });
+}
+
+/** A collection sem o nó `id` (o "Receber só este" de um item apagado no GitHub). */
+function removeItemFrom(root: CollectionItem, id: string): CollectionItem {
+  const strip = (items: CollectionItem[] | undefined): CollectionItem[] | undefined =>
+    items?.filter(item => item.id !== id).map(item => (item.item ? { ...item, item: strip(item.item) } : item));
+  return { ...root, item: strip(root.item) };
 }
 
 /** Troca o nó `id` por `next` (o Save de uma aba mesclada com o sync). */
@@ -1367,6 +1375,8 @@ export default function AppLayout() {
   const syncedUnderTabRef = useRef(new Map<string, CollectionItem>());
   // O Save "mesmo assim" do aviso de conflito chama o saveTabsList de agora.
   const saveTabsListRef = useRef<((tabs: Tab[]) => Promise<void>) | null>(null);
+  // "Receber só este" da Central (handleReceiveItem, declarado mais abaixo).
+  const receiveItemRef = useRef<((itemId: string, label: string) => Promise<void>) | null>(null);
   // Mesma razão do tabsRef: os callbacks de sync têm deps vazias e leriam
   // uma árvore congelada na primeira renderização.
   const collectionsRef = useRef<CollectionItem[]>(collections);
@@ -5173,7 +5183,16 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     let review = false;
     let reviewedOnReceive = false;
     try {
-      if (action === 'receive' || action === 'resolve' || action === 'all') {
+      // "Receber só este" (escopo de UM item, de uma linha da Central):
+      // só ele, sem o pull do workspace inteiro.
+      const receiveOne = action === 'receive' && !!(scope.itemId || scope.rootId);
+      if (receiveOne) {
+        const id = (scope.itemId ?? scope.rootId)!;
+        // Pelo ref: o handleReceiveItem é declarado mais abaixo.
+        await receiveItemRef.current?.(id, scope.label ?? id);
+        review = reviewRequestedRef.current;
+        reviewedOnReceive = review;
+      } else if (action === 'receive' || action === 'resolve' || action === 'all') {
         await handlePullWorkspaceWithReview();
         review = reviewRequestedRef.current;
         reviewedOnReceive = review;
@@ -5696,6 +5715,103 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       pullingCollectionRef.current = false;
     }
   }, [collections, importData, handlePullMarkers, takeUndoSnapshot]);
+
+  // "Receber só este" (Central): traz do GitHub SÓ um item — collection,
+  // pasta ou request —, sem mexer no resto da árvore. Mesma mescla do pull
+  // (lib/sync/rebase) recortada pela subárvore: o que mudou só lá entra, o
+  // que é seu fica; conflito dentro do item abre a revisão só dele.
+  const handleReceiveItem = useCallback(async (itemId: string, label: string) => {
+    const workspace = selectedWorkspaceRef.current;
+    const fail = (title: string, description?: string) => {
+      toast.error(title, description ? { description } : undefined);
+      reportSyncStatus('error', description ? `${title}: ${description}` : title);
+    };
+    let remote;
+    try {
+      remote = await githubSyncRef.current?.fetchWorkspace(workspace, undefined, `Checking "${label}" on GitHub...`);
+    } catch (e) {
+      fail('Could not read GitHub', (e as Error)?.message ?? String(e));
+      return;
+    }
+    if (!remote) {
+      fail('GitHub sync is not set up — nothing was received.');
+      return;
+    }
+    if (remote.failedPaths.length > 0) {
+      fail('Nothing was received', `${remote.failedPaths.length} file(s) could not be read from GitHub. Try again.`);
+      return;
+    }
+    throwIfSyncCancelled();
+
+    const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
+    const base = await loadSyncBase(workspace);
+    // Depois das esperas: a árvore de agora.
+    const local = collectionsRef.current;
+    const result = rebaseCollections(local, remoteTree, base, new Set(readPendingPush(workspace).collections));
+    const inItem = (id: string) => result.nodes.some(n => n.id === id && isInSubtree(n, itemId));
+
+    // Conflito dentro do item: a revisão, só dele (handlePullCollection).
+    if (result.conflicts.some(inItem)) {
+      const node = findNodeById(local, itemId) ?? findNodeById(remoteTree, itemId);
+      if (!node) {
+        fail(`"${label}" no longer exists — nothing was received.`);
+        return;
+      }
+      setDiffConflictsOnly(true);
+      await handlePullCollection(node);
+      return;
+    }
+
+    // A collection do item, dos dois lados e já mesclada.
+    const rootOf = (tree: CollectionItem[]) => tree.find(c => c.id === itemId || !!findNodeById(c.item ?? [], itemId));
+    const localRoot = rootOf(local);
+    const remoteRoot = rootOf(remoteTree);
+    const mergedRoot = rootOf(result.merged) ?? (localRoot ? result.merged.find(c => c.id === localRoot.id) : undefined);
+    if (!localRoot && !remoteRoot) {
+      fail(`"${label}" no longer exists — nothing was received.`);
+      return;
+    }
+
+    let next: CollectionItem[];
+    let nextRoot: CollectionItem | undefined;
+    if (!localRoot) {
+      // Collection inteira nova no GitHub: entra como veio.
+      nextRoot = structuredClone(remoteRoot!);
+      next = [...local, nextRoot];
+    } else if (!mergedRoot) {
+      // Collection apagada no GitHub (e intocada aqui): sai daqui.
+      next = local.filter(c => c.id !== localRoot.id);
+    } else {
+      // Só o item, na versão mesclada, dentro da collection daqui.
+      nextRoot = withSubtreeFrom(localRoot, mergedRoot, itemId) ?? removeItemFrom(localRoot, itemId);
+      next = local.map(c => (c.id === localRoot.id ? nextRoot! : c));
+    }
+    if (sameContent(next, local)) {
+      toast.success(`"${label}" already matches GitHub — nothing to receive.`);
+      reportSyncStatus('success', `"${label}" already matches GitHub — nothing to receive.`);
+      return;
+    }
+
+    throwIfSyncCancelled();
+    suppressPendingMarkRef.current = true;
+    collectionsRef.current = next;
+    setCollections(next);
+    await saveWorkspaceCollections(workspace, next);
+    // Vira base só o que ficou igual ao GitHub (o item recebido): o resto da
+    // collection, com as suas mudanças, continua como estava.
+    await recordAdoptedBase(
+      workspace,
+      adoptedRemoteBase(nextRoot ? [nextRoot] : [], remoteRoot ? [remoteRoot] : [], base)
+    );
+    // As abas abertas do item recebido são recarregadas pelo efeito de
+    // `collections` (suppressPendingMarkRef acima), como num pull.
+    toast.success(`"${label}" received from GitHub.`);
+    reportSyncStatus('success', `"${label}" received from GitHub.`);
+  }, [importData, handlePullCollection]);
+
+  useEffect(() => {
+    receiveItemRef.current = handleReceiveItem;
+  }, [handleReceiveItem]);
 
   // "Push deste item" (subpasta ou request): sobe SÓ esse item. O arquivo
   // no GitHub continua sendo a collection inteira, então o que vai é a

@@ -125,11 +125,14 @@ export function MergeDiffPanel({
   focusId,
   onSelect,
   workspace,
+  itemHeader,
 }: {
   items: RemoteChangeItem[]
   focusId?: string
   /** Workspace dos itens — a edição à mão fica guardada só pra revisão dele. */
   workspace?: string
+  /** Faixa no topo do item aberto (a Central diz se ele vem ou vai, e de quem é). */
+  itemHeader?: (item: RemoteChangeItem) => React.ReactNode
   /** Avisa qual item está aberto (a Central o leva pra janela separada). */
   onSelect?: (id: string) => void
 }) {
@@ -183,6 +186,7 @@ export function MergeDiffPanel({
         <div className="flex-1 min-w-0 overflow-y-auto p-3">
           {selected ? (
             <div className="flex flex-col gap-3">
+              {itemHeader?.(selected)}
               <div className="text-[12px] font-semibold text-pm-text">{selected.path.join(' / ')}</div>
               {selected.fields.length === 0 ? (
                 <p className="text-[11px] text-pm-text-muted">{t.mdNoFields}</p>

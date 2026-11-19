@@ -223,6 +223,30 @@ const en = {
   scFilteredBy: (label: string) => `Only "${label}"`,
   scShowAll: 'Show all',
   scLastChange: (author: string, when: string) => `last change by ${author}${when ? ` · ${when}` : ''}`,
+  // Faixa da visão lado a lado: pra onde a mudança vai, e de quem é.
+  scDirIncoming: (change: string): string =>
+    change === 'new'
+      ? 'You will RECEIVE this new item from GitHub'
+      : change === 'deleted'
+        ? 'It was deleted on GitHub — receiving REMOVES it here'
+        : 'You will RECEIVE this change from GitHub — the GitHub side replaces yours',
+  scDirOutgoing: (change: string): string =>
+    change === 'new'
+      ? 'You will SEND this new item to GitHub'
+      : change === 'deleted'
+        ? 'You deleted it here — sending REMOVES it from GitHub'
+        : 'You will SEND this change to GitHub — your side replaces GitHub’s',
+  scDirConflict: 'Changed here AND on GitHub — you decide what stays',
+  scDirBy: (author: string, when: string) => `Changed by ${author}${when ? ` · ${when}` : ''} on GitHub`,
+  scDirByYou: (name: string) => `Changed by you${name ? ` (${name})` : ''} on this computer — not sent yet`,
+  scDirByUnknown: 'Author on GitHub not available',
+  scDirReceiveBtn: 'Receive this item',
+  scDirSendBtn: 'Send this item',
+  scDirResolveBtn: 'Resolve this item',
+  scReceiveThis: 'Receive only this',
+  scReceiveThisTitle: 'Bring only this item from GitHub — the rest stays as it is',
+  scResolveThis: 'Resolve',
+  scResolveThisTitle: 'Open the review of only this item to decide what stays',
   scReceiveOnly: 'Receive only',
   scSendOnly: 'Send only',
   scSyncAll: 'Sync all',
@@ -675,6 +699,29 @@ const ptBR: SyncDiffStrings = {
   scFilteredBy: (label: string) => `Só "${label}"`,
   scShowAll: 'Mostrar tudo',
   scLastChange: (author: string, when: string) => `última mudança de ${author}${when ? ` · ${when}` : ''}`,
+  scDirIncoming: (change: string) =>
+    change === 'new'
+      ? 'Você vai RECEBER este item novo do GitHub'
+      : change === 'deleted'
+        ? 'Foi apagado no GitHub — receber APAGA daqui'
+        : 'Você vai RECEBER esta mudança do GitHub — o lado do GitHub substitui o seu',
+  scDirOutgoing: (change: string) =>
+    change === 'new'
+      ? 'Você vai ENVIAR este item novo para o GitHub'
+      : change === 'deleted'
+        ? 'Você apagou aqui — enviar APAGA do GitHub'
+        : 'Você vai ENVIAR esta mudança para o GitHub — o seu lado substitui o do GitHub',
+  scDirConflict: 'Mudou aqui E no GitHub — você decide o que fica',
+  scDirBy: (author: string, when: string) => `Alterado por ${author}${when ? ` · ${when}` : ''} no GitHub`,
+  scDirByYou: (name: string) => `Alterado por você${name ? ` (${name})` : ''} neste computador — ainda não enviado`,
+  scDirByUnknown: 'Autor no GitHub indisponível',
+  scDirReceiveBtn: 'Receber este item',
+  scDirSendBtn: 'Enviar este item',
+  scDirResolveBtn: 'Resolver este item',
+  scReceiveThis: 'Receber só este',
+  scReceiveThisTitle: 'Traz só este item do GitHub — o resto fica como está',
+  scResolveThis: 'Resolver',
+  scResolveThisTitle: 'Abre a revisão só deste item pra decidir o que fica',
   scReceiveOnly: 'Só receber',
   scSendOnly: 'Só enviar',
   scSyncAll: 'Sincronizar tudo',

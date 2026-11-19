@@ -102,6 +102,111 @@ function timeAgo(iso: string, t: SyncDiffStrings, locale: string): string {
   return new Date(iso).toLocaleDateString(locale)
 }
 
+/** O usuário do Windows com que esta máquina assina os commits (ver GitHubStorageClient). */
+function localUserName(): string {
+  try {
+    return localStorage.getItem('app_win_username') ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Faixa no topo do item aberto na visão lado a lado: se ele VEM do GitHub
+ * (receber), VAI pra lá (enviar) ou pede decisão (conflito) — e de quem é a
+ * mudança. A tela só dizia "GitHub / Sua versão", e não ficava claro qual
+ * lado ia valer nem quem tinha mexido.
+ */
+function DiffDirection({
+  tab,
+  item,
+  lastChangeOf,
+  onAct,
+  busy,
+}: {
+  tab: SyncCenterTab
+  item: SyncItem
+  lastChangeOf: Props['lastChangeOf']
+  /** Receber, enviar ou resolver SÓ este item. */
+  onAct?: () => void
+  busy?: boolean
+}) {
+  const t = useSyncDiffStrings()
+  const locale = useLanguage()
+  const [last, setLast] = useState<LastChange | null | undefined>(undefined)
+  const remoteSide = tab !== 'outgoing'
+  useEffect(() => {
+    if (!remoteSide || !item.rootId) return
+    let alive = true
+    lastChangeOf(item.rootId)
+      .then(change => {
+        if (alive) setLast(change)
+      })
+      .catch(() => {
+        if (alive) setLast(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [remoteSide, item.rootId, lastChangeOf])
+
+  // As mesmas cores das abas (SYNC_TONE): azul recebe, verde envia, âmbar decide.
+  const tone =
+    tab === 'incoming'
+      ? 'border-[#9fd3f7]/35 bg-[#9fd3f7]/[0.07]'
+      : tab === 'outgoing'
+        ? 'border-[#4ff09d]/35 bg-[#4ff09d]/[0.06]'
+        : 'border-amber-400/40 bg-amber-400/[0.07]'
+  const icon =
+    tab === 'incoming' ? (
+      <ArrowDown size={14} className={SYNC_TONE.incoming} />
+    ) : tab === 'outgoing' ? (
+      <ArrowUp size={14} className={SYNC_TONE.outgoing} />
+    ) : (
+      <AlertTriangle size={14} className={SYNC_TONE.conflicts} />
+    )
+  const title =
+    tab === 'incoming' ? t.scDirIncoming(item.change) : tab === 'outgoing' ? t.scDirOutgoing(item.change) : t.scDirConflict
+  const remoteAuthor =
+    last?.authorName
+      ? t.scDirBy(last.authorName, last.date ? timeAgo(last.date, t, locale) : '')
+      : last === null || !item.rootId
+        ? t.scDirByUnknown
+        : ''
+  const you = t.scDirByYou(localUserName())
+
+  const actLabel = tab === 'incoming' ? t.scDirReceiveBtn : tab === 'outgoing' ? t.scDirSendBtn : t.scDirResolveBtn
+  const actButton =
+    tab === 'incoming'
+      ? 'bg-[#9fd3f7]/15 text-[#9fd3f7] hover:bg-[#9fd3f7]/25'
+      : tab === 'outgoing'
+        ? 'bg-[#4ff09d]/15 text-[#4ff09d] hover:bg-[#4ff09d]/25'
+        : 'bg-amber-400/15 text-amber-300 hover:bg-amber-400/25'
+
+  return (
+    <div className={`flex items-start gap-2 rounded-md border px-3 py-2 ${tone}`} role="note">
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1 flex flex-col gap-0.5">
+        <span className="text-[12px] font-semibold text-pm-text">{title}</span>
+        {tab === 'outgoing' && <span className="text-[11px] text-pm-text-secondary">{you}</span>}
+        {tab !== 'outgoing' && remoteAuthor && <span className="text-[11px] text-pm-text-secondary">{remoteAuthor}</span>}
+        {tab === 'conflicts' && <span className="text-[11px] text-pm-text-secondary">{you}</span>}
+      </div>
+      {onAct && (
+        <button
+          type="button"
+          onClick={onAct}
+          disabled={busy}
+          className={`shrink-0 h-7 px-2.5 inline-flex items-center gap-1.5 rounded-md text-[11.5px] font-semibold disabled:opacity-40 transition-colors cursor-pointer ${actButton}`}
+        >
+          {icon}
+          {actLabel}
+        </button>
+      )}
+    </div>
+  )
+}
+
 /** Itens agrupados pela collection (o primeiro nome do caminho). */
 function groupByCollection(items: SyncItem[]): { name: string; rootId?: string; items: SyncItem[] }[] {
   const groups = new Map<string, { name: string; rootId?: string; items: SyncItem[] }>()
@@ -255,6 +360,7 @@ function ItemRow({
   onToggle,
   onViewDiff,
   onSend,
+  onReceive,
   onDiscard,
   onOpen,
   busy,
@@ -266,6 +372,8 @@ function ItemRow({
   onViewDiff: () => void
   /** "Para enviar": manda só este item (pasta ou request). */
   onSend?: () => void
+  /** "Recebidos" e "Conflitos": traz só este item (conflito abre a revisão dele). */
+  onReceive?: () => void
   /** "Para enviar": volta este item à versão do GitHub. */
   onDiscard?: () => Promise<void>
   /** Abre a request numa aba. */
@@ -285,7 +393,7 @@ function ItemRow({
   const name = item.path[item.path.length - 1]
   const moved = (item.change === 'moved' || item.change === 'reordered') && !!item.localPath && !!item.remotePath
   // "Para enviar" sempre abre: é lá que ficam Abrir, Enviar e Descartar.
-  const canExpand = item.fields.length > 0 || moved || !!onDiscard || !!onOpen
+  const canExpand = item.fields.length > 0 || moved || !!onDiscard || !!onOpen || !!onReceive
   // "Para enviar": de como está no GitHub pra como está aqui. Nos outros, o
   // contrário — o que vai mudar AQUI.
   const outgoing = tab === 'outgoing'
@@ -316,7 +424,7 @@ function ItemRow({
           {name}
         </span>
         {fieldDiffs.length > 0 && (
-          <span className={`shrink-0 truncate max-w-[180px] text-[10.5px] text-pm-text-muted ${onSend ? 'pr-20' : 'pr-6'}`}>
+          <span className={`shrink-0 truncate max-w-[180px] text-[10.5px] text-pm-text-muted ${onSend || onReceive ? 'pr-20' : 'pr-6'}`}>
             {fieldDiffs.map(f => f.field).join(', ')}
           </span>
         )}
@@ -331,6 +439,22 @@ function ItemRow({
         >
           <ArrowUp size={10} className={SYNC_TONE.outgoing} />
           {t.scSendThis}
+        </button>
+      )}
+      {onReceive && (
+        <button
+          type="button"
+          onClick={onReceive}
+          disabled={busy}
+          title={item.conflict ? t.scResolveThisTitle : t.scReceiveThisTitle}
+          className={`absolute top-1 h-5 px-1.5 inline-flex items-center gap-1 rounded text-[10.5px] text-pm-text-secondary opacity-0 group-hover/item:opacity-100 focus:opacity-100 hover:text-pm-text hover:bg-pm-hover disabled:opacity-30 cursor-pointer ${item.fields.length > 0 ? 'right-7' : 'right-1'}`}
+        >
+          {item.conflict ? (
+            <AlertTriangle size={10} className={SYNC_TONE.conflicts} />
+          ) : (
+            <ArrowDown size={10} className={SYNC_TONE.incoming} />
+          )}
+          {item.conflict ? t.scResolveThis : t.scReceiveThis}
         </button>
       )}
       {item.fields.length > 0 && (
@@ -350,9 +474,19 @@ function ItemRow({
           {moved && from && to && (
             <p className="text-[11px] text-pm-text-secondary">{t.scMovedFromTo(from.join(' / '), to.join(' / '))}</p>
           )}
-          {(onOpen || onSend || onDiscard) && !confirming && (
+          {(onOpen || onSend || onReceive || onDiscard) && !confirming && (
             <div className="flex flex-wrap items-center gap-1.5">
               {onOpen && <RowAction onClick={onOpen}>{t.scOpenInTab}</RowAction>}
+              {onReceive && (
+                <RowAction onClick={onReceive} disabled={busy} title={item.conflict ? t.scResolveThisTitle : t.scReceiveThisTitle}>
+                  {item.conflict ? (
+                    <AlertTriangle size={10} className={SYNC_TONE.conflicts} />
+                  ) : (
+                    <ArrowDown size={10} className={SYNC_TONE.incoming} />
+                  )}
+                  {item.conflict ? t.scResolveThis : t.scReceiveThis}
+                </RowAction>
+              )}
               {onSend && (
                 <RowAction onClick={onSend} disabled={busy} title={t.scSendThisTitle}>
                   <ArrowUp size={10} className={SYNC_TONE.outgoing} />
@@ -515,6 +649,7 @@ function CollectionGroup({
   setOpenId,
   onViewDiff,
   onSend,
+  onReceive,
   onDiscard,
   onOpen,
   busy,
@@ -527,6 +662,8 @@ function CollectionGroup({
   onViewDiff: (focusId: string) => void
   /** Só em "Para enviar": manda um item (ou a collection inteira, sem id). */
   onSend?: (scope: SyncActionScope) => void
+  /** "Recebidos" e "Conflitos": traz só um item do GitHub. */
+  onReceive?: (scope: SyncActionScope) => void
   /** Só em "Para enviar": volta um item (ou a collection inteira) ao GitHub. */
   onDiscard?: (target: { itemId: string; label: string }) => Promise<void>
   onOpen?: (itemId: string) => void
@@ -619,6 +756,16 @@ function CollectionGroup({
               ? () =>
                   onSend({
                     rootId: group.rootId,
+                    itemId: item.id,
+                    label: item.path[item.path.length - 1],
+                  })
+              : undefined
+          }
+          onReceive={
+            onReceive
+              ? () =>
+                  onReceive({
+                    rootId: group.rootId ?? item.rootId,
                     itemId: item.id,
                     label: item.path[item.path.length - 1],
                   })
@@ -730,6 +877,24 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
     diffSelectedRef.current = focusId
     setDiffFocusId(focusId)
   }
+  // A Central já abre na visão lado a lado (a mesma do botão "ver as
+  // diferenças"), no primeiro item da aba que tem o que comparar — e trocar
+  // de aba mantém essa visão. "Voltar à lista" (ou Esc) desliga isso até a
+  // Central ser aberta de novo.
+  const [sideBySide, setSideBySide] = useState(true)
+  const backToList = () => {
+    setSideBySide(false)
+    setDiffFocusId(null)
+  }
+  const firstWithDiff = items.find(i => i.fields.length > 0)?.id ?? null
+  const focusStillThere = diffFocusId !== null && items.some(i => i.id === diffFocusId && i.fields.length > 0)
+  useEffect(() => {
+    if (!sideBySide || focusStillThere) return
+    // Aba sem nada a comparar (ou o item sumiu depois de uma ação): a lista.
+    diffSelectedRef.current = firstWithDiff
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- abre a visão lado a lado quando a lista chega (ou muda de aba)
+    setDiffFocusId(firstWithDiff)
+  }, [sideBySide, focusStillThere, firstWithDiff])
   // O jeito anterior: a mesma visão numa janela separada, por cima da Central.
   const openDiffInWindow = () => {
     openMergeDiff({
@@ -738,12 +903,15 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
       focusId: diffSelectedRef.current ?? diffFocusId ?? undefined,
       workspace,
     })
+    // Foi pra outra janela: esta volta à lista (e não reabre a visão sozinha).
+    setSideBySide(false)
     setDiffFocusId(null)
   }
   useEffect(() => {
     onWideChange?.(diffFocusId !== null)
     escapeOverride = diffFocusId !== null
       ? () => {
+          setSideBySide(false)
           setDiffFocusId(null)
           return true
         }
@@ -785,7 +953,10 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
       // Filtrada, só o "Enviar" fica no item; receber é sempre do workspace.
       // "Sincronizar tudo" envia pelo que a Central mostrou em "Para enviar",
       // não só pela pendência marcada (que nem sempre a acompanha).
-      const result = await runAction(action, action === 'send' ? explicitScope ?? scope : undefined, {
+      // "Receber só este" vem com o escopo do item; o "Só receber" do rodapé
+      // continua sendo o workspace inteiro.
+      const actionScope = action === 'send' ? explicitScope ?? scope : action === 'receive' ? explicitScope : undefined
+      const result = await runAction(action, actionScope, {
         outgoing: !!total && total.outgoing > 0,
       })
       // Parou num conflito: a tela de revisão assume.
@@ -932,6 +1103,8 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
             type="button"
             onClick={() => {
               setTab(id)
+              // Com a visão lado a lado ligada, ela reabre no primeiro item
+              // da aba nova (efeito acima); desligada, fica a lista.
               setDiffFocusId(null)
             }}
             className={`flex items-center gap-1.5 px-3 h-8 -mb-px border-b-2 text-[12px] cursor-pointer transition-colors ${
@@ -1013,7 +1186,7 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
           <div className="shrink-0 flex items-center gap-3 px-4 py-1.5 border-b border-pm-border">
             <button
               type="button"
-              onClick={() => setDiffFocusId(null)}
+              onClick={backToList}
               title={`${t.scBackToList} (Esc)`}
               className="h-6 px-2 inline-flex items-center gap-1 rounded-md text-[11.5px] text-pm-text-secondary hover:text-pm-text hover:bg-pm-hover transition-colors cursor-pointer"
             >
@@ -1038,6 +1211,29 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
             workspace={workspace}
             onSelect={id => {
               diffSelectedRef.current = id
+            }}
+            itemHeader={item => {
+              const full = items.find(i => i.id === item.id) ?? (item as SyncItem)
+              const label = full.path[full.path.length - 1]
+              const itemScope = { rootId: full.rootId, itemId: full.id, label }
+              // Item apagado aqui não sobe sozinho (vai com o envio da
+              // collection), igual à linha da lista.
+              const onAct =
+                activeTab === 'outgoing'
+                  ? full.change !== 'deleted'
+                    ? () => void run('send', itemScope)
+                    : undefined
+                  : () => void run('receive', itemScope)
+              return (
+                <DiffDirection
+                  key={full.id}
+                  tab={activeTab}
+                  item={full}
+                  lastChangeOf={lastChangeOf}
+                  onAct={onAct}
+                  busy={busy}
+                />
+              )
             }}
           />
         </>
@@ -1122,6 +1318,7 @@ function SyncCenterBody({ workspace, loadOverview, lastChangeOf, runAction, disc
                 setOpenId={setOpenId}
                 onViewDiff={viewDiff}
                 onSend={activeTab === 'outgoing' ? scopeSend => void run('send', scopeSend) : undefined}
+                onReceive={activeTab !== 'outgoing' ? scopeReceive => void run('receive', scopeReceive) : undefined}
                 onDiscard={activeTab === 'outgoing' ? target => discardTarget(target) : undefined}
                 onOpen={openItem}
                 busy={busy}
