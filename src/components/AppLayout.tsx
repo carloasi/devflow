@@ -5251,7 +5251,12 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     const pendingWorkspace = pushWorkspaceAfterDiff;
     if (pendingWorkspace) {
       const localBase = diffLocalOverride?.collections ?? [];
-      const merged = applySelectedChanges(localBase, diffRemoteTree, selectedIds, overrides);
+      const merged = structuredClone(applySelectedChanges(localBase, diffRemoteTree, selectedIds, overrides));
+      // Os itens que o colega MOVEU (e o que editou neles) não aparecem na
+      // revisão — mesma regra do ramo do workspace aberto, abaixo. Sem isto
+      // ficavam no lugar e com o conteúdo antigos, e o push `reviewed` (sem
+      // merge automático) desfazia a mudança dele no GitHub.
+      applyRemoteMoves(merged, localBase, diffRemoteTree, diffBase);
       setPushWorkspaceAfterDiff(null);
       setDiffLocalOverride(null);
       setDiffOpen(false);
@@ -5645,9 +5650,13 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         return; // o painel de sync já mostrou o motivo
       }
 
-      // O que está no GitHub agora é a base; a collection só deixa de estar
-      // pendente se não sobrou nenhuma outra mudança sua nela.
-      void recordSyncBase(workspace, nodeHashes([toSend]), [], [toSend.id, localRoot.id]);
+      // Vira base só o que ficou IGUAL dos dois lados (o item enviado e o que
+      // já coincidia). Gravar a collection inteira do GitHub como base, como
+      // antes, tornava "sincronizado" um conflito FORA do item — que este
+      // envio ignora de propósito: o push seguinte via o item como mudança só
+      // sua e gravava a sua versão por cima da do colega, sem revisão.
+      // A collection só deixa de estar pendente se não sobrou mudança sua nela.
+      void recordAdoptedBase(workspace, adoptedRemoteBase([mergedRoot], [toSend], base));
       const still = compareWorkspaces([mergedRoot], [toSend]);
       if (still.modified.length === 0 && still.onlyLocal.length === 0) {
         clearCollectionsPendingPush(workspace, [localRoot.id]);

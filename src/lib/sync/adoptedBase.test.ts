@@ -3,6 +3,7 @@ import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
 import { adoptedRemoteBase, nodeHashes, type NodeHashes } from '@/lib/syncBase';
 import { rebaseCollections } from './rebase';
+import { withSubtreeFrom } from './subtreePush';
 import { adoptedRemoteEnvBase, environmentHashes, rebaseEnvironments } from './envMerge';
 
 // O merge automático do push grava aqui o que veio do GitHub ANTES do commit.
@@ -89,6 +90,29 @@ describe('adoptedRemoteBase', () => {
     const { dropKeys } = adoptedRemoteBase(merged, remote, base);
     expect(dropKeys.length).toBeGreaterThan(0);
     expect(dropKeys.every(key => key === 'b' || key.startsWith('b#'))).toBe(true);
+  });
+
+  it('pushing ONE item keeps a conflict outside it as a conflict', () => {
+    // Você e o colega mudaram a; você envia só b ("Push deste item").
+    const local = [folder('c', [req('a', 'a-mine'), req('b', 'b-mine')])];
+    const remote = [folder('c', [req('a', 'a-theirs'), req('b', 'b0')])];
+    const r = rebaseCollections(local, remote, base0, new Set(['c']));
+    expect(r.conflicts).toEqual(['a']);
+    const mergedRoot = r.merged[0];
+    const toSend = withSubtreeFrom(remote[0], mergedRoot, 'b')!;
+    expect(bodyOf([toSend], 'a')).toBe('a-theirs');
+    expect(bodyOf([toSend], 'b')).toBe('b-mine');
+
+    // Depois do envio, o próximo push do workspace ainda pergunta sobre a.
+    const after = apply(base0, adoptedRemoteBase([mergedRoot], [toSend], base0));
+    expect(rebaseCollections([mergedRoot], [toSend], after, new Set(['c'])).conflicts).toEqual(['a']);
+
+    // Gravando o GitHub inteiro como base (o de antes), a virava "só sua" e
+    // ia por cima da do colega sem revisão.
+    const old = nodeHashes([toSend]);
+    const silent = rebaseCollections([mergedRoot], [toSend], old, new Set(['c']));
+    expect(silent.conflicts).toEqual([]);
+    expect(bodyOf(silent.merged, 'a')).toBe('a-mine');
   });
 
   it('keeps the base of something you deleted here that GitHub still has', () => {
