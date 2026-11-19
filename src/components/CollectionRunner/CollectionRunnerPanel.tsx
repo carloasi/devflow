@@ -1,6 +1,5 @@
 'use client'
 
-import { DevFlowSpinner } from '@/components/helper/DevFlowLoader';
 import { buildJUnitXml } from '@/lib/junitReport'
 import { buildRunReport } from '@/lib/runReport'
 import { acceptTestExpectation } from '@/lib/acceptTestExpectation'
@@ -29,6 +28,19 @@ import {
   isBodyEdited,
   prettyBodyPreservingTemplates,
 } from './payloadOverride'
+
+// Spinner neutro do Runner: um anel girando, sem o ícone do app (o
+// DevFlowSpinner traz a marca no meio e parecia o logo na lista de requests).
+function RunSpinner({ size }: { size: number }) {
+  return (
+    <span
+      role="status"
+      aria-label="Running"
+      className="inline-block shrink-0 rounded-full border-[1.5px] border-pm-border border-t-pm-text-muted animate-spin"
+      style={{ width: size, height: size }}
+    />
+  )
+}
 
 interface Props {
   item: CollectionItem | null
@@ -280,11 +292,17 @@ export function CollectionRunnerPanel({
 
   // ── Payload editado só nesta execução ────────────────────────────────────
   //
-  // Rascunho do body por linha (entry.id), em TEMPLATE — ver payloadOverride.ts
+  // Rascunho do body por REQUEST (itemId), em TEMPLATE — ver payloadOverride.ts
   // para a decisão sobre {{variaveis}}. Nunca vai para a collection: a request
-  // salva continua igual, e o rascunho some ao fechar o painel ou num Run novo.
+  // salva continua igual. Vale para tudo que roda neste painel — Send, Run
+  // from here, Run / Run again e todas as iterações — até Reset, Discard ou
+  // fechar o painel.
+  //
+  // Por request, e não por linha: antes era por entry.id e o Run again
+  // descartava o rascunho, então "editar o payload e rodar de novo" saía com
+  // o body antigo; e a edição feita na iteração #1 não valia na #2.
   // O ref existe porque o laço de runFrom é uma closure longa: editar outra
-  // linha enquanto o run anda tem que valer quando o laço chegar nela.
+  // request enquanto o run anda tem que valer quando o laço chegar nela.
   const [bodyDrafts, setBodyDrafts] = useState<Record<string, string>>({})
   const bodyDraftsRef = useRef(bodyDrafts)
   useEffect(() => {
@@ -294,16 +312,16 @@ export function CollectionRunnerPanel({
   const [stepRunningId, setStepRunningId] = useState<string | null>(null)
   const busy = running || stepRunningId !== null
 
-  const setBodyDraft = (entryId: string, value: string | undefined) =>
+  const setBodyDraft = (itemId: string, value: string | undefined) =>
     setBodyDrafts(prev => {
       const next = { ...prev }
-      if (value === undefined) delete next[entryId]
-      else next[entryId] = value
+      if (value === undefined) delete next[itemId]
+      else next[itemId] = value
       return next
     })
 
-  const bodyOverrideFor = (entryId: string, reqItem: CollectionItem): string | undefined =>
-    effectiveBodyOverride(rawBodyOf(reqItem), bodyDraftsRef.current[entryId])
+  const bodyOverrideFor = (reqItem: CollectionItem): string | undefined =>
+    effectiveBodyOverride(rawBodyOf(reqItem), bodyDraftsRef.current[reqItem.id])
 
   const currentEnvValue = (key: string): string | undefined =>
     environments.find(e => e.id === runEnvId)?.values.find(v => v.key === key && v.enabled)?.value
@@ -597,7 +615,7 @@ export function CollectionRunnerPanel({
       // caminho natural de quem mudou o body e quer ver o efeito dali pra frente.
       const outcome = await runCollectionRequest(reqItem, envMap, {
         requestId,
-        bodyOverride: bodyOverrideFor(entry.id, reqItem),
+        bodyOverride: bodyOverrideFor(reqItem),
       })
       const finishedAt = new Date().toISOString()
       currentRequestIdRef.current = null
@@ -641,11 +659,9 @@ export function CollectionRunnerPanel({
     const selected = requests.filter(r => checked[r.id])
     if (selected.length === 0) return
 
-    // Run novo = execução nova: o payload editado na anterior não vale aqui
-    // (as linhas têm os mesmos ids, e sem isto o rascunho entraria calado).
-    // O ref também, porque runFrom lê dele antes do próximo render.
-    setBodyDrafts({})
-    bodyDraftsRef.current = {}
+    // O payload editado NÃO é descartado aqui: "editar e rodar de novo" é o
+    // uso principal (antes o Run again limpava o rascunho e mandava o body
+    // antigo). A linha mostra "edited" e o Reset volta ao salvo.
 
     const envId = runEnvId
     const baseEnv = environments.find(e => e.id === envId)
@@ -710,6 +726,24 @@ export function CollectionRunnerPanel({
     if (busy) return
     stopRef.current = false
     pauseRef.current = false
+    // Variável editada enquanto pausado ("Editing writes to … — the next run
+    // picks it up") tem que valer no Resume. Antes ele seguia do environment
+    // copiado no Run, e a edição só pegava num run novo. O environment atual
+    // já tem tudo o que os passos rodados gravaram (cada passo grava nele),
+    // então relê-lo não perde nada; a linha de dados vai por cima, como no Run.
+    //
+    // Sem environment escolhido não há onde a edição tenha ido — e o que os
+    // passos gravaram só existe no contexto do run: aí não relê nada. A base
+    // das PRÓXIMAS linhas de dados (ctx.baseEnvMap) fica a do Run: trocá-la
+    // pelo atual levaria o que a linha 1 gravou pra linha 2.
+    const ctx = runContextRef.current
+    const env = ctx?.envId ? environments.find(e => e.id === ctx.envId) : undefined
+    if (ctx && env) {
+      const current = buildEnvMap(env.values)
+      const next = ctx.runEntries[pausedAtIndex]
+      const row = ctx.rows && next ? ctx.rows[next.iteration - 1] : undefined
+      ctx.envMap = row ? envForRow(current, row) : current
+    }
     await runFrom(pausedAtIndex)
   }
 
@@ -797,7 +831,7 @@ export function CollectionRunnerPanel({
     let outcome: Awaited<ReturnType<typeof runCollectionRequest>>
     try {
       outcome = await runCollectionRequest(reqItem, envMap, {
-        bodyOverride: bodyOverrideFor(entryId, reqItem),
+        bodyOverride: bodyOverrideFor(reqItem),
       })
     } catch (e) {
       // runCollectionRequest já transforma falha em outcome de erro; isto é
@@ -1258,7 +1292,7 @@ export function CollectionRunnerPanel({
                     const scriptableRequest = source?.request
                     const rawUrl = source?.request?.url ?? ''
                     const rawBody = rawBodyOf(source)
-                    const bodyDraft = bodyDrafts[entry.id]
+                    const bodyDraft = bodyDrafts[entry.itemId]
                     const bodyEdited = !!rawBody.trim() && isBodyEdited(rawBody, bodyDraft)
                     // Variáveis desta linha: as que o passo gravou mais as que
                     // ele leu. Sem as lidas, a request que FALHA por causa de
@@ -1284,7 +1318,7 @@ export function CollectionRunnerPanel({
                             <div className="w-3.5 h-3.5 rounded-full border border-pm-border shrink-0" />
                           )}
                           {entry.state === 'running' && (
-                            <DevFlowSpinner size={14} />
+                            <RunSpinner size={14} />
                           )}
                           {entry.state === 'success' && !failed && (
                             <CheckCircle2 size={14} className="text-[#4ff09d] shrink-0" />
@@ -1400,7 +1434,7 @@ export function CollectionRunnerPanel({
                               próxima (handleRunFrom já reseta o pause). */}
                           {bodyEdited && (
                             <span
-                              title="Payload edited in the Runner — used only in this run; the saved request is unchanged"
+                              title="Payload edited in the Runner — used by every run here until Reset; the saved request is unchanged"
                               className="flex items-center gap-0.5 px-1.5 py-0 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400 shrink-0"
                             >
                               <Pencil size={9} /> edited
@@ -1571,7 +1605,7 @@ export function CollectionRunnerPanel({
                                     <div className="ml-auto flex items-center gap-2.5">
                                       {bodyEdited && (
                                         <button
-                                          onClick={e => { e.stopPropagation(); setBodyDraft(entry.id, undefined) }}
+                                          onClick={e => { e.stopPropagation(); setBodyDraft(entry.itemId, undefined) }}
                                           disabled={entry.state === 'running'}
                                           title="Discard the edit and go back to the payload saved in the request"
                                           className="flex items-center gap-1 text-[10px] text-pm-text-muted hover:text-pm-text transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1586,7 +1620,7 @@ export function CollectionRunnerPanel({
                                           // texto que está sendo editado; sem
                                           // ele, só alterna a exibição do salvo.
                                           if (bodyDraft !== undefined) {
-                                            setBodyDraft(entry.id, prettyBodyPreservingTemplates(bodyDraft))
+                                            setBodyDraft(entry.itemId, prettyBodyPreservingTemplates(bodyDraft))
                                             return
                                           }
                                           setPayloadPrettyIds(prev => {
@@ -1621,7 +1655,7 @@ export function CollectionRunnerPanel({
                                         </button>
                                       )}
                                       {stepRunningId === entry.id && (
-                                        <DevFlowSpinner size={12} />
+                                        <RunSpinner size={12} />
                                       )}
                                     </div>
                                   )}
@@ -1648,12 +1682,13 @@ export function CollectionRunnerPanel({
                                       maxHeight={224}
                                       variableValue={currentEnvValue}
                                       onCommitVariable={commitVariable}
-                                      onChange={entry.state === 'running' ? undefined : next => setBodyDraft(entry.id, next)}
+                                      onChange={entry.state === 'running' ? undefined : next => setBodyDraft(entry.itemId, next)}
                                     />
                                     {bodyEdited && (
                                       <span className="text-[10px] text-pm-text-muted">
-                                        Edited for this run only — the saved request is unchanged. {'{{variables}}'} are
-                                        resolved from the current environment when sent.
+                                        Edited in the Runner — Send, Run again and every iteration here use it until Reset;
+                                        the saved request is unchanged. {'{{variables}}'} are resolved from the current
+                                        environment when sent.
                                       </span>
                                     )}
                                   </>

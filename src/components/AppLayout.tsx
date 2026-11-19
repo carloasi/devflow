@@ -6931,6 +6931,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
             <div className="relative h-full overflow-hidden  ">
               <div className="absolute inset-0 opacity-20 pointer-events-none overflow-hidden">
                 <Editor height="100%" defaultLanguage="json" theme={monacoTheme} beforeMount={handleMonacoBeforeMount}
+                  // Sem o "Loading..." padrão do Monaco: o spinner do envio já está na tela.
+                  loading={null}
                   value={activeTab?.response?.parsedBody ? JSON.stringify(activeTab.response.parsedBody, null, 2) : '{}'}
                   options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, padding: { top: 10 } }} />
               </div>
@@ -6942,6 +6944,9 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
             </div>
           ) : activeTab?.response ? (
             <Editor height="100%" defaultLanguage="json" theme={monacoTheme} beforeMount={handleMonacoBeforeMount}
+              // Sem o "Loading..." padrão do Monaco, que aparecia logo depois
+              // do spinner de envio enquanto o editor da resposta montava.
+              loading={null}
               value={responseBodyText}
               onMount={handleResponseEditorMount}
               options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12, padding: { top: 10 }, wordWrap: 'on',  scrollbar: {
