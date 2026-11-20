@@ -170,7 +170,12 @@ export interface GitHubSyncHandle {
   replaceAllFromGitHub: () => Promise<void>;
   // Renomeia a pasta remota do workspace (ver renameRemoteWorkspace) — no-op
   // silencioso se o workspace nunca foi sincronizado.
-  renameWorkspace: (oldName: string, newName: string) => Promise<void>;
+  /**
+   * 'renamed' = a pasta foi movida; 'nothing' = não havia o que mover (sync
+   * desligado, ou o workspace nunca subiu); 'failed' = ficou com o nome
+   * antigo lá (ocupado, sem senha) — com erro de verdade, lança.
+   */
+  renameWorkspace: (oldName: string, newName: string) => Promise<'renamed' | 'nothing' | 'failed'>;
   // Abre a janela de histórico de commits do workspace, onde dá pra escolher
   // qual versão baixar (em vez de sempre pegar a mais recente).
   openCommitHistory: (workspaceName: string) => void;
@@ -1767,15 +1772,15 @@ useEffect(() => {
   // Silencioso quando não há nada pra fazer (sync não configurado, ou o
   // workspace nunca foi enviado pro GitHub) — não é um erro, é o caso comum
   // de quem não usa sync nenhum.
-  const renameRemoteWorkspace = useCallback(async (oldName: string, newName: string) => {
-    if (!isConfigValid) return;
+  const renameRemoteWorkspace = useCallback(async (oldName: string, newName: string): Promise<"renamed" | "nothing" | "failed"> => {
+    if (!isConfigValid) return "nothing";
 
     const storage = client();
     const oldRemotePath = `${WORKSPACES_ROOT}/${oldName}`;
     const newRemotePath = `${WORKSPACES_ROOT}/${newName}`;
 
     const files = await storage.listAllFilesRecursive(oldRemotePath);
-    if (files.length === 0) return;
+    if (files.length === 0) return "nothing";
 
     // Já existe uma pasta com o nome novo no GitHub (outra pessoa criou um
     // workspace com esse nome, que talvez nem exista aqui): copiar por cima
@@ -1792,14 +1797,14 @@ useEffect(() => {
         "error",
         `✗ "${oldName}" has files on GitHub but couldn't be renamed there — set your sync passphrase and rename again.`
       );
-      return;
+      return "failed";
     }
 
     const lock = acquireSyncLock("rename");
     if (singleOpBusy || !lock) {
       releaseSyncLock(lock);
       showStatus("error", SYNC_BUSY_MESSAGE);
-      return;
+      return "failed";
     }
 
     setSingleOp(`Renaming "${oldName}" on GitHub...`);
@@ -1826,6 +1831,7 @@ useEffect(() => {
       const result = await storage.commitFiles(changes, `sync: rename workspace "${oldName}" to "${newName}"`);
       if (!result.ok) throw new Error(`"${oldName}" changed on GitHub while renaming — try again.`);
       showStatus("success", `"${oldName}" renamed to "${newName}" on GitHub.`);
+      return "renamed";
     } catch (e) {
       console.error(`❌ Erro ao renomear a pasta remota de "${oldName}" para "${newName}":`, e);
       throw e;

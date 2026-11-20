@@ -1824,6 +1824,33 @@ const forgetWorkspaceSyncState = async (path: string) => {
   }
 };
 
+// O workspace daqui fica, mas o GitHub não tem (ou deixou de ter) a pasta
+// dele: a base da sincronização, que dizia "tudo sincronizado", faria o sync
+// seguinte ler as collections como "apagadas lá" e tirá-las daqui. Sem base,
+// ele volta a ser um workspace que nunca subiu, e o que existe aqui fica
+// marcado pra enviar. Usado ao apagar a pasta do GitHub e quando o renomear
+// não conseguiu mover a pasta pro nome novo.
+const forgetRemoteBaseKeepLocal = async (workspaceName: string) => {
+  if (!workspaceName) return;
+  await clearSyncBase(workspaceName);
+  const isOpen = selectedWorkspaceRef.current === workspaceName;
+  const local = isOpen
+    ? { collections: collectionsRef.current, environments: environmentsRef.current }
+    : await loadWorkspaceLocalData(workspaceName);
+  const collectionIds = (Array.isArray(local.collections) ? (local.collections as CollectionItem[]) : [])
+    .map(c => c?.id)
+    .filter((id): id is string => !!id);
+  const environmentIds = (Array.isArray(local.environments) ? (local.environments as Environment[]) : [])
+    .map(e => e?.id)
+    .filter((id): id is string => !!id);
+  if (collectionIds.length > 0) markCollectionsPendingPush(workspaceName, collectionIds);
+  if (environmentIds.length > 0) markEnvironmentsPendingPush(workspaceName, environmentIds);
+  // O Desfazer de um pull voltaria a base de antes dele — a do GitHub que
+  // já não existe.
+  if (undoRef.current?.workspace === workspaceName) undoRef.current = null;
+  if (isOpen) setPendingPush(readPendingPush(workspaceName));
+};
+
 const handleCreateWorkspace = useCallback(async (workspace: WorkspaceInfo) => {
   isSwitchingWorkspaceRef.current = true;
   try {
@@ -1954,14 +1981,25 @@ const handleRenameWorkspaceLocal = useCallback(async (oldPath: string, newWorksp
   // renomeado, com os dados antigos. Erro aqui tem seu próprio aviso (abaixo),
   // separado do catch acima: a migração LOCAL já terminou e não deve parecer
   // que falhou só porque o GitHub não respondeu.
+  //
+  // A base já foi migrada pro nome novo (acima). Se a pasta lá continuou com
+  // o nome antigo — erro, outro sync rodando, sem a senha —, o nome novo não
+  // existe no GitHub, e com a base o sync seguinte tiraria daqui tudo como
+  // "apagado lá". Esquece a base: o próximo push cria a pasta com o nome novo.
+  let failure: string | null = null;
   try {
-    await githubSyncRef.current?.renameWorkspace(oldPath, newPath);
+    const outcome = await githubSyncRef.current?.renameWorkspace(oldPath, newPath);
+    if (outcome === 'failed') failure = 'Outro sync estava rodando, ou falta a senha de sincronização.';
   } catch (err) {
     console.error(`Erro ao renomear a pasta remota de "${oldPath}" para "${newPath}":`, err);
+    failure = (err as Error)?.message ?? String(err);
+  }
+  if (failure !== null) {
+    await forgetRemoteBaseKeepLocal(newPath);
     toast.error(
       `Workspace renomeado localmente, mas a pasta no GitHub não pôde ser renomeada.`,
       {
-        description: `${(err as Error)?.message ?? String(err)} — Um Pull de todos os workspaces pode recriar o nome antigo. Tente renomear de novo, ou mova os arquivos manualmente no GitHub.`,
+        description: `${failure} — O próximo push envia o workspace com o nome novo; a pasta com o nome antigo continua no GitHub, e um Pull de todos os workspaces pode recriá-la aqui. Apague-a ou mova os arquivos manualmente no GitHub.`,
         duration: 12000,
       }
     );
@@ -4270,24 +4308,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // ser um workspace que nunca subiu — e o que existe aqui fica marcado pra
   // enviar, pro próximo push o recriar inteiro.
   const handleRemoteWorkspaceDeleted = useCallback(async (workspaceName: string) => {
-    if (!workspaceName) return;
-    await clearSyncBase(workspaceName);
-    const isOpen = selectedWorkspaceRef.current === workspaceName;
-    const local = isOpen
-      ? { collections: collectionsRef.current, environments: environmentsRef.current }
-      : await loadWorkspaceLocalData(workspaceName);
-    const collectionIds = (Array.isArray(local.collections) ? (local.collections as CollectionItem[]) : [])
-      .map(c => c?.id)
-      .filter((id): id is string => !!id);
-    const environmentIds = (Array.isArray(local.environments) ? (local.environments as Environment[]) : [])
-      .map(e => e?.id)
-      .filter((id): id is string => !!id);
-    if (collectionIds.length > 0) markCollectionsPendingPush(workspaceName, collectionIds);
-    if (environmentIds.length > 0) markEnvironmentsPendingPush(workspaceName, environmentIds);
-    // O Desfazer de um pull voltaria a base de antes dele — a do GitHub que
-    // já não existe.
-    if (undoRef.current?.workspace === workspaceName) undoRef.current = null;
-    if (isOpen) setPendingPush(readPendingPush(workspaceName));
+    await forgetRemoteBaseKeepLocal(workspaceName);
   }, []);
 
   // Abre a janela de histórico de commits do workspace (ícone de relógio no
