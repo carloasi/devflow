@@ -27,7 +27,8 @@ export interface RepoItem {
   type: 'dir' | 'file' | string;
 }
 
-// Retorna null se o GitHub sync não estiver configurado (sem token salvo).
+// Retorna null se o GitHub sync não estiver configurado (sem token, dono ou
+// repositório salvos — não há repositório padrão).
 export async function loadGithubConfig(): Promise<GithubDirectoryConfig | null> {
   const parsed = (await storeGet<Partial<GithubDirectoryConfig>>('gh_sync_config')) || {};
 
@@ -38,12 +39,12 @@ export async function loadGithubConfig(): Promise<GithubDirectoryConfig | null> 
     // sem token salvo — trata como não configurado
   }
 
-  if (!token) return null;
+  if (!token || !parsed.owner || !parsed.repo) return null;
 
   return {
     token,
-    owner: parsed.owner || 'barramentob2b',
-    repo: parsed.repo || 'Postman',
+    owner: parsed.owner,
+    repo: parsed.repo,
     branch: parsed.branch || 'main',
   };
 }

@@ -734,10 +734,12 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   currentMarkers,
   onPullMarkers,
 }, ref) {
+  // Sem repositório padrão: dono e repositório vêm só do que a pessoa
+  // configurou. Vazios, o sync fica desligado (isConfigValid).
   const [config, setConfig] = useState<GitHubConfig>({
     token: "",
-    owner: "barramentob2b",
-    repo: "Postman",
+    owner: "",
+    repo: "",
     branch: "main",
   });
   const [configDraft, setConfigDraft] = useState<GitHubConfig>(config);
@@ -1843,8 +1845,8 @@ useEffect(() => {
 
       setConfig({
         token,
-        owner: parsed.owner || "barramentob2b",
-        repo: parsed.repo || "Postman",
+        owner: parsed.owner || "",
+        repo: parsed.repo || "",
         branch: parsed.branch || "main",
       });
     };
@@ -2481,7 +2483,7 @@ useImperativeHandle(ref, () => ({
                   </label>
                   <input
                     className="w-full bg-pm-hover border border-pm-border text-pm-text px-2 py-1.5 rounded-md text-xs outline-none focus:border-[#007acc] transition-colors"
-                    placeholder="voeazul"
+                    placeholder="your-org"
                     value={configDraft.owner}
                     onChange={(e) => handleConfigFieldChange('owner', e.target.value)}
                   />
@@ -2492,7 +2494,7 @@ useImperativeHandle(ref, () => ({
                   </label>
                   <input
                     className="w-full bg-pm-hover border border-pm-border text-pm-text px-2 py-1.5 rounded-md text-xs outline-none focus:border-[#007acc] transition-colors"
-                    placeholder="middleware-b2b"
+                    placeholder="your-repo"
                     value={configDraft.repo}
                     onChange={(e) => handleConfigFieldChange('repo', e.target.value)}
                   />
