@@ -36,6 +36,14 @@ export const ENV_BASE_PREFIX = 'env:';
 const envKey = (envId: string) => `${ENV_BASE_PREFIX}${envId}`;
 const varKey = (envId: string, key: string) => `${ENV_BASE_PREFIX}${envId}:${key}`;
 
+/**
+ * Prefixo das variáveis de UM environment na base, com o `:` final. Sem ele,
+ * `env:<id>#1` também pegava `env:<id>#10`…`#19` (ids gerados pela posição
+ * no arquivo): regravar um apagava a base dos outros. A chave do próprio
+ * environment (`env:<id>`) é regravada junto com as variáveis.
+ */
+export const envVarsPrefix = (envId: string) => `${ENV_BASE_PREFIX}${envId}:`;
+
 function varHash(value: EnvironmentValue): string {
   return hashContent({ value: String(value.value ?? ''), description: value.description ?? '' });
 }

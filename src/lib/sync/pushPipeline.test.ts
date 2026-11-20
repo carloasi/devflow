@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
-import { nodeHashes } from '@/lib/syncBase';
+import { dropReplaced, nodeHashes } from '@/lib/syncBase';
 import { environmentHashes } from './envMerge';
 import { baseAfterPush, preparePush, type PreparePushInput } from './pushPipeline';
 
@@ -151,3 +151,37 @@ describe('preparePush — one environment', () => {
     expect(preparePush(input({ scope: { kind: 'environment', envId: 'nope' } })).status).toBe('nothing');
   });
 });
+
+describe('baseAfterPush — one environment', () => {
+  // Ids gerados pela posição no arquivo: #1 é prefixo de #10…#19.
+  it("pushing environment #1 does not drop the base of #10", () => {
+    const one = env({ a: '1' }, 'gh-env:Postman/W/environments/all.json#1');
+    const ten = env({ token: 't' }, 'gh-env:Postman/W/environments/all.json#10');
+    const base = environmentHashes([one, ten]);
+    const after = baseAfterPush({
+      scope: { kind: 'environment', envId: one.id },
+      local: { collections: [], environments: [one, ten] },
+      sent: { collections: [], environments: [env({ a: '2' }, one.id)] },
+      base,
+    });
+    const next = { ...dropReplaced(base, after.replacePrefixes, after.replaceRoots), ...after.hashes };
+    expect(next[`env:${ten.id}`]).toBe(base[`env:${ten.id}`]);
+    expect(next[`env:${ten.id}:token`]).toBe(base[`env:${ten.id}:token`]);
+    expect(next[`env:${one.id}:a`]).not.toBe(base[`env:${one.id}:a`]);
+  });
+
+  it("a variable gone from the pushed environment leaves its base", () => {
+    const before = env({ a: '1', old: 'x' });
+    const base = environmentHashes([before]);
+    const after = baseAfterPush({
+      scope: { kind: 'environment', envId: 'e1' },
+      local: { collections: [], environments: [env({ a: '1' })] },
+      sent: { collections: [], environments: [env({ a: '1' })] },
+      base,
+    });
+    const next = { ...dropReplaced(base, after.replacePrefixes, after.replaceRoots), ...after.hashes };
+    expect(next['env:e1:old']).toBeUndefined();
+    expect(next['env:e1']).toBe('1');
+  });
+});
+

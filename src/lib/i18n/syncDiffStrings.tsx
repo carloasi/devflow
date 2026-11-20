@@ -56,6 +56,7 @@ const en = {
   undo: 'Undo',
   undoDone: 'Back to how it was before the pull.',
   undoExpired: 'Too late to undo — it only lasts 10 minutes.',
+  undoAfterPush: 'The pull can no longer be undone — something was pushed to GitHub after it.',
   tabsReloaded: (n: number, name: string) =>
     n === 1 ? `"${name}" was open and got the merged version` : `${n} open tabs got the merged version`,
   tabsDirtyChanged: (n: number, name: string) =>
@@ -538,6 +539,7 @@ const ptBR: SyncDiffStrings = {
   undo: 'Desfazer',
   undoDone: 'Voltou ao estado de antes do pull.',
   undoExpired: 'Não dá mais para desfazer — vale por 10 minutos.',
+  undoAfterPush: 'Não dá mais para desfazer o pull — algo foi enviado ao GitHub depois dele.',
   tabsReloaded: (n: number, name: string) =>
     n === 1 ? `"${name}" estava aberta e foi atualizada com a versão do merge` : `${n} abas abertas foram atualizadas com a versão do merge`,
   tabsDirtyChanged: (n: number, name: string) =>

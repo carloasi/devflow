@@ -155,7 +155,7 @@ import { discardEnvironmentChange, discardLocalChange } from '@/lib/sync/discard
 import { asCancelled, SyncCancelledError, isSyncCancelRequested, requestSyncCancel, resetSyncCancel, SYNC_CANCELLED_MESSAGE, throwIfSyncCancelled, captureSyncStatus, withoutActions, markResumeAfterReview, openSyncCenter, reportSyncStatus, setKnownConflicts, setSyncCenterBusy, takeResumeAfterReview, type SyncAction, type SyncActionResult, type SyncActionScope, type SyncCenterTab } from '@/lib/sync/syncCenterStore';
 import { SyncCenter } from '@/components/SyncCenter/SyncCenter';
 import { isInSubtree, withSubtreeFrom } from '@/lib/sync/subtreePush';
-import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, rebaseEnvironments } from '@/lib/sync/envMerge';
+import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, envVarsPrefix, rebaseEnvironments } from '@/lib/sync/envMerge';
 
 // Grava na base o que o merge automático do push acabou de trazer pra cá
 // (ver adoptedRemoteBase / adoptedRemoteEnvBase).
@@ -1146,6 +1146,9 @@ export default function AppLayout() {
     // a árvore deixava marcadores do GitHub (ou remaps) no catálogo daqui.
     markers: Marker[];
   } | null>(null);
+  // Um push depois do pull anulou o Desfazer (ver runPush): o botão que ainda
+  // estiver na tela explica por que não faz nada, em vez de sumir calado.
+  const undoVoidedByPushRef = useRef(false);
   // Última edição LOCAL de verdade (árvore ou environments) — não as que o
   // próprio pull aplica. O Desfazer compara com o momento do snapshot pra
   // avisar antes de apagar o que foi editado depois do pull.
@@ -4362,6 +4365,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   const undoPrimedRef = useRef<typeof undoRef.current>(null);
   const takeUndoSnapshot = useCallback(async (workspaceName: string) => {
     if (workspaceName !== selectedWorkspaceRef.current) return;
+    undoVoidedByPushRef.current = false;
     undoRef.current = {
       workspace: workspaceName,
       at: Date.now(),
@@ -4379,7 +4383,10 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // só a árvore faria o próximo push "desfazer" no GitHub o que tinha vindo.
   const undoLastPull = useCallback(async (force = false) => {
     const snap = undoRef.current;
-    if (!snap) return;
+    if (!snap) {
+      if (undoVoidedByPushRef.current) toast.error(syncText.undoAfterPush);
+      return;
+    }
     if (Date.now() - snap.at > 10 * 60_000 || snap.workspace !== selectedWorkspaceRef.current) {
       undoRef.current = null;
       toast.error(syncText.undoExpired);
@@ -4394,31 +4401,45 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       });
       return;
     }
-    undoRef.current = null;
-    const workspace = snap.workspace;
-    suppressPendingMarkRef.current = true;
-    suppressEnvPendingMarkRef.current = true;
-    collectionsRef.current = snap.collections;
-    environmentsRef.current = snap.environments;
-    setCollections(snap.collections);
-    setEnvironments(snap.environments);
-    await saveWorkspaceCollections(workspace, snap.collections);
+    // Um sync por vez (lib/sync/syncLock): desfazer grava a árvore e a base
+    // daqui, e no meio de um push um sobrescrevia o outro — o push aplicava
+    // a mescla que montou antes, ou o Desfazer gravava a base antiga por
+    // cima da que o push acabou de registrar. Ocupado: o Desfazer continua
+    // valendo pra depois.
+    const lock = acquireSyncLock('undo pull');
+    if (!lock) {
+      toast.error(SYNC_BUSY_MESSAGE);
+      return;
+    }
+    try {
+      undoRef.current = null;
+      const workspace = snap.workspace;
+      suppressPendingMarkRef.current = true;
+      suppressEnvPendingMarkRef.current = true;
+      collectionsRef.current = snap.collections;
+      environmentsRef.current = snap.environments;
+      setCollections(snap.collections);
+      setEnvironments(snap.environments);
+      await saveWorkspaceCollections(workspace, snap.collections);
 
-    clearWorkspacePendingPush(workspace);
-    if (snap.pending.collections.length) markCollectionsPendingPush(workspace, snap.pending.collections);
-    if (snap.pending.environments.length) markEnvironmentsPendingPush(workspace, snap.pending.environments);
-    if (snap.pending.requiresFullPush) markFullPushRequired(workspace);
-    setPendingPush(readPendingPush(workspace));
+      clearWorkspacePendingPush(workspace);
+      if (snap.pending.collections.length) markCollectionsPendingPush(workspace, snap.pending.collections);
+      if (snap.pending.environments.length) markEnvironmentsPendingPush(workspace, snap.pending.environments);
+      if (snap.pending.requiresFullPush) markFullPushRequired(workspace);
+      setPendingPush(readPendingPush(workspace));
 
-    // Marcadores e a base deles também voltam (MARKER_BASE_PREFIX: o que o
-    // pull gravou sai, e o do snapshot entra).
-    markersRef.current = snap.markers;
-    setMarkers(snap.markers);
-    await saveWorkspaceMarkers(workspace, snap.markers);
-    if (snap.base) await recordSyncBase(workspace, snap.base, [ENV_BASE_PREFIX, MARKER_BASE_PREFIX], 'all');
-    else await clearSyncBase(workspace);
-    await githubSyncRef.current?.restoreSynced(workspace, snap.synced);
-    toast.success(syncText.undoDone);
+      // Marcadores e a base deles também voltam (MARKER_BASE_PREFIX: o que o
+      // pull gravou sai, e o do snapshot entra).
+      markersRef.current = snap.markers;
+      setMarkers(snap.markers);
+      await saveWorkspaceMarkers(workspace, snap.markers);
+      if (snap.base) await recordSyncBase(workspace, snap.base, [ENV_BASE_PREFIX, MARKER_BASE_PREFIX], 'all');
+      else await clearSyncBase(workspace);
+      await githubSyncRef.current?.restoreSynced(workspace, snap.synced);
+      toast.success(syncText.undoDone);
+    } finally {
+      releaseSyncLock(lock);
+    }
   }, [setEnvironments, syncText]);
 
   // Histórico de decisões de conflito (lib/sync/conflictHistory).
@@ -5146,7 +5167,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       // O GitHub que acabou de ser visto vira a base dos environments — mesma
       // regra das collections abaixo. Restaurar um commit não conta.
       if (!diffSnapshotLabel) {
-        const remoteIds = diffRemoteEnvs.map(e => `${ENV_BASE_PREFIX}${e.id}`);
+        const remoteIds = diffRemoteEnvs.map(e => envVarsPrefix(e.id));
         void recordSyncBase(workspace, environmentHashes(diffRemoteEnvs), remoteIds);
       }
       setDiffSnapshotLabel(null);
@@ -5820,6 +5841,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           keptStale: result.keptStale,
           report: prepared.report,
         });
+        // O GitHub já tem o que veio no pull (e o que subiu agora): voltar ao
+        // de antes dele deixaria a base de antes, e o sync seguinte traria
+        // tudo de volta como "mudou lá" — o Desfazer não pegaria, e a pessoa
+        // acharia que desfez.
+        if (undoRef.current?.workspace === workspace) {
+          undoRef.current = null;
+          undoVoidedByPushRef.current = true;
+        }
         return 'pushed';
       }
       fail(`"${label}" kept changing on GitHub while sending. Use "Sync all" to merge and send.`);

@@ -2,7 +2,7 @@ import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
 import { withoutSessionTokens } from '@/lib/jwt';
 import { adoptedRemoteBase, nodeHashes, type NodeHashes } from '@/lib/syncBase';
-import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, rebaseEnvironments, type EnvRebaseResult } from './envMerge';
+import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, envVarsPrefix, rebaseEnvironments, type EnvRebaseResult } from './envMerge';
 import { rebaseCollections, type RebaseResult } from './rebase';
 import { isInSubtree, withSubtreeFrom } from './subtreePush';
 
@@ -252,6 +252,6 @@ export function baseAfterPush(input: {
       return { hashes: adopted.hashes, replacePrefixes: [], replaceRoots: [], dropKeys: adopted.dropKeys };
     }
     case 'environment':
-      return { hashes: environmentHashes(envs), replacePrefixes: envs.map(e => `${ENV_BASE_PREFIX}${e.id}`), replaceRoots: [], dropKeys: [] };
+      return { hashes: environmentHashes(envs), replacePrefixes: envs.map(e => envVarsPrefix(e.id)), replaceRoots: [], dropKeys: [] };
   }
 }

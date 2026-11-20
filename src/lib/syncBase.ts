@@ -42,6 +42,15 @@ const KEY_PREFIX = 'base:';
 
 export async function loadSyncBase(workspace: string): Promise<NodeHashes | null> {
   if (!workspace) return null;
+  // Espera o que já está na fila de gravação deste workspace. O pull grava a
+  // base sem esperar (void recordSyncBase) e solta a trava; um envio logo em
+  // seguida ("Sincronizar tudo") lia a base de ANTES do pull.
+  await (writeQueue.get(workspace) ?? Promise.resolve());
+  return readStoredBase(workspace);
+}
+
+/** A base gravada agora, sem esperar a fila (só pra quem já está nela). */
+async function readStoredBase(workspace: string): Promise<NodeHashes | null> {
   try {
     const stored = await store.get<NodeHashes>(KEY_PREFIX + workspace);
     return stored && typeof stored === 'object' ? stored : null;
@@ -82,7 +91,8 @@ export async function recordSyncBase(
   const previous = writeQueue.get(workspace) ?? Promise.resolve();
   const next = previous.then(async () => {
     try {
-      const current = dropReplaced({ ...((await loadSyncBase(workspace)) ?? {}) }, replacePrefixes, replaceRoots);
+      // Dentro da fila: ler pelo loadSyncBase esperaria por esta própria gravação.
+      const current = dropReplaced({ ...((await readStoredBase(workspace)) ?? {}) }, replacePrefixes, replaceRoots);
       for (const key of dropKeys) delete current[key];
       await store.set(KEY_PREFIX + workspace, { ...current, ...hashes });
     } catch (e) {
@@ -197,11 +207,18 @@ export function adoptedRemoteBase(
 
 export async function clearSyncBase(workspace: string): Promise<void> {
   if (!workspace) return;
-  try {
-    await store.delete(KEY_PREFIX + workspace);
-  } catch (e) {
-    console.log('Could not clear the sync base:', e);
-  }
+  // Na mesma fila das gravações: uma gravação ainda pendente, terminando
+  // depois, traria de volta a base que acabou de ser apagada.
+  const previous = writeQueue.get(workspace) ?? Promise.resolve();
+  const next = previous.then(async () => {
+    try {
+      await store.delete(KEY_PREFIX + workspace);
+    } catch (e) {
+      console.log('Could not clear the sync base:', e);
+    }
+  });
+  writeQueue.set(workspace, next);
+  await next;
 }
 
 const hash = hashText;
