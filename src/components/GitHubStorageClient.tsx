@@ -15,7 +15,8 @@ import { loadWorkspaceLocalData, loadWorkspaceMarkers } from "@/storage/localSyn
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
 import type { PushScope } from "@/lib/sync/pushPipeline";
-import { acquireSyncLock, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder } from "@/lib/sync/syncLock";
+import { syncedPathsToForget } from "@/lib/sync/workspaceSyncState";
+import { acquireSyncLock, acquireSyncLockQueued, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder, syncWaitMessage } from "@/lib/sync/syncLock";
 import { stripStarredFlags } from "@/components/collection-tree/utils/tree.utils";
 import { clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
 import type { FileChange } from "@/lib/commitDiff";
@@ -775,7 +776,6 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   // workspaces rodava totalmente mudo, porque o `showStatus` dele só é
   // desenhado dentro do popover do GitHub Sync — que está fechado nessa hora.
   const [singleOp, setSingleOp] = useState<string | null>(null);
-  const singleOpBusy = singleOp !== null;
   // A trava de uma operação de sync por vez (push, pull, rename, exclusão)
   // é a de lib/sync/syncLock — a MESMA do AppLayout, pra um pull não rodar
   // no meio de um push.
@@ -936,13 +936,18 @@ const handleRequestDeleteRemoteWorkspace = useCallback(async () => {
 const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
   if (!pendingDeleteWorkspace) return;
   const target = pendingDeleteWorkspace;
-  const lock = acquireSyncLock("delete workspace");
+  // Com outro sync rodando, espera a vez (fila); o botão fica em "Deleting…"
+  // pra não ser clicado de novo. A lista é relida depois da espera.
+  setDeletingWorkspace(true);
+  const lock = await acquireSyncLockQueued("delete workspace", {
+    onWait: (running) => showStatus("info", syncWaitMessage(running)),
+  });
   if (!lock) {
+    setDeletingWorkspace(false);
     showStatus("error", SYNC_BUSY_MESSAGE);
     return;
   }
 
-  setDeletingWorkspace(true);
   showStatus("info", "Deleting workspace from GitHub...");
   try {
     // Um commit só, e sem checagem de versão: a pessoa confirmou apagar a
@@ -965,11 +970,7 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
     }
     // O registro do que estava sincronizado sai junto: o GitHub não tem mais
     // nada desse workspace.
-    const prefix = `${target.remotePath}/`;
-    const synced = await loadSyncedShas(storage.repoKey);
-    const gone: Record<string, null> = {};
-    for (const path of Object.keys(synced)) if (path.startsWith(prefix)) gone[path] = null;
-    await recordSyncedShas(storage.repoKey, gone);
+    await recordSyncedShas(storage.repoKey, syncedPathsToForget(await loadSyncedShas(storage.repoKey), target.remotePath));
     await onRemoteWorkspaceDeleted?.(target.workspace);
     showStatus("success", `Workspace "${target.workspace}" removed from GitHub.`);
   } catch (e: any) {
@@ -1333,14 +1334,33 @@ useEffect(() => {
         return;
       }
 
-      // Um sync por vez (lib/sync/syncLock).
-      const lock = acquireSyncLock("pull");
+      // Um sync por vez (lib/sync/syncLock), esperando a vez se preciso.
+      let waited = false;
+      const lock = await acquireSyncLockQueued("pull", {
+        onWait: (running) => {
+          waited = true;
+          showStatus("info", syncWaitMessage(running));
+        },
+      });
       if (!lock) {
         showStatus("error", SYNC_BUSY_MESSAGE);
         return;
       }
       setLoading(true);
       showStatus("info", `Downloading and decrypting files...`);
+      // Esperou (um push, por exemplo): a lista de arquivos de antes pode não
+      // ter o que ele acabou de criar — e o pull substitui a árvore daqui pelo
+      // que baixar, então uma collection recém-enviada sumiria daqui.
+      if (waited) {
+        try {
+          ({ collectionPaths: cPaths, envPaths: ePaths } = await client().resolveWorkspaceFilePaths(remotePath));
+        } catch (e) {
+          releaseSyncLock(lock);
+          setLoading(false);
+          showStatus("error", `✗ Pull failed: ${(e as Error)?.message ?? String(e)}`);
+          return;
+        }
+      }
 
       // Cada path é baixado individualmente e com allSettled — assim, se UM
       // arquivo falhar (rede, parse, arquivo grande, etc.) os outros ainda
@@ -1552,8 +1572,10 @@ useEffect(() => {
       return;
     }
 
-    // Um sync por vez (lib/sync/syncLock).
-    const lock = acquireSyncLock("pull");
+    // Um sync por vez (lib/sync/syncLock), esperando a vez se preciso.
+    const lock = await acquireSyncLockQueued("pull", {
+      onWait: (running) => showStatus("info", syncWaitMessage(running)),
+    });
     if (!lock) {
       showStatus("error", SYNC_BUSY_MESSAGE);
       return;
@@ -1780,47 +1802,51 @@ useEffect(() => {
   const renameRemoteWorkspace = useCallback(async (oldName: string, newName: string): Promise<"renamed" | "nothing" | "failed"> => {
     if (!isConfigValid) return "nothing";
 
-    const storage = client();
-    const oldRemotePath = `${WORKSPACES_ROOT}/${oldName}`;
-    const newRemotePath = `${WORKSPACES_ROOT}/${newName}`;
-
-    const files = await storage.listAllFilesRecursive(oldRemotePath);
-    if (files.length === 0) return "nothing";
-
-    // Já existe uma pasta com o nome novo no GitHub (outra pessoa criou um
-    // workspace com esse nome, que talvez nem exista aqui): copiar por cima
-    // substituiria os arquivos dela. Para antes de mexer em qualquer coisa.
-    const destination = await storage.listAllFilesRecursive(newRemotePath);
-    if (destination.length > 0) {
-      const message = `A workspace named "${newName}" already exists on GitHub (${destination.length} file(s)). Nothing was moved there — pick another name, or remove that folder on GitHub first.`;
-      showStatus("error", message);
-      throw new Error(message);
-    }
-
-    if (!passphrase) {
-      showStatus(
-        "error",
-        `✗ "${oldName}" has files on GitHub but couldn't be renamed there — set your sync passphrase and rename again.`
-      );
-      return "failed";
-    }
-
-    const lock = acquireSyncLock("rename");
-    if (singleOpBusy || !lock) {
-      releaseSyncLock(lock);
+    // A trava ANTES de listar (lib/sync/syncLock, fila): com um push rodando,
+    // espera ele terminar — e lista o que existe depois dele. Listar antes e
+    // esperar deixava pra trás, na pasta antiga, um arquivo que o push criou.
+    const lock = await acquireSyncLockQueued("rename", {
+      onWait: (running) => showStatus("info", syncWaitMessage(running)),
+    });
+    if (!lock) {
       showStatus("error", SYNC_BUSY_MESSAGE);
       return "failed";
     }
 
-    setSingleOp(`Renaming "${oldName}" on GitHub...`);
-    showStatus("info", `Renaming "${oldName}" to "${newName}" on GitHub...`);
-
-    // Copia tudo ANTES de apagar qualquer coisa: se parar no meio (rede,
-    // conflito, token expirado), a pasta antiga continua intacta e completa —
-    // só sobra, no pior caso, uma pasta nova pela metade, não dado perdido.
-    // Um commit só: cópia e exclusão entram juntas, ou nada entra. Antes eram
-    // dois commits POR ARQUIVO, e uma falha no meio deixava as duas pastas.
     try {
+      const storage = client();
+      const oldRemotePath = `${WORKSPACES_ROOT}/${oldName}`;
+      const newRemotePath = `${WORKSPACES_ROOT}/${newName}`;
+
+      const files = await storage.listAllFilesRecursive(oldRemotePath);
+      if (files.length === 0) return "nothing";
+
+      // Já existe uma pasta com o nome novo no GitHub (outra pessoa criou um
+      // workspace com esse nome, que talvez nem exista aqui): copiar por cima
+      // substituiria os arquivos dela. Para antes de mexer em qualquer coisa.
+      const destination = await storage.listAllFilesRecursive(newRemotePath);
+      if (destination.length > 0) {
+        const message = `A workspace named "${newName}" already exists on GitHub (${destination.length} file(s)). Nothing was moved there — pick another name, or remove that folder on GitHub first.`;
+        showStatus("error", message);
+        throw new Error(message);
+      }
+
+      if (!passphrase) {
+        showStatus(
+          "error",
+          `✗ "${oldName}" has files on GitHub but couldn't be renamed there — set your sync passphrase and rename again.`
+        );
+        return "failed";
+      }
+
+      setSingleOp(`Renaming "${oldName}" on GitHub...`);
+      showStatus("info", `Renaming "${oldName}" to "${newName}" on GitHub...`);
+
+      // Copia tudo ANTES de apagar qualquer coisa: se parar no meio (rede,
+      // conflito, token expirado), a pasta antiga continua intacta e completa —
+      // só sobra, no pior caso, uma pasta nova pela metade, não dado perdido.
+      // Um commit só: cópia e exclusão entram juntas, ou nada entra. Antes eram
+      // dois commits POR ARQUIVO, e uma falha no meio deixava as duas pastas.
       const changes: { path: string; content?: unknown; delete?: boolean; noCheck?: boolean }[] = [];
       for (const file of files) {
         const data = await storage.getFile(file.path);
@@ -1844,7 +1870,7 @@ useEffect(() => {
       releaseSyncLock(lock);
       setSingleOp(null);
     }
-  }, [isConfigValid, client, passphrase, showStatus, singleOpBusy]);
+  }, [isConfigValid, client, passphrase, showStatus]);
 
   useEffect(() => {
     setConfigDraft(config);
@@ -1941,8 +1967,10 @@ useEffect(() => {
       return;
     }
 
-    // Um sync por vez (lib/sync/syncLock).
-    const lock = acquireSyncLock("pull");
+    // Um sync por vez (lib/sync/syncLock), esperando a vez se preciso.
+    const lock = await acquireSyncLockQueued("pull", {
+      onWait: (running) => showStatus("info", syncWaitMessage(running)),
+    });
     if (!lock) {
       showStatus("error", SYNC_BUSY_MESSAGE);
       return;

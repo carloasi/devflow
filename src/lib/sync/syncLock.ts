@@ -15,12 +15,24 @@
 // Quem pega a trava recebe um token. Uma etapa que roda DENTRO de uma
 // operação já travada (a gravação do push, chamada pelo próprio push)
 // recebe o token e segue — sem isso ela esbarraria na trava do próprio push.
+//
+// FILA: quem pede um push ou pull com outro rodando espera a vez
+// (acquireSyncLockQueued) em vez de falhar com "outro sync está rodando" —
+// em ordem de chegada, e cada um pega a trava no instante em que a anterior
+// sai, sem ninguém passar na frente. O que depende do estado de AGORA
+// (aplicar uma revisão, descartar, desfazer) continua recusando: rodar
+// depois do push gravaria por cima do que ele acabou de registrar.
 // ─────────────────────────────────────────────────────────────────────────
 
 export const SYNC_BUSY_MESSAGE = 'Another sync (push or pull) is already running. Wait for it to finish.';
 
 let holder: { token: string; what: string } | null = null;
 let counter = 0;
+/** Quem espera a vez, em ordem. Cada um pega a trava ao ser chamado. */
+const waiters: Array<() => void> = [];
+
+/** Espera máxima na fila: uma trava que nunca saísse não pode travar o app. */
+export const SYNC_QUEUE_TIMEOUT_MS = 10 * 60_000;
 
 /** Pega a trava. `null` = outra operação está rodando (ver syncLockHolder). */
 export function acquireSyncLock(what: string): string | null {
@@ -31,7 +43,47 @@ export function acquireSyncLock(what: string): string | null {
 
 /** Solta a trava — só quem a pegou (o token) solta. */
 export function releaseSyncLock(token: string | null | undefined): void {
-  if (token && holder?.token === token) holder = null;
+  if (!token || holder?.token !== token) return;
+  holder = null;
+  // O próximo da fila pega a trava agora, antes de qualquer outro código.
+  waiters.shift()?.();
+}
+
+/**
+ * Pega a trava, esperando a vez se outra operação estiver rodando. `onWait`
+ * é chamado (com o que está rodando) só quando precisa esperar — pra dizer
+ * "esperando o push terminar". `null` = a espera passou de `timeoutMs`.
+ */
+export function acquireSyncLockQueued(
+  what: string,
+  options: { onWait?: (running: string) => void; timeoutMs?: number } = {}
+): Promise<string | null> {
+  const now = acquireSyncLock(what);
+  if (now) return Promise.resolve(now);
+  options.onWait?.(holder?.what ?? 'sync');
+  return new Promise(resolve => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const turn = () => {
+      if (timer) clearTimeout(timer);
+      resolve(acquireSyncLock(what));
+    };
+    waiters.push(turn);
+    timer = setTimeout(() => {
+      const at = waiters.indexOf(turn);
+      if (at >= 0) waiters.splice(at, 1);
+      resolve(null);
+    }, options.timeoutMs ?? SYNC_QUEUE_TIMEOUT_MS);
+  });
+}
+
+/** Quantos esperam a vez (pros testes e pro aviso). */
+export function syncQueueLength(): number {
+  return waiters.length;
+}
+
+/** "Esperando o push terminar…" — o aviso de quem entrou na fila. */
+export function syncWaitMessage(running: string): string {
+  return `Waiting for the ${running} in progress to finish…`;
 }
 
 /** O token vale pra trava de agora? (a etapa de dentro de uma operação já travada) */

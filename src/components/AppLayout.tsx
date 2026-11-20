@@ -145,13 +145,27 @@ import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
 import { mergeTabSave } from '@/lib/sync/tabSaveMerge';
-import { acquireSyncLock, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder } from '@/lib/sync/syncLock';
+import { acquireSyncLock, acquireSyncLockQueued, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder, syncWaitMessage } from '@/lib/sync/syncLock';
+
+/**
+ * Pega a trava de sync esperando a vez (lib/sync/syncLock, fila): com outro
+ * push ou pull rodando, avisa que está esperando em vez de falhar.
+ */
+function waitForSyncTurn(what: string): Promise<string | null> {
+  return acquireSyncLockQueued(what, {
+    onWait: running => {
+      toast.info(syncWaitMessage(running));
+      reportSyncStatus('info', syncWaitMessage(running));
+    },
+  });
+}
 import { baseAfterPush, preparePush, type PushReport, type PushRequest, type PushScope } from '@/lib/sync/pushPipeline';
 import { sameContent } from '@/lib/canonicalCompare';
 import { exampleNameFor } from '@/lib/exampleName';
 import { withLocalOnlyValues } from '@/lib/sync/pulledEnvironments';
 import { buildSyncOverview, namePathTo, withContentPreviews, type SyncOverview } from '@/lib/sync/syncOverview';
 import { discardEnvironmentChange, discardLocalChange } from '@/lib/sync/discardChange';
+import { envPendingAfterDiscard, pendingAfterDiscard, pendingIdsToKeepLocal, pushVoidsUndo, remoteRenameFailure, undoDecision } from '@/lib/sync/workspaceSyncState';
 import { asCancelled, SyncCancelledError, isSyncCancelRequested, requestSyncCancel, resetSyncCancel, SYNC_CANCELLED_MESSAGE, throwIfSyncCancelled, captureSyncStatus, withoutActions, markResumeAfterReview, openSyncCenter, reportSyncStatus, setKnownConflicts, setSyncCenterBusy, takeResumeAfterReview, type SyncAction, type SyncActionResult, type SyncActionScope, type SyncCenterTab } from '@/lib/sync/syncCenterStore';
 import { SyncCenter } from '@/components/SyncCenter/SyncCenter';
 import { isInSubtree, withSubtreeFrom } from '@/lib/sync/subtreePush';
@@ -1837,12 +1851,7 @@ const forgetRemoteBaseKeepLocal = async (workspaceName: string) => {
   const local = isOpen
     ? { collections: collectionsRef.current, environments: environmentsRef.current }
     : await loadWorkspaceLocalData(workspaceName);
-  const collectionIds = (Array.isArray(local.collections) ? (local.collections as CollectionItem[]) : [])
-    .map(c => c?.id)
-    .filter((id): id is string => !!id);
-  const environmentIds = (Array.isArray(local.environments) ? (local.environments as Environment[]) : [])
-    .map(e => e?.id)
-    .filter((id): id is string => !!id);
+  const { collectionIds, environmentIds } = pendingIdsToKeepLocal(local.collections, local.environments);
   if (collectionIds.length > 0) markCollectionsPendingPush(workspaceName, collectionIds);
   if (environmentIds.length > 0) markEnvironmentsPendingPush(workspaceName, environmentIds);
   // O Desfazer de um pull voltaria a base de antes dele — a do GitHub que
@@ -1988,11 +1997,10 @@ const handleRenameWorkspaceLocal = useCallback(async (oldPath: string, newWorksp
   // "apagado lá". Esquece a base: o próximo push cria a pasta com o nome novo.
   let failure: string | null = null;
   try {
-    const outcome = await githubSyncRef.current?.renameWorkspace(oldPath, newPath);
-    if (outcome === 'failed') failure = 'Outro sync estava rodando, ou falta a senha de sincronização.';
+    failure = remoteRenameFailure(await githubSyncRef.current?.renameWorkspace(oldPath, newPath));
   } catch (err) {
     console.error(`Erro ao renomear a pasta remota de "${oldPath}" para "${newPath}":`, err);
-    failure = (err as Error)?.message ?? String(err);
+    failure = remoteRenameFailure(undefined, err);
   }
   if (failure !== null) {
     await forgetRemoteBaseKeepLocal(newPath);
@@ -4431,24 +4439,34 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // só a árvore faria o próximo push "desfazer" no GitHub o que tinha vindo.
   const undoLastPull = useCallback(async (force = false) => {
     const snap = undoRef.current;
-    if (!snap) {
-      if (undoVoidedByPushRef.current) toast.error(syncText.undoAfterPush);
+    const decision = undoDecision({
+      snapshot: snap,
+      voidedByPush: undoVoidedByPushRef.current,
+      now: Date.now(),
+      currentWorkspace: selectedWorkspaceRef.current,
+      lastLocalEdit: lastLocalEditRef.current,
+      force,
+    });
+    if (decision.kind === 'nothing') return;
+    if (decision.kind === 'voided') {
+      toast.error(syncText.undoAfterPush);
       return;
     }
-    if (Date.now() - snap.at > 10 * 60_000 || snap.workspace !== selectedWorkspaceRef.current) {
+    if (decision.kind === 'expired') {
       undoRef.current = null;
       toast.error(syncText.undoExpired);
       return;
     }
     // Editou depois do pull: desfazer volta TUDO ao de antes dele, e essas
     // edições iriam junto, sem aviso. Pergunta antes.
-    if (!force && lastLocalEditRef.current > snap.at) {
+    if (decision.kind === 'confirmEdits') {
       toast.warning(syncText.undoLosesEdits, {
         duration: 15000,
         action: { label: syncText.undoAnyway, onClick: () => void undoLastPull(true) },
       });
       return;
     }
+    if (!snap) return;
     // Um sync por vez (lib/sync/syncLock): desfazer grava a árvore e a base
     // daqui, e no meio de um push um sobrescrevia o outro — o push aplicava
     // a mescla que montou antes, ou o Desfazer gravava a base antiga por
@@ -4713,8 +4731,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         const env = next.find(e => e.name === envName);
         const theirs = peek.remoteEnvs.find(e => e.name === envName);
         if (env) {
-          const differs = !theirs || diffEnvironments(withoutSessionTokens([env]), withoutSessionTokens([theirs])).length > 0;
-          if (differs) markEnvironmentsPendingPush(workspace, [env.id]);
+          if (envPendingAfterDiscard(env, theirs) === 'mark') markEnvironmentsPendingPush(workspace, [env.id]);
           else {
             clearEnvironmentsPendingPush(workspace, [env.id]);
             markEnvironmentSynced(env.id);
@@ -4736,15 +4753,9 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       await saveWorkspaceCollections(workspace, tree);
       // Pendência da collection: continua só se ainda sobrar diferença nela.
       if (rootId) {
-        const mine = tree.find(c => c.id === rootId);
-        const theirs = peek.remoteTree.find(c => c.id === rootId);
-        if (mine && theirs) {
-          const still = compareWorkspaces([mine], [theirs]);
-          if (still.modified.length + still.onlyLocal.length > 0) markCollectionsPendingPush(workspace, [rootId]);
-          else clearCollectionsPendingPush(workspace, [rootId]);
-        } else if (!mine && !theirs) {
-          clearCollectionsPendingPush(workspace, [rootId]);
-        }
+        const pending = pendingAfterDiscard(tree, peek.remoteTree, rootId);
+        if (pending === 'mark') markCollectionsPendingPush(workspace, [rootId]);
+        else if (pending === 'clear') clearCollectionsPendingPush(workspace, [rootId]);
         setPendingPush(readPendingPush(workspace));
       }
       return { result: 'done', messages: [{ type: 'success', message: syncText.scDiscarded(target.label), action: undo }] };
@@ -4846,13 +4857,15 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     if (pullingCollectionRef.current) return;
     // Um sync por vez (lib/sync/syncLock): um pull no meio de um push
     // aplicava aqui a árvore dele por cima da que o push tinha mesclado.
-    const lock = acquireSyncLock('pull');
+    // Com outro rodando, espera a vez (a fila da trava).
+    pullingCollectionRef.current = true;
+    const lock = await waitForSyncTurn('pull');
     if (!lock) {
+      pullingCollectionRef.current = false;
       toast.info(SYNC_BUSY_MESSAGE);
       reportSyncStatus('error', SYNC_BUSY_MESSAGE);
       return;
     }
-    pullingCollectionRef.current = true;
 
     const workspace = selectedWorkspaceRef.current;
     try {
@@ -5714,7 +5727,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
   const handleReceiveItem = useCallback(async (itemId: string, label: string) => {
     // Um sync por vez (lib/sync/syncLock).
-    const lock = acquireSyncLock('receive');
+    const lock = await waitForSyncTurn('receive');
     if (!lock) {
       toast.info(SYNC_BUSY_MESSAGE);
       reportSyncStatus('error', SYNC_BUSY_MESSAGE);
@@ -5768,7 +5781,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // Chamado de dentro de uma operação travada (o Aplicar da revisão): segue
     // com a trava dela.
     const inherited = holdsSyncLock(request.lockToken) ? request.lockToken! : null;
-    const ownLock = inherited ? null : acquireSyncLock('push');
+    // Sem herdar: espera a vez se outro sync estiver rodando (fila).
+    const ownLock = inherited ? null : await waitForSyncTurn('push');
     const lock = inherited ?? ownLock;
     if (!lock) {
       fail(SYNC_BUSY_MESSAGE);
@@ -5902,7 +5916,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         // de antes dele deixaria a base de antes, e o sync seguinte traria
         // tudo de volta como "mudou lá" — o Desfazer não pegaria, e a pessoa
         // acharia que desfez.
-        if (undoRef.current?.workspace === workspace) {
+        if (pushVoidsUndo(undoRef.current, workspace)) {
           undoRef.current = null;
           undoVoidedByPushRef.current = true;
         }
