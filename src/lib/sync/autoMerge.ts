@@ -4,7 +4,7 @@ import { sameContent } from '@/lib/canonicalCompare';
 import { classifyNode, type NodeOrigin } from '@/lib/diffOrigin';
 import type { NodeHashes } from '@/lib/syncBase';
 import { diffableText, lcsTable, MAX_CELLS } from '@/lib/textDiff';
-import { fieldOrigin, fieldValue, MERGE_FIELDS, REST, REST_DIFF_FIELDS, restOf, type FieldOrigin, type MergeField } from './fieldMerge';
+import { fieldOrigin, fieldValue, MERGE_FIELDS, REST, REST_DIFF_FIELDS, restOf, withLegacyFieldHashes, type FieldOrigin, type MergeField } from './fieldMerge';
 import { orderDecision } from './rebase';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -260,6 +260,8 @@ export function resolveNode(node: DiffNode, ctx: AutoMergeContext, origin?: Node
   // Apagado de um lado e mudado do outro (ou sem base pra saber): só a
   // pessoa sabe se o item ainda deve existir.
   if (node.change !== 'modified' || !node.local || !node.remote) return { kind: 'conflict', fields: [] };
+  // Base de antes do campo pathParams: deduz o dele pelo hash do nó.
+  ctx = { ...ctx, base: withLegacyFieldHashes(ctx.base, node.local, node.remote) };
 
   const baseItem = ctx.baseItemOf?.(node);
   const baseOf = (read: (item: CollectionItem) => unknown): BaseValue =>

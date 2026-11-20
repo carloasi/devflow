@@ -147,6 +147,7 @@ export function fieldMergePlan(
   base: Record<string, string> | null
 ): Record<string, unknown> | null {
   if (!base) return null;
+  base = withLegacyFieldHashes(base, local, remote);
   const nodeId = local.id;
 
   const rest = fieldOrigin(base, nodeId, REST, restOf(local), restOf(remote));
@@ -169,4 +170,131 @@ export function fieldMergePlan(
   // dele: é conflito (os dois mexeram no endereço da request).
   if (origins.url === 'here' && origins.pathParams === 'github') return null;
   return overrides;
+}
+
+// ─── Base gravada antes de um campo existir ──────────────────────────────
+//
+// `pathParams` virou campo depois: a base gravada antes dele não tem
+// `id#pathParams`, e na primeira sincronização depois da atualização todo
+// item mudado dos dois lados com path params diferentes caía na revisão
+// (`unknown`), mesmo quando só um lado tinha mexido neles.
+//
+// A base dessa época tem o hash do NÓ inteiro, que inclui os path params.
+// Dá pra reconstruir o item da base campo a campo — cada campo vem do lado
+// cujo valor tem o hash que a base registrou (o lado que não mexeu nele) —
+// e ver qual dos dois valores de path params reproduz o hash do nó. Só vale
+// com o hash batendo exato; senão o campo continua `unknown` (revisão).
+
+/** Hash do conteúdo próprio do nó — o mesmo de syncBase.nodeHashes. */
+function ownContentHash(item: CollectionItem): string {
+  const own: Record<string, unknown> = { ...stripStarredFlags(item) };
+  delete own.item;
+  return hashContent(own);
+}
+
+type Writable = Record<string, unknown>;
+
+function setOrDelete(target: Writable, key: string, value: unknown) {
+  if (value === undefined) delete target[key];
+  else target[key] = value;
+}
+
+function setFieldValue(item: CollectionItem, field: MergeField, value: unknown, from: CollectionItem) {
+  const top = item as unknown as Writable;
+  const request = () => {
+    if (!top.request) top.request = {};
+    return top.request as Writable;
+  };
+  switch (field) {
+    case 'name':
+    case 'method':
+    case 'example':
+    case 'description':
+    case 'markers':
+    case 'markerNotes':
+      setOrDelete(top, field, value);
+      return;
+    case 'url':
+      setOrDelete(request(), 'url', value);
+      // O urlexport é derivado da URL e viaja com ela (ver fieldMergePlan);
+      // os path params dele são decididos à parte, abaixo.
+      setOrDelete(request(), 'urlexport', structuredClone(from.request?.urlexport));
+      return;
+    case 'headers':
+    case 'body':
+    case 'auth':
+      setOrDelete(request(), field, value);
+      return;
+    case 'preRequestScript':
+    case 'postResponseScript': {
+      const key = field === 'preRequestScript' ? 'preRequest' : 'postResponse';
+      const req = request();
+      if (!req.scripts) req.scripts = {};
+      setOrDelete(req.scripts as Writable, key, value);
+      return;
+    }
+    case 'pathParams': {
+      const req = request();
+      if (!req.urlexport) {
+        if (value === undefined) return;
+        req.urlexport = {};
+      }
+      setOrDelete(req.urlexport as Writable, 'variable', value);
+      return;
+    }
+  }
+}
+
+/**
+ * O hash de `id#pathParams` que a base teria, deduzido do hash do nó — ou
+ * `undefined` quando não dá pra saber.
+ */
+export function inferLegacyPathParamsHash(
+  base: Record<string, string>,
+  local: CollectionItem,
+  remote: CollectionItem
+): string | undefined {
+  const nodeId = local.id;
+  const nodeHash = base[nodeId];
+  if (nodeHash === undefined) return undefined;
+
+  // O item da base começa do lado cujo "resto" é o da base.
+  const restRecorded = base[fieldHashKey(nodeId, REST)];
+  if (restRecorded === undefined) return undefined;
+  const start =
+    hashContent(restOf(remote)) === restRecorded ? remote : hashContent(restOf(local)) === restRecorded ? local : null;
+  if (!start) return undefined;
+  const other = start === remote ? local : remote;
+  const rebuilt = structuredClone(start);
+
+  for (const field of MERGE_FIELDS) {
+    if (field === 'pathParams') continue;
+    const recorded = base[fieldHashKey(nodeId, field)];
+    if (recorded === undefined) return undefined;
+    if (hashContent(fieldValue(start, field)) === recorded) continue;
+    if (hashContent(fieldValue(other, field)) !== recorded) return undefined; // mudou dos dois lados
+    setFieldValue(rebuilt, field, structuredClone(fieldValue(other, field)), other);
+  }
+
+  for (const candidate of [fieldValue(remote, 'pathParams'), fieldValue(local, 'pathParams')]) {
+    setFieldValue(rebuilt, 'pathParams', structuredClone(candidate), rebuilt);
+    if (ownContentHash(rebuilt) === nodeHash) return hashContent(candidate);
+  }
+  return undefined;
+}
+
+/**
+ * A base com os hashes de campo que faltam deduzidos para ESTE item (ver
+ * acima). Sem nada a deduzir, devolve a própria base.
+ */
+export function withLegacyFieldHashes<B extends Record<string, string> | null>(
+  base: B,
+  local: CollectionItem,
+  remote: CollectionItem
+): B {
+  if (!base || !local?.id || local.id !== remote?.id) return base;
+  const key = fieldHashKey(local.id, 'pathParams');
+  if (base[key] !== undefined) return base;
+  const inferred = inferLegacyPathParamsHash(base, local, remote);
+  return inferred === undefined ? base : ({ ...base, [key]: inferred } as B);
 }
