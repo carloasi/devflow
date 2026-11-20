@@ -148,4 +148,34 @@ describe('adoptedRemoteEnvBase', () => {
     const { dropKeys } = adoptedRemoteEnvBase([env({ baseUrl: 'https://tst' })], [env({ baseUrl: 'https://tst' })], base);
     expect(dropKeys).toEqual(['env:e1:old']);
   });
+
+  // O mesmo "tst" criado aqui (e1) e no GitHub (gh-1): casados pelo nome. A
+  // base (gravada num pull) o conhece pelo id de lá.
+  it("an environment matched only by name has its base updated too", () => {
+    const base = environmentHashes([env({ baseUrl: 'https://tst', user: 'ana' }, 'gh-1')]);
+    const local = [env({ baseUrl: 'https://tst', user: 'ana' }, 'e1')];
+    const remote1 = [env({ baseUrl: 'https://tst', user: 'bia' }, 'gh-1')];
+    const r1 = rebaseEnvironments(local, remote1, base);
+    expect(valuesOf(r1.merged).user).toBe('bia');
+    const adopted = adoptedRemoteEnvBase(r1.merged, remote1, base);
+    expect(Object.keys(adopted.hashes)).toEqual(['env:gh-1:user']);
+    const base1 = apply(base, adopted);
+
+    // O push falhou; o colega apagou a variável. O push seguinte não a
+    // devolve — com a base antiga, "bia" contra a base "ana" era sua.
+    const remote2 = [env({ baseUrl: 'https://tst' }, 'gh-1')];
+    const r2 = rebaseEnvironments(r1.merged, remote2, base1);
+    expect(valuesOf(r2.merged)).toEqual({ baseUrl: 'https://tst' });
+  });
+
+  it("deleted on both sides is dropped also for an environment matched by name", () => {
+    const base = environmentHashes([env({ baseUrl: 'https://tst', old: '1' }, 'gh-1')]);
+    const { dropKeys } = adoptedRemoteEnvBase([env({ baseUrl: 'https://tst' }, 'e1')], [env({ baseUrl: 'https://tst' }, 'gh-1')], base);
+    expect(dropKeys).toEqual(['env:gh-1:old']);
+  });
+
+  it("with no base for either id, the keys go under the local id (the one pushed)", () => {
+    const { hashes } = adoptedRemoteEnvBase([env({ a: '1' }, 'e1')], [env({ a: '1' }, 'gh-1')], {});
+    expect(Object.keys(hashes).sort()).toEqual(['env:e1', 'env:e1:a']);
+  });
 });
