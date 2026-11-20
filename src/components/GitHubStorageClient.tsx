@@ -2,8 +2,6 @@
 
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
 import { createPortal } from "react-dom";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { invoke } from "@tauri-apps/api/core";
 import { saveSecret, getSecret, deleteSecret } from '@/lib/secureStorage'
 import { AlertTriangle, ArrowDown, ArrowUp, Check, FolderGit2 } from "lucide-react";
 import { useSyncDiffStrings } from "@/lib/i18n/syncDiffStrings";
@@ -15,9 +13,11 @@ import { RemoteChangeToast, type RemoteCommitInfo } from "@/components/SyncDiff/
 import type { RemoteChangePreview } from "@/lib/sync/remoteChangeAlert";
 import { loadWorkspaceLocalData, loadWorkspaceMarkers } from "@/storage/localSyncStore";
 import type { CollectionItem } from '@/app/types/CollectionItem';
+import type { Environment } from '@/app/types/Environment';
+import type { PushScope } from "@/lib/sync/pushPipeline";
 import { stripStarredFlags } from "@/components/collection-tree/utils/tree.utils";
-import { encryptData, decryptData, clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
-import { diffCollection, diffEnvironment, fileTitle, prettyContent, FileChange } from "@/lib/commitDiff";
+import { clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
+import type { FileChange } from "@/lib/commitDiff";
 import { CommitChangesView } from "@/components/CommitChangesView";
 import { ModalCard } from "@/components/ui/modal-card";
 import { catalogForPush, MARKER_BASE_PREFIX, markerBaseAfterPush, remapMarkers, withRemoteTwins, type Marker } from "@/lib/markers";
@@ -36,61 +36,33 @@ import {
 import { isPendingEmpty, readPendingPush, type PendingPush } from "@/storage/pendingPushStore";
 import { DevFlowBusyCard, DevFlowSpinner } from "@/components/helper/DevFlowLoader";
 import {
+  GitHubConflictError,
+  GitHubRateLimitError,
+  GitHubStorageClient,
+  RECENT_WRITE_MS,
+  recentWrites,
+  type CommitInfo,
+  type GitHubConfig,
+  type RepoItem,
+} from "@/lib/sync/githubStorage";
+// Os erros e o commit do histórico continuam saindo daqui pra quem já importava.
+export { GitHubConflictError, GitHubRateLimitError };
+export type { CommitInfo };
+import {
   buildPushPlan,
   collectionFilePath,
+  collectionNameOf,
+  findNameCollisions,
   collisionMessage,
   duplicateIdGroups,
   environmentFilePath,
   markersFilePath,
-  MARKERS_FILE,
   newestOf,
   pushCommitMessage,
   renamedStalePaths,
   rootIdOf,
 } from "@/lib/sync/pushPlan";
 
-// Mesma chave/comando que o UserBadge.tsx usa pro nome exibido no canto
-// superior direito ("CarlosSilva" / "Windows account") — reaproveitado aqui
-// pra atribuir os commits do GitHub Sync à pessoa que realmente rodou a
-// ação no Windows, em vez de só à conta/token compartilhado configurado no
-// Settings. Útil quando várias pessoas do time usam o mesmo repositório.
-const WIN_USERNAME_STORAGE_KEY = "app_win_username";
-let cachedCommitterName: string | null = null;
-
-async function getCommitterName(): Promise<string | null> {
-  if (cachedCommitterName) return cachedCommitterName;
-  try {
-    const cached = localStorage.getItem(WIN_USERNAME_STORAGE_KEY);
-    if (cached) {
-      cachedCommitterName = cached;
-      return cached;
-    }
-    const winUser = await invoke<string>("get_windows_username");
-    if (winUser) {
-      localStorage.setItem(WIN_USERNAME_STORAGE_KEY, winUser);
-      cachedCommitterName = winUser;
-      return winUser;
-    }
-  } catch (e) {
-    console.error("Não foi possível obter o usuário do Windows para o commit:", e);
-  }
-  return null;
-}
-
-// Git exige author/committer.email, mas não existe um e-mail real do
-// Windows — gera um sintético a partir do nome. De propósito não bate com
-// nenhuma conta do GitHub (não deveria linkar avatar/perfil), só carrega o
-// nome mesmo pra aparecer no histórico de commits.
-function committerEmailFor(name: string): string {
-  const local = name.toLowerCase().replace(/[^a-z0-9._-]/g, ".") || "user";
-  return `${local}@devflow.local`;
-}
-
-async function buildCommitIdentity(): Promise<{ name: string; email: string } | null> {
-  const name = await getCommitterName();
-  if (!name) return null;
-  return { name, email: committerEmailFor(name) };
-}
 
 // HTTP 401 do GitHub = token ausente/inválido/expirado (403 é permissão —
 // não confundir). Usado pra trocar a mensagem genérica "HTTP 401" por um
@@ -163,57 +135,22 @@ const FolderIcon = () => (
   </svg>
 );
 
-interface GitHubConfig {
-  token: string;
-  owner: string;
-  repo: string;
-  branch: string;
-}
 
 interface SyncStatus {
   type: "success" | "error" | "info" | null;
   message: string;
 }
 
-interface RepoItem {
-  name: string;
-  path: string;
-  type: "dir" | "file" | string;
-  /** sha do blob — a Contents API manda em toda entrada da listagem. */
-  sha?: string;
-}
 
-// Um commit do histórico da pasta de um workspace — ver listCommits.
-export interface CommitInfo {
-  sha: string;
-  message: string;
-  authorName: string;
-  date: string;
-  /**
-   * Quando o commit entrou no GitHub (committer). A data do autor (`date`) é
-   * a do relógio de quem criou o commit; pra decidir qual de dois arquivos é
-   * o mais novo, vale esta.
-   */
-  committedAt?: string;
-}
-
-export interface PushOptions {
-  silent?: boolean;
-  /** Vem da tela de revisão: não compara de novo, grava com o sha revisado. */
-  reviewed?: boolean;
-  /** Sobrescreve o GitHub sem comparar nem checar versão. */
-  force?: boolean;
-}
 
 export interface GitHubSyncHandle {
-  push: (collectionsOverride?: any, environmentsOverride?: any, options?: PushOptions) => Promise<void>;
-  pushEnvironment: (env: any) => Promise<void>; // ✅ novo
-  // Envia só uma collection, sem tocar nas demais nem propor exclusões.
-  // `partOf`: o envio é de UM item (pasta ou request) dessa collection — o
-  // arquivo leva o GitHub de agora com só esse item trocado (AppLayout
-  // .handlePushItem). Não apaga arquivos obsoletos nem avisa onCollectionPushed:
-  // o resto das suas mudanças na collection continua pendente.
-  pushCollection: (collection: CollectionItem, options?: { partOf?: string }) => Promise<void>;
+  /**
+   * Grava um push (qualquer alcance) — a decisão do que sobe é do executor
+   * (AppLayout.runPush, lib/sync/pushPipeline). Ver commitPush.
+   */
+  commitPush: (input: CommitPushInput) => Promise<CommitPushResult>;
+  /** Mensagem no painel de sync (e na Central, quando ela capturou). */
+  report: (type: "success" | "error" | "info", message: string) => void;
   // Traz o remoto decriptado SEM aplicar nada. É o que permite comparar
   // antes de sobrescrever (etapas 4-6).
   // `statusLabel` acende a pílula de operação pontual enquanto baixa. É
@@ -230,7 +167,6 @@ export interface GitHubSyncHandle {
   // Baixa todos os workspaces do repositório e substitui os daqui (os que têm
   // alteração não enviada são pulados) — Configurações → Avançado.
   replaceAllFromGitHub: () => Promise<void>;
-  pushWorkspace: (workspaceName: string, options?: PushOptions) => Promise<void>; // ✅ novo — push de só um workspace
   // Renomeia a pasta remota do workspace (ver renameRemoteWorkspace) — no-op
   // silencioso se o workspace nunca foi sincronizado.
   renameWorkspace: (oldName: string, newName: string) => Promise<void>;
@@ -300,30 +236,11 @@ interface GitHubSyncProps {
   hasPendingPush?: boolean;
   // O que está esperando push no workspace ATUAL — pro contador "↑ N to push".
   pendingPushSummary?: PendingPush;
-  // Chamado após enviar UMA collection com sucesso, pra limpar a pendência
-  // só dela — o onPushCompleted zera o workspace inteiro e aqui mentiria.
-  // `pushed`: a collection como subiu (pode diferir da tela, se mudou no meio).
-  onCollectionPushed?: (collectionId: string, pushed?: CollectionItem) => void;
   // Catalogo de marcadores do workspace ativo — sobe junto no push.
   currentMarkers?: Marker[];
   // Catalogo que veio do repositorio. Quem funde com o local e o AppLayout
   // (ver mergeCatalogs): aqui so se sabe baixar.
   onPullMarkers?: (workspaceName: string, markers: Marker[]) => void | Promise<void>;
-  // Compara o remoto recém-buscado com o local e devolve o resumo. Mora no
-  // AppLayout porque é lá que o formato remoto vira árvore (importData) e
-  // que a árvore local existe — aqui só se sabe baixar.
-  // `isPushConflict`: a comparação foi aberta por um push que esbarrou em
-  // conflito (não pelo "Check remote updates" manual) — o AppLayout usa isso
-  // pra, depois de aplicada a mescla, reenviar o push inteiro sozinho.
-  // `hasChanges` no retorno: diz se encontrou diferença (e portanto abriu a
-  // tela) — a checagem PROATIVA antes de um push (handlePushEverything) usa
-  // isso pra decidir se segue com o push normal ou se para e espera a mescla.
-  onCompareRemote?: (
-    workspaceName: string,
-    collections: unknown[],
-    environments: unknown[],
-    isPushConflict?: boolean
-  ) => { summary: string; hasChanges: boolean };
   // Pull do workspace ATUAL passando pela tela de revisão. Quando existe, é
   // o que o botão Pull faz; o pull de todos os workspaces (que substitui o
   // local sem mescla) fica numa ação à parte.
@@ -331,24 +248,6 @@ interface GitHubSyncProps {
   // Restaurar um commit do workspace ATUAL passa pela revisão: a versão
   // daquele commit é comparada com a daqui, e a pessoa escolhe o que volta.
   onReviewSnapshot?: (workspaceName: string, collections: unknown[], environments: unknown[], commitSha: string) => void;
-  // Push de um workspace terminou com sucesso (local == remoto de novo).
-  // `pushed`: o que subiu de fato — é dele que sai a base da sincronização.
-  // keptStale: a pessoa escolheu manter no GitHub arquivos apagados aqui — o
-  // push valeu, mas a exclusão continua pendente.
-  onPushCompleted?: (workspaceName: string, pushed?: { collections: unknown[]; environments: unknown[]; keptStale?: boolean }) => void;
-  // Conflito ao enviar UM workspace pelo menu (pushSingleWorkspace) — esse
-  // workspace pode não ser o selecionado agora, então vai junto o que foi
-  // lido do disco pra tentar o push (local) e o que tem no repositório
-  // (remoto): só quem chamou sabe qual dos dois usar como base do merge.
-  // Retorna se achou diferença (e abriu a tela) — mesmo motivo do
-  // `hasChanges` acima, pra pushSingleWorkspace decidir se para ou segue.
-  onWorkspacePushConflict?: (
-    workspaceName: string,
-    localCollections: unknown[],
-    localEnvironments: unknown[],
-    remoteCollections: unknown[],
-    remoteEnvironments: unknown[]
-  ) => boolean;
   // Aviso em segundo plano: o GitHub mudou um arquivo do workspace — roda o
   // merge "de teste" (nada é aplicado) e diz QUAIS itens mudaram dos dois
   // lados e, de cada item que veio de lá, o antes/depois (`preview`, pro
@@ -358,797 +257,40 @@ interface GitHubSyncProps {
   onConflictPreview?: (workspaceName: string, changedRootIds?: string[]) => Promise<{ conflicts: string[]; incoming: number; preview?: RemoteChangePreview } | null>;
   // "Conflict history…": as decisões de conflito tomadas nesta máquina.
   onShowConflictHistory?: () => void;
-  // Merge automático por item antes do push (e de novo se alguém enviar no
-  // meio): leva só o que mudou aqui por cima da versão do GitHub. Quando
-  // existe, substitui a checagem que abria a revisão a cada diferença.
-  onRebasePush?: (
-    workspaceName: string,
-    localCollections: unknown[],
-    localEnvironments: unknown[],
-    remoteCollections: unknown[],
-    remoteEnvironments: unknown[],
-    // Só os environments: as collections já foram decididas numa revisão.
-    options?: { environmentsOnly?: boolean }
-  ) => Promise<RebaseOutcome>;
 }
 
-/**
- * Resultado do merge automático do push (AppLayout → lib/sync/rebase):
- * `push` traz a árvore a enviar — a do GitHub com as mudanças daqui por
- * cima —; `review` quer dizer que sobrou conflito e a revisão já abriu.
- */
-export type RebaseOutcome =
-  | {
-      status: 'push';
-      collections: unknown[];
-      environments: unknown[];
-      incoming: number;
-      /** Mudou dos dois lados e ficou a versão daqui sem perguntar. */
-      keptMine?: string[];
-    }
-  | { status: 'review'; conflicts: number };
+/** O que gravar num push (ver GitHubSyncHandle.commitPush). */
+export interface CommitPushInput {
+  workspaceName: string;
+  scope: PushScope;
+  /** O que sobe: o workspace inteiro, ou só a collection / o environment do alcance. */
+  collections: CollectionItem[];
+  environments: Environment[];
+  /** Catálogo de marcadores daqui (null = não enviar o catálogo). */
+  markers: Marker[] | null;
+  /** Tudo o que existe aqui — pra achar nomes que colidem com o que sobe. */
+  allLocal?: { collections: CollectionItem[]; environments: Environment[] };
+  /** "Sobrescrever o GitHub com o meu": sem checagem de versão. */
+  force?: boolean;
+  /** Mensagem do commit (sem ela, a do push do workspace). */
+  message?: string;
+  /** Nome no aviso "Sending ...". */
+  label?: string;
+}
+
+export type CommitPushResult =
+  | { status: "pushed"; collections: CollectionItem[]; removed: string[]; keptStale: string[] }
+  | { status: "conflict"; paths: string[] }
+  | { status: "collision"; message: string }
+  | { status: "busy"; message: string }
+  | { status: "error"; message: string };
 
 const GH_TOKEN_KEY = 'gh_sync_token'
 // Senha de sincronização: deriva a chave que cifra o conteúdo enviado ao
 // GitHub. Fica no armazenamento seguro do SO, junto do token.
 const GH_PASSPHRASE_KEY = 'gh_sync_passphrase'
 
-export class GitHubConflictError extends Error {
-  constructor(public path: string) {
-    super(`Conflict: "${path}" was changed by someone else since your last pull.`);
-    this.name = "GitHubConflictError";
-  }
-}
 
-export class GitHubRateLimitError extends Error {
-  constructor(public retryAfterMs: number | null) {
-    super(
-      retryAfterMs
-        ? `GitHub rate limit reached — try again in about ${Math.max(1, Math.ceil(retryAfterMs / 60000))} minute(s).`
-        : "GitHub rate limit reached — try again later."
-    );
-    this.name = "GitHubRateLimitError";
-  }
-}
-
-/**
- * 403/429 por limite de taxa caía no "HTTP 403" genérico, indistinguível de
- * um 403 de permissão de verdade (token sem escopo, repo privado sem
- * acesso). O GitHub manda `Retry-After` (segundos) ou, quando o limite é o
- * de requisições por hora, `X-RateLimit-Remaining: 0` + `X-RateLimit-Reset`
- * (epoch) — detecta os dois e já devolve quanto falta esperar, em vez de
- * deixar quem vê o toast adivinhar. `null` quando não é isso.
- */
-function rateLimitErrorFrom(res: Response): GitHubRateLimitError | null {
-  if (res.status !== 403 && res.status !== 429) return null;
-  if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") !== "0") return null;
-
-  const retryAfter = res.headers.get("Retry-After");
-  if (retryAfter && !Number.isNaN(Number(retryAfter))) {
-    return new GitHubRateLimitError(Number(retryAfter) * 1000);
-  }
-
-  const reset = res.headers.get("X-RateLimit-Reset");
-  if (reset && !Number.isNaN(Number(reset))) {
-    const resetMs = Number(reset) * 1000 - Date.now();
-    return new GitHubRateLimitError(resetMs > 0 ? resetMs : null);
-  }
-
-  return new GitHubRateLimitError(null);
-}
-
-// ─── Versão de cada arquivo que este app viu por último ──────────────────
-//
-// O GitHub só recusa uma gravação (409) quando o `sha` enviado não é o atual.
-// O putFile buscava o sha atual logo antes de gravar — então o 409 nunca
-// acontecia de verdade: quem enviasse entre a comparação (a checagem antes do
-// push, ou a tela de revisão) e a gravação era sobrescrito sem aviso.
-//
-// Aqui fica o sha da versão que foi LIDA (comparada, revisada ou baixada).
-// Gravar com ele é o equivalente ao `git push` sem `--force`: se o arquivo
-// mudou desde então, o GitHub recusa e a revisão abre de novo.
-//
-// Em memória, de propósito: todo push começa com uma leitura do remoto (a
-// checagem proativa), que renova estes valores. Sem leitura nenhuma (a
-// checagem falhou), cai no comportamento antigo — sha atual na hora.
-const seenShas = new Map<string, string>();
-
-class GitHubStorageClient {
-  private baseUrl = "https://api.github.com";
-  /**
-   * `force`: ignora a versão vista e grava por cima do que estiver lá. Só pra
-   * ação explícita "Overwrite GitHub with mine".
-   */
-  constructor(
-    private config: GitHubConfig,
-    private passphrase: string | null,
-    private options: { force?: boolean } = {}
-  ) {}
-
-  get repoKey(): string {
-    return repoKeyOf(this.config);
-  }
-
-  private seenKey(path: string) {
-    return `${this.config.owner}/${this.config.repo}@${this.config.branch}:${path}`;
-  }
-
-  private rememberSha(path: string, sha: string | undefined) {
-    if (sha) seenShas.set(this.seenKey(path), sha);
-    else seenShas.delete(this.seenKey(path));
-  }
-
-  /** sha com que gravar: o visto por último, ou o atual se nunca foi lido. */
-  private async shaForWrite(path: string, force?: boolean): Promise<{ sha: string | undefined; expected: boolean }> {
-    if (!this.options.force && !force) {
-      const seen = seenShas.get(this.seenKey(path));
-      if (seen) return { sha: seen, expected: true };
-    }
-    return { sha: await this.getFileSha(path), expected: false };
-  }
-
-  private headers() {
-    return {
-      Authorization: `Bearer ${this.config.token}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    };
-  }
-
-  private repoUrl(path: string = "") {
-    const cleanPath = path
-      .split("/")
-      .filter(Boolean)
-      .map((segment) => encodeURIComponent(segment))
-      .join("/");
-
-    return `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/contents${
-      cleanPath ? `/${cleanPath}` : ""
-    }`;
-  }
-
-  async listFolders(basePath: string = ""): Promise<RepoItem[]> {
-  // Estrita: com o token vencido (ou sem acesso), a listagem que engolia o
-  // erro dizia "nenhum workspace no repositório" em vez de "token inválido".
-  const items = await this.listDirectoryStrict(basePath);
-  return items.filter((item) => item.type === "dir");
-}
-
-  // Mesma lógica usada por resolveWorkspaceFiles (arquivos de collection na
-  // raiz + arquivos de environment na subpasta "environments"), mas
-  // parametrizada por path — usada tanto pro workspace atual quanto pelo
-  // Pull de TODOS os workspaces do repositório.
-  // `ref` opcional: quando informado (um SHA de commit), lê o estado dos
-  // arquivos NAQUELE commit em vez do topo da branch — usado pelo histórico
-  // de commits do workspace ("baixar esta versão").
-  async resolveWorkspaceFilePaths(remotePathForWs: string, ref?: string): Promise<{ collectionPaths: string[]; envPaths: string[] }> {
-    // Strict: daqui saem as decisões de sync — falha não pode parecer "vazio".
-    const rootFiles = await this.listDirectoryStrict(remotePathForWs, ref);
-
-    const collectionFiles = rootFiles.filter(
-      (f) =>
-        f.type === "file" &&
-        /(\.postman_collection\.json|collection.*\.json)$/i.test(f.name)
-    );
-
-    const envDirItem = rootFiles.find(
-      (f) => f.type === "dir" && f.name.toLowerCase() === "environments"
-    );
-
-    let envPaths: string[] = [];
-    if (envDirItem) {
-      const envFolderFiles = await this.listDirectoryStrict(envDirItem.path, ref);
-      envPaths = envFolderFiles
-        .filter(
-          (f) =>
-            f.type === "file" &&
-            /(\.postman_environment\.json|\.json)$/i.test(f.name)
-        )
-        .map((f) => f.path);
-    }
-
-    return { collectionPaths: collectionFiles.map((f) => f.path), envPaths };
-  }
-
-// Lista recursivamente todos os arquivos (não diretórios) dentro de um path,
-// descendo em subpastas. Usado para descobrir tudo que precisa ser apagado
-// ao excluir um workspace remoto inteiro.
-async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
-  // Strict: rename e exclusão decidem o que mover/apagar por esta lista — uma
-  // falha de rede não pode parecer "a pasta está vazia" (rename que não faz
-  // nada sem avisar, exclusão que apaga só parte e diz que terminou).
-  const items = await this.listDirectoryStrict(path);
-  const files: RepoItem[] = [];
-
-  for (const item of items) {
-    if (item.type === "file") {
-      files.push(item);
-    } else if (item.type === "dir") {
-      const nested = await this.listAllFilesRecursive(item.path);
-      files.push(...nested);
-    }
-  }
-
-  return files;
-}
-
-  /**
-   * Igual ao listDirectory, mas FALHA quando a leitura falha — só "não
-   * existe" (404) vira lista vazia. É a que as decisões de sincronização
-   * usam: com o listDirectory, um erro de rede ou de rate limit parecia "o
-   * GitHub não tem nada", e o merge do push/pull apagava daqui tudo o que
-   * "tinha sumido de lá".
-   */
-  async listDirectoryStrict(path: string = "", ref?: string): Promise<RepoItem[]> {
-    const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(ref || this.config.branch)}`;
-    const res = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
-    if (res.status === 404) return [];
-    if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status} while listing ${path || "/"} on GitHub`);
-    const data = await res.json();
-    if (!Array.isArray(data)) throw new Error(`Unexpected answer while listing ${path || "/"} on GitHub`);
-    return data as RepoItem[];
-  }
-
-  async listDirectory(path: string = "", ref?: string): Promise<RepoItem[]> {
-    const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(ref || this.config.branch)}`;
-    try {
-      const res = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
-      if (res.status === 404) return [];
-      if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      return Array.isArray(data) ? (data as RepoItem[]) : [];
-    } catch (err: any) {
-      console.log(`Erro ao listar ${path || "/"}: ${err.message}`);
-      return [];
-    }
-  }
-
-  // A API de Contents do GitHub só devolve o campo "content" inline pra
-  // arquivos até 1MB. Pra arquivos maiores ela devolve "content": "" com
-  // "encoding": "none" (mas mantém o "sha"), e o pull descartava esse
-  // arquivo em silêncio — colections grandes simplesmente não baixavam.
-  // Usamos a API de Git Blobs (que aceita até 100MB) como fallback.
-  private async fetchBlobContent(sha: string): Promise<string> {
-    const targetUrl = `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/git/blobs/${sha}`;
-    const res = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
-    if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status} while downloading blob ${sha}`);
-    const data = (await res.json()) as any;
-    if (!data.content || data.encoding !== "base64") return "";
-    return data.content as string;
-  }
-
-  /**
-   * Conteúdo (decifrado) de uma versão de arquivo pelo sha do blob — é como
-   * se lê "o arquivo como estava na última sincronização", que pode já não
-   * existir no topo da branch.
-   */
-  async readBlob(sha: string): Promise<unknown> {
-    const base64 = await this.fetchBlobContent(sha);
-    if (!base64) throw new Error(`Empty blob ${sha}`);
-    const raw = this.decodeBase64ToUtf8(base64);
-    try {
-      return await decryptData(raw, this.passphrase);
-    } catch (e) {
-      try {
-        return JSON.parse(raw);
-      } catch {
-        throw e;
-      }
-    }
-  }
-
-  private decodeBase64ToUtf8(base64: string): string {
-    const cleanBase64 = base64.replace(/\s/g, "");
-    const binary = atob(cleanBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return new TextDecoder("utf-8").decode(bytes);
-  }
-
-  // Só busca o "sha" atual de um arquivo (sem baixar/descriptografar o
-  // conteúdo) — usado pelo putFile só pra saber se é create ou update.
-  // Silencioso de propósito (sem console.error/warn): qualquer falha aqui
-  // (404, 401, rede) é tratada como "não existe ainda" e o próprio PUT vai
-  // reportar o erro de verdade (ex: token inválido) se for o caso. Antes
-  // isso reusava getFile() só pelo sha, o que já logava um console.error
-  // "fantasma" (relatado como bug) mesmo quando o erro era esperado/inofensivo.
-  private async getFileSha(path: string): Promise<string | undefined> {
-    const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(this.config.branch)}`;
-    try {
-      const metaRes = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
-      if (!metaRes.ok) return undefined;
-      const metaData = (await metaRes.json()) as any;
-      return metaData?.sha;
-    } catch {
-      return undefined;
-    }
-  }
-
-  // `ref` opcional: SHA de commit pra ler a versão do arquivo naquele ponto
-  // do histórico em vez do topo da branch.
-  // `peek`: só olhar (prévias, avisos). Não conta como "visto": a versão
-  // vista é a que a checagem do push compara, e uma prévia que a
-  // atualizasse deixava passar por cima uma mudança que ninguém revisou.
-  async getFile(path: string, ref?: string, opts?: { peek?: boolean }): Promise<{ content: any; sha: string } | null> {
-    const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(ref || this.config.branch)}`;
-    const remember = !ref && !opts?.peek;
-
-    try {
-      // Logo depois de um commit nosso, a Contents API ainda pode devolver a
-      // versão anterior por alguns segundos — ou 404, num arquivo que o envio
-      // acabou de criar. Numa prévia (Central, aviso de fundo) isso fazia o
-      // que acabou de subir aparecer de novo em "Para enviar". Se este
-      // arquivo foi gravado daqui há pouco, lê direto a versão gravada (pelo
-      // sha do blob, que não muda), sem passar pela Contents API.
-      const recent = !ref && opts?.peek ? recentWriteOf(this.repoKey, path) : undefined;
-      const metaRes =
-        typeof recent === "string" ? null : await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
-
-      if (metaRes && metaRes.status === 404) {
-        console.warn(`⚠️ Arquivo não encontrado (404): ${path}`);
-        // Sumiu do remoto: a próxima gravação é uma criação, não uma
-        // atualização da versão que se tinha visto antes.
-        if (remember) this.rememberSha(path, undefined);
-        return null;
-      }
-
-      if (metaRes && !metaRes.ok) throw rateLimitErrorFrom(metaRes) ?? new Error(`HTTP ${metaRes.status}`);
-
-      const metaData = metaRes ? ((await metaRes.json()) as any) : { sha: recent };
-      // Só a versão do topo da branch conta como "vista": ler um commit
-      // antigo (histórico) não diz nada sobre o que está lá agora.
-      if (remember) this.rememberSha(path, metaData?.sha);
-      let rawStringContent = "";
-
-      if (metaData.content && metaData.encoding === "base64") {
-        rawStringContent = this.decodeBase64ToUtf8(metaData.content);
-      } else if (metaData.sha) {
-        // Arquivo grande (>1MB) — a Contents API não trouxe o conteúdo inline.
-        const blobBase64 = await this.fetchBlobContent(metaData.sha);
-        if (blobBase64) rawStringContent = this.decodeBase64ToUtf8(blobBase64);
-      }
-
-      if (!rawStringContent) {
-        console.warn(`⚠️ Não foi possível ler o conteúdo de: ${path}`);
-        return null;
-      }
-
-      try {
-        const decryptedContent = await decryptData(rawStringContent, this.passphrase);
-        return { content: decryptedContent, sha: metaData.sha };
-      } catch (decErr: any) {
-        try {
-          const parsed = JSON.parse(rawStringContent);
-          return { content: parsed, sha: metaData.sha };
-        } catch (e) {
-          throw new Error(`Failed to read ${path}: ${decErr.message}`);
-        }
-      }
-    } catch (err: any) {
-      console.error(`❌ Erro ao baixar ${path}:`, err);
-      throw new Error(`Error downloading ${path}: ${err.message}`);
-    }
-  }
-
-  // Histórico de commits que tocaram um path específico (a pasta do
-  // workspace) — usado pela janela "Commit history" do menu de workspaces,
-  // onde dá pra escolher qual versão baixar.
-  async listCommits(path: string, perPage = 30): Promise<CommitInfo[]> {
-    const url =
-      `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/commits` +
-      `?path=${encodeURIComponent(path)}&sha=${encodeURIComponent(this.config.branch)}&per_page=${perPage}`;
-
-    const res = await tauriFetch(url, { method: "GET", headers: this.headers() });
-
-    if (res.status === 404) return [];
-    if (!res.ok) {
-      const rateLimit = rateLimitErrorFrom(res);
-      if (rateLimit) throw rateLimit;
-      const errBody = await res.json().catch(() => ({} as any));
-      throw new Error(`HTTP ${res.status}${errBody?.message ? `: ${errBody.message}` : ""}`);
-    }
-
-    const data = (await res.json()) as any[];
-    if (!Array.isArray(data)) return [];
-
-    return data.map((c) => ({
-      sha: c?.sha ?? "",
-      message: c?.commit?.message ?? "",
-      // `commit.author.name` é o nome gravado no git (é o que o DevFlow
-      // preenche com o usuário do Windows — ver buildCommitIdentity); o
-      // `author.login` só existe quando o e-mail bate com uma conta GitHub.
-      authorName: c?.commit?.author?.name ?? c?.author?.login ?? "unknown",
-      date: c?.commit?.author?.date ?? "",
-      committedAt: c?.commit?.committer?.date ?? c?.commit?.author?.date ?? "",
-    }));
-  }
-
-  // O que um commit mudou dentro da pasta de um workspace. O patch do GitHub
-  // não serve (o conteúdo é cifrado), então baixa a versão de cada arquivo
-  // no commit e no pai dele, descriptografa as duas e compara a estrutura
-  // (ver lib/commitDiff).
-  async getCommitChanges(sha: string, workspacePath: string): Promise<FileChange[]> {
-    const url = `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/commits/${encodeURIComponent(sha)}`;
-    const res = await tauriFetch(url, { method: "GET", headers: this.headers() });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({} as any));
-      throw new Error(`HTTP ${res.status}${errBody?.message ? `: ${errBody.message}` : ""}`);
-    }
-
-    const data = (await res.json()) as any;
-    const parentSha: string | undefined = data?.parents?.[0]?.sha;
-    const prefix = `${workspacePath.replace(/\/+$/, "")}/`;
-    const files = (Array.isArray(data?.files) ? data.files : []).filter(
-      (f: any) => String(f?.filename ?? "").startsWith(prefix) || String(f?.previous_filename ?? "").startsWith(prefix)
-    );
-
-    // getFile devolve null pra 404 e lança pra erro de rede/senha.
-    const read = async (path: string | undefined, ref: string | undefined) =>
-      path && ref ? (await this.getFile(path, ref))?.content ?? null : null;
-
-    return Promise.all(
-      files.map(async (f: any): Promise<FileChange> => {
-        const filename = String(f.filename);
-        const status: FileChange["status"] =
-          f.status === "added" || f.status === "removed" || f.status === "renamed" ? f.status : "modified";
-        // O catálogo de marcadores também é .json, mas não é collection:
-        // comparado como uma, o histórico mostrava um diff sem sentido.
-        const kind: FileChange["kind"] = /\/environments\//i.test(filename)
-          ? "environment"
-          : filename.endsWith(`/${MARKERS_FILE}`)
-            ? "other"
-            : /\.json$/i.test(filename)
-              ? "collection"
-              : "other";
-
-        if (kind === "other") {
-          return { file: filename, status, kind, title: filename.split("/").pop() ?? filename, changes: [] };
-        }
-
-        try {
-          const [before, after] = await Promise.all([
-            status === "added" ? null : read(f.previous_filename ?? filename, parentSha),
-            status === "removed" ? null : read(filename, sha),
-          ]);
-          return {
-            file: filename,
-            status,
-            kind,
-            title: fileTitle(filename, after ?? before),
-            changes: kind === "environment" ? diffEnvironment(before, after) : diffCollection(before, after),
-            beforeText: prettyContent(before),
-            afterText: prettyContent(after),
-          };
-        } catch (e: any) {
-          return {
-            file: filename,
-            status,
-            kind,
-            title: fileTitle(filename, null),
-            changes: [],
-            error: e?.message ?? String(e),
-          };
-        }
-      })
-    );
-  }
-
-  async putFile(path: string, content: any, message: string, opts?: { force?: boolean }): Promise<void> {
-    const targetUrl = this.repoUrl(path);
-    try {
-      const { sha, expected } = await this.shaForWrite(path, opts?.force);
-
-      const encryptedString = await encryptData(content, this.passphrase ?? '');
-
-      const encoded = btoa(
-        encodeURIComponent(encryptedString).replace(/%([0-9A-F]{2})/g, (_, p1) =>
-          String.fromCharCode(parseInt(p1, 16))
-        )
-      );
-
-      const body: Record<string, unknown> = {
-        message,
-        content: encoded,
-        branch: this.config.branch,
-      };
-      if (sha) body.sha = sha;
-
-      const identity = await buildCommitIdentity();
-      if (identity) {
-        // GitHub aceita author/committer separados, mas aqui os dois são a
-        // mesma pessoa — quem de fato clicou em Save/Push nesta máquina.
-        body.author = identity;
-        body.committer = identity;
-      }
-
-      const res = await tauriFetch(targetUrl, {
-        method: "PUT",
-        headers: this.headers(),
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        // 409 = o sha não é mais o atual. 422 com um sha esperado é a mesma
-        // coisa por outro caminho (o arquivo foi apagado ou recriado lá).
-        if (res.status === 409 || (res.status === 422 && expected)) {
-          throw new GitHubConflictError(path);
-        }
-        const rateLimit = rateLimitErrorFrom(res);
-        if (rateLimit) throw rateLimit;
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(`HTTP ${res.status}${errBody.message ? `: ${errBody.message}` : ''}`);
-      }
-
-      // A versão que acabou de ser gravada é a nova "vista" — senão uma
-      // segunda gravação do mesmo arquivo nesta sessão esbarraria no sha
-      // antigo e acusaria conflito consigo mesma.
-      const written = (await res.json().catch(() => null)) as any;
-      // Sem o sha novo na resposta, o "visto" não é apagado: apagado, a
-      // próxima gravação usava o sha ATUAL (getFileSha) e sobrescrevia sem
-      // checar nada. Mantendo o antigo, no pior caso dá um conflito falso.
-      if (written?.content?.sha) this.rememberSha(path, written.content.sha);
-      // Gravado = local e remoto iguais neste arquivo (ver lib/remoteVersions).
-      void recordSyncedShas(this.repoKey, { [path]: written?.content?.sha ?? null });
-    } catch (err: any) {
-      throw err;
-    }
-  }
-
-  // ─── Vários arquivos num commit só (Git Data API) ────────────────────────
-  //
-  // A Contents API (putFile/deleteFile) cria UM commit por arquivo: um push
-  // de 12 collections virava 12 commits, o histórico ficava ilegível, e uma
-  // falha no meio deixava o GitHub com metade do push — cada laço de envio
-  // carregava código só pra lembrar o que já tinha subido.
-  //
-  // Aqui o push inteiro vira uma árvore nova sobre o topo da branch e um
-  // commit só. A ref só avança se ninguém tiver enviado no meio (sem force):
-  // se alguém enviou, refaz em cima do novo topo — e se mexeram justamente
-  // num arquivo deste push, para e devolve o conflito sem gravar NADA.
-
-  private gitUrl(path: string) {
-    return `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/git${path}`;
-  }
-
-  private async gitJson<T>(path: string, init?: { method: string; body: unknown }): Promise<{ status: number; data: T | null }> {
-    const res = await tauriFetch(this.gitUrl(path), {
-      method: init?.method ?? "GET",
-      headers: this.headers(),
-      ...(init ? { body: JSON.stringify(init.body) } : {}),
-    });
-    if (!res.ok) {
-      const rateLimit = rateLimitErrorFrom(res);
-      if (rateLimit) throw rateLimit;
-      // Quem chama decide o que fazer com 404/409/422 (branch vazia, ref
-      // que andou); o resto vira erro com o status no texto (isAuthError).
-      if ([404, 409, 422].includes(res.status)) return { status: res.status, data: null };
-      const errBody = (await res.json().catch(() => ({}))) as any;
-      throw new Error(`HTTP ${res.status}${errBody?.message ? `: ${errBody.message}` : ""}`);
-    }
-    return { status: res.status, data: (await res.json()) as T };
-  }
-
-  /**
-   * Grava e apaga arquivos num commit só.
-   *
-   * `noCheck`: o arquivo não passa pela checagem de versão (o catálogo de
-   * marcadores, que o pull mescla em vez de revisar). Com `force` no
-   * cliente, nada passa.
-   *
-   * Devolve os paths em conflito sem gravar nada, ou o sha de cada arquivo
-   * gravado. Repositório sem nenhum commit ainda: cai na Contents API, um
-   * arquivo por vez, que é a única que cria o primeiro commit.
-   */
-  async commitFiles(
-    changes: { path: string; content?: unknown; delete?: boolean; noCheck?: boolean }[],
-    message: string
-  ): Promise<{ ok: true; written: FileShas } | { ok: false; conflicts: string[] }> {
-    // Segmento a segmento: uma branch "feature/x" é o caminho heads/feature/x
-    // na rota da ref. Codificada inteira ("feature%2Fx"), a rota não acha a
-    // branch.
-    const branch = this.config.branch.split("/").map(encodeURIComponent).join("/");
-    const writes = changes.filter((c) => !c.delete);
-    const deletes = changes.filter((c) => c.delete);
-
-    // "Cancelar" da Central: antes de mandar qualquer coisa.
-    throwIfSyncCancelled();
-    const head0 = await this.gitJson<{ object: { sha: string } }>(`/ref/heads/${branch}`);
-    if (!head0.data) {
-      // 409 = repositório ainda sem nenhum commit: só a Contents API cria o
-      // primeiro. Qualquer outra resposta (404: branch que não existe, ou
-      // token sem acesso ao repositório) é erro — cair no envio arquivo por
-      // arquivo aqui fazia um commit por arquivo, sem a garantia de tudo ou
-      // nada, e no fim falhava do mesmo jeito.
-      if (head0.status === 409) return this.commitFilesOneByOne(changes, message);
-      throw new Error(
-        `HTTP ${head0.status}: branch "${this.config.branch}" not found in ${this.config.owner}/${this.config.repo} (or this token has no access to it).`
-      );
-    }
-
-    // Cifra e cria os blobs UMA vez: o retry só refaz árvore e commit.
-    const blobs = new Map<string, string>();
-    for (const w of writes) {
-      const encrypted = await encryptData(w.content, this.passphrase ?? "");
-      const blob = await this.gitJson<{ sha: string }>("/blobs", {
-        method: "POST",
-        body: { content: encrypted, encoding: "utf-8" },
-      });
-      if (!blob.data) throw new Error(`HTTP ${blob.status} while uploading ${w.path}`);
-      blobs.set(w.path, blob.data.sha);
-    }
-
-    const identity = await buildCommitIdentity();
-    let headSha = head0.data.object.sha;
-
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const commit = await this.gitJson<{ tree: { sha: string } }>(`/commits/${headSha}`);
-      if (!commit.data) throw new Error(`HTTP ${commit.status} while reading ${this.config.branch}`);
-      const baseTree = commit.data.tree.sha;
-
-      // Versão de cada arquivo NESTE topo — uma listagem por pasta.
-      const current: FileShas = {};
-      const dirs = new Set(changes.map((c) => c.path.slice(0, c.path.lastIndexOf("/"))));
-      for (const dir of dirs) {
-        // Strict: com a listagem falhando, todo arquivo parecia "mudado lá"
-        // (conflito falso) e as exclusões eram puladas em silêncio.
-        for (const item of await this.listDirectoryStrict(dir, headSha)) {
-          if (item.type === "file" && item.sha) current[item.path] = item.sha;
-        }
-      }
-
-      const conflicts: string[] = [];
-      if (!this.options.force) {
-        for (const c of changes) {
-          if (c.noCheck) continue;
-          const seen = seenShas.get(this.seenKey(c.path));
-          if (seen !== undefined) {
-            if (current[c.path] !== seen) conflicts.push(c.path);
-          } else if (!c.delete && current[c.path] !== undefined) {
-            // Nunca lido NESTA sessão, mas existe lá: alguém o criou depois
-            // da última leitura (ex.: duas pessoas criando a mesma collection).
-            // Gravar por cima apagaria o dele — vira conflito, e o merge do
-            // push relê e decide (na segunda volta ele já foi lido).
-            conflicts.push(c.path);
-          }
-        }
-      }
-      if (conflicts.length > 0) return { ok: false, conflicts };
-
-      const tree = [
-        ...writes.map((w) => ({ path: w.path, mode: "100644", type: "blob", sha: blobs.get(w.path)! })),
-        // Apagar o que já não existe lá daria erro na árvore — e o efeito
-        // desejado já está feito.
-        ...deletes
-          .filter((d) => current[d.path])
-          .map((d) => ({ path: d.path, mode: "100644", type: "blob", sha: null })),
-      ];
-      if (tree.length === 0) return { ok: true, written: {} };
-      // Último ponto seguro: até aqui nada mudou no GitHub (os blobs soltos
-      // não aparecem em lugar nenhum). Depois do commit, o envio está feito.
-      throwIfSyncCancelled();
-
-      const newTree = await this.gitJson<{ sha: string }>("/trees", {
-        method: "POST",
-        body: { base_tree: baseTree, tree },
-      });
-      if (!newTree.data) throw new Error(`HTTP ${newTree.status} while building the commit`);
-
-      const newCommit = await this.gitJson<{ sha: string }>("/commits", {
-        method: "POST",
-        body: {
-          message,
-          tree: newTree.data.sha,
-          parents: [headSha],
-          ...(identity ? { author: identity, committer: identity } : {}),
-        },
-      });
-      if (!newCommit.data) throw new Error(`HTTP ${newCommit.status} while creating the commit`);
-
-      const moved = await this.gitJson<unknown>(`/refs/heads/${branch}`, {
-        method: "PATCH",
-        body: { sha: newCommit.data.sha, force: false },
-      });
-      if (moved.data) {
-        const written: FileShas = {};
-        const recorded: Record<string, string | null> = {};
-        for (const w of writes) {
-          const sha = blobs.get(w.path)!;
-          written[w.path] = sha;
-          recorded[w.path] = sha;
-          this.rememberSha(w.path, sha);
-          rememberRecentWrite(this.repoKey, w.path, sha);
-        }
-        for (const d of deletes) {
-          recorded[d.path] = null;
-          this.rememberSha(d.path, undefined);
-          rememberRecentWrite(this.repoKey, d.path, null);
-        }
-        await recordSyncedShas(this.repoKey, recorded);
-        return { ok: true, written };
-      }
-
-      // 422 = não é fast-forward: alguém enviou entre ler o topo e mover a
-      // ref. Relê o topo e tenta de novo — a checagem acima pega o caso em
-      // que essa pessoa mexeu num arquivo deste push.
-      const head = await this.gitJson<{ object: { sha: string } }>(`/ref/heads/${branch}`);
-      if (!head.data) throw new Error(`HTTP ${head.status} while reading ${this.config.branch}`);
-      headSha = head.data.object.sha;
-    }
-
-    throw new Error("GitHub kept changing while pushing — try again in a moment.");
-  }
-
-  /** Caminho antigo, arquivo por arquivo — só pra repositório sem commit. */
-  private async commitFilesOneByOne(
-    changes: { path: string; content?: unknown; delete?: boolean; noCheck?: boolean }[],
-    message: string
-  ): Promise<{ ok: true; written: FileShas } | { ok: false; conflicts: string[] }> {
-    const conflicts: string[] = [];
-    for (const c of changes) {
-      throwIfSyncCancelled();
-      try {
-        if (c.delete) await this.deleteFile(c.path, message);
-        else await this.putFile(c.path, c.content, message, { force: c.noCheck });
-      } catch (e) {
-        if (e instanceof GitHubConflictError) conflicts.push(c.path);
-        else throw e;
-      }
-    }
-    return conflicts.length > 0 ? { ok: false, conflicts } : { ok: true, written: {} };
-  }
-
-  async deleteFile(path: string, message: string): Promise<void> {
-    const targetUrl = this.repoUrl(path);
-    try {
-      const metaRes = await tauriFetch(
-        `${targetUrl}?ref=${encodeURIComponent(this.config.branch)}`,
-        { method: "GET", headers: this.headers() }
-      );
-
-      if (metaRes.status === 404) {
-        // Já não existia: o efeito é o mesmo de ter apagado.
-        void recordSyncedShas(this.repoKey, { [path]: null });
-        return;
-      }
-
-      if (!metaRes.ok) throw rateLimitErrorFrom(metaRes) ?? new Error(`HTTP ${metaRes.status}`);
-
-      const metaData = (await metaRes.json()) as any;
-      const sha = metaData.sha;
-      if (!sha) return;
-
-      const deleteBody: Record<string, unknown> = { message, sha, branch: this.config.branch };
-      const identity = await buildCommitIdentity();
-      if (identity) {
-        deleteBody.author = identity;
-        deleteBody.committer = identity;
-      }
-
-      const res = await tauriFetch(targetUrl, {
-        method: "DELETE",
-        headers: this.headers(),
-        body: JSON.stringify(deleteBody),
-      });
-
-      if (!res.ok) {
-        const rateLimit = rateLimitErrorFrom(res);
-        if (rateLimit) throw rateLimit;
-        const errJson = (await res.json().catch(() => ({}))) as any;
-        // Com o status no texto: é por ele que o aviso de token inválido
-        // (HTTP 401) é reconhecido — só "Bad credentials" passava batido.
-        throw new Error(`HTTP ${res.status}${errJson.message ? `: ${errJson.message}` : ""}`);
-      }
-      this.rememberSha(path, undefined);
-      void recordSyncedShas(this.repoKey, { [path]: null });
-    } catch (err: any) {
-      throw err;
-    }
-  }
-  
-}
 
 const WORKSPACES_ROOT = "Postman";
 
@@ -1290,19 +432,6 @@ interface FetchedVersions {
 }
 const lastFetched = new Map<string, FetchedVersions>();
 
-// O que esta máquina gravou há pouco, por arquivo (ver getFile, modo prévia).
-// 2 minutos: bem mais que o atraso da API, e curto o bastante pra não
-// esconder por muito tempo a mudança de um colega que viesse logo depois.
-const RECENT_WRITE_MS = 120_000;
-// sha = gravado; null = apagado.
-const recentWrites = new Map<string, { sha: string | null; at: number }>();
-function rememberRecentWrite(repoKey: string, path: string, sha: string | null) {
-  recentWrites.set(`${repoKey}|${path}`, { sha, at: Date.now() });
-}
-function recentWriteOf(repoKey: string, path: string): string | null | undefined {
-  const entry = recentWrites.get(`${repoKey}|${path}`);
-  return entry && Date.now() - entry.at < RECENT_WRITE_MS ? entry.sha : undefined;
-}
 /**
  * A lista de arquivos de uma prévia, acertada com o que esta máquina gravou
  * ou apagou há pouco: a listagem do GitHub também atrasa, e uma collection
@@ -1548,31 +677,6 @@ async function fetchRemoteWorkspace(
   };
 }
 
-// ─── Mensagens do push, iguais nos dois caminhos ─────────────────────────
-function conflictMessage(paths: string[]): string {
-  return paths.length === 1
-    ? `"${paths[0].split("/").pop()}" was changed on GitHub by someone else. Nothing was pushed — review the changes to merge them.`
-    : `${paths.length} files were changed on GitHub by someone else. Nothing was pushed — review the changes to merge them.`;
-}
-
-function keptStaleMessage(workspaceName: string, count: number): string {
-  return `"${workspaceName}" pushed. ${count} file(s) you removed here were kept on GitHub.`;
-}
-
-function pushedMessage(workspaceName: string, removed: number, incoming = 0, keptMine: string[] = []): string {
-  let message = removed > 0
-    ? `"${workspaceName}" pushed to GitHub — ${removed} file(s) removed there.`
-    : `"${workspaceName}" pushed to GitHub.`;
-  if (incoming > 0) message += ` ${incoming} change(s) made by others on GitHub were merged in automatically.`;
-  // O que mudou dos dois lados e ficou com a versão daqui SEM revisão
-  // (variáveis de environment, itens movidos): diz, em vez de calar.
-  if (keptMine.length > 0) {
-    const listed = keptMine.slice(0, 5).join(', ') + (keptMine.length > 5 ? `, +${keptMine.length - 5}` : '');
-    message += ` Changed on both sides — your version replaced GitHub's: ${listed}.`;
-  }
-  return message;
-}
-
 // Aviso em segundo plano (GitHubSync): de quanto em quanto tempo relê a
 // listagem do GitHub, e o intervalo mínimo entre duas leituras (voltar pra
 // janela várias vezes seguidas não dispara uma leitura por vez).
@@ -1608,10 +712,6 @@ function saveNotified(seen: Record<string, string>): void {
   }
 }
 
-function rebaseReviewMessage(workspaceName: string, conflicts: number): string {
-  return `${conflicts} item(s) in "${workspaceName}" were changed both here and on GitHub. Everything else was merged — decide these and the push continues.`;
-}
-
 const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHubSync({
   workspace,
   currentCollections,
@@ -1624,13 +724,8 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   hasUnsyncedChanges, // ✅ novo — avisa antes de sobrescrever com Pull
   hasPendingPush,
   pendingPushSummary,
-  onCollectionPushed,
-  onCompareRemote,
   onPullWithReview,
   onReviewSnapshot,
-  onPushCompleted,
-  onWorkspacePushConflict,
-  onRebasePush,
   onConflictPreview,
   onShowConflictHistory,
   currentMarkers,
@@ -2329,7 +1424,6 @@ useEffect(() => {
 
   const [pendingDelete, setPendingDelete] = useState<{ paths: string[] } | null>(null);
   const deleteConfirmResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
-  const [pushConflict, setPushConflict] = useState<string[] | null>(null);
 
   function askDeleteConfirmation(paths: string[]): Promise<boolean> {
     return new Promise((resolve) => {
@@ -2509,291 +1603,137 @@ useEffect(() => {
     }
   }, [isConfigValid, workspace, client, onPullWorkspaceData, onReviewSnapshot, showStatus]);
 
-  // Busca o GitHub e reaplica por cima as mudanças daqui (AppLayout →
-  // lib/sync/rebase). `null` = sem merge automático disponível.
-  async function rebaseOnRemote(
-    storage: GitHubStorageClient,
-    workspaceName: string,
-    collections: unknown[],
-    environments: unknown[],
-    options?: { environmentsOnly?: boolean }
-  ): Promise<RebaseOutcome | null> {
-    if (!onRebasePush) return null;
-    const remote = await fetchRemoteWorkspace(storage, workspaceName);
-    // Arquivo que não baixou some da versão "de lá" — o merge leria isso
-    // como "apagaram no GitHub" e apagaria daqui. Melhor não enviar nada.
-    if (remote.failedPaths.length > 0) {
-      throw new Error(
-        `Could not read ${remote.failedPaths.length} file(s) from GitHub (${remote.failedPaths
-          .map((p) => p.split("/").pop())
-          .join(", ")}). Nothing was pushed — try again.`
-      );
-    }
-    return onRebasePush(workspaceName, collections, environments, remote.collections, remote.environments, options);
-  }
-
-  // ── Núcleo dos dois pushes de workspace inteiro ──────────────────────────
-  // Plano (lib/sync/pushPlan) → confirmação do que apagar → UM commit
-  // (commitFiles). Atômico: ou o push inteiro entra, ou nada entra — não
-  // existe mais "metade enviada" pra lembrar depois de uma falha de rede.
-  async function runWorkspacePush(
-    storage: GitHubStorageClient,
-    input: {
-      workspaceName: string;
-      collections: unknown[];
-      environments: unknown[];
-      markers: Marker[];
-      allowDeletes: boolean;
-    }
-  ): Promise<
-    | { status: "collision"; message: string }
-    | { status: "conflict"; paths: string[] }
-    | {
-        status: "pushed";
-        collectionPaths: string[];
-        envPaths: string[];
-        removed: string[];
-        keptStale: string[];
-        /** As collections como subiram (ids de marcador já trocados, se precisou). */
-        collections: unknown[];
-      }
-  > {
-    const wsRemotePath = `${WORKSPACES_ROOT}/${input.workspaceName}`;
-    const existing = await storage.resolveWorkspaceFilePaths(wsRemotePath);
-    // O catálogo de lá entra junto (catalogForPush): gravar só o daqui
-    // apagava os marcadores que outra pessoa criou desde o último pull. Com
-    // a base: marcador apagado aqui não volta, apagado lá não é reenviado, e
-    // o que o colega renomeou não é desfeito (lib/markers). Sem conseguir
-    // ler o de lá, o catálogo fica fora deste push.
-    // Catálogo, árvore e plano saem juntos de UMA leitura do catálogo de lá —
-    // e são refeitos se ele mudar no meio do envio (ver o laço do commit).
-    const prepare = async () => {
-      const markers = await markersForPush(storage, wsRemotePath, input.workspaceName, input.markers);
-      // Marcador com o mesmo nome de um do GitHub (outro id): a árvore sobe
-      // já com o id de lá, o mesmo que o catálogo enviado leva.
-      const collections = markers && markers.remapped.size > 0
-        ? remapMarkers(input.collections as CollectionItem[], markers.remapped)
-        : input.collections;
-      const plan = buildPushPlan({
-        wsRemotePath,
-        collections,
-        // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
-        environments: withoutSessionTokens(input.environments),
-        markers: markers?.send ?? null,
-        existingPaths: [...existing.collectionPaths, ...existing.envPaths],
-      });
-      return { markers, collections, plan };
-    };
-    let { markers, collections, plan } = await prepare();
-    // Só propõe apagar o que já esteve sincronizado aqui (você apagou). Um
-    // arquivo que nunca foi sincronizado é NOVO no GitHub — de um colega —, e
-    // o diálogo dizia "You removed this here" sobre ele.
-    // Renomeação (o mesmo id gravado com outro nome) sai sem perguntar.
-    const writtenIds = new Set(
-      plan.files.filter((f) => f.kind !== "markers").map((f) => rootIdOf(f.content)).filter((id): id is string => !!id)
-    );
-    const { renamed, ask: stalePaths } = await staleToRemove(storage, input.workspaceName, plan.stalePaths, writtenIds);
-
-    if (plan.collisions.length > 0) return { status: "collision", message: collisionMessage(plan.collisions) };
-
-    // Pergunta ANTES de gravar: assim a exclusão entra no mesmo commit.
-    let removed: string[] = [...renamed];
-    let keptStale: string[] = [];
-    if (input.allowDeletes && stalePaths.length > 0) {
-      if (await askDeleteConfirmation(stalePaths)) removed = [...removed, ...stalePaths];
-      else keptStale = stalePaths;
-    }
-
-    // O catálogo também passa pela checagem de versão. Sem ela, quem enviasse
-    // por último gravava o catálogo calculado ANTES do commit do outro — e o
-    // marcador que o outro acabou de criar sumia de lá (no pull seguinte
-    // dele, sumia também daqui, junto com as marcas nos itens).
-    // Se só ele mudou no meio, não é conflito pra revisar: ele é mesclado
-    // (catalogForPush). Relê, recalcula e tenta de novo.
-    const markersPath = markersFilePath(wsRemotePath);
-    let result: Awaited<ReturnType<typeof storage.commitFiles>>;
-    for (let attempt = 0; ; attempt++) {
-      result = await storage.commitFiles(
-        [
-          ...plan.files.map((f) => ({ path: f.path, content: f.content })),
-          ...removed.map((path) => ({ path, delete: true })),
-        ],
-        pushCommitMessage(input.workspaceName, plan, removed.length)
-      );
-      if (result.ok || attempt >= 2 || !result.conflicts.every((path) => path === markersPath)) break;
-      ({ markers, collections, plan } = await prepare());
-    }
-    if (!result.ok) return { status: "conflict", paths: result.conflicts };
-    // A base do catálogo: o que ficou igual dos dois lados (markerBaseAfterPush).
-    if (markers) await recordSyncBase(input.workspaceName, markers.base, [MARKER_BASE_PREFIX]);
-    // Trocou id de marcador: o daqui passa a ser o que subiu (catálogo e
-    // marcas da árvore), pelo mesmo merge do pull.
-    if (markers && markers.remapped.size > 0) await onPullMarkers?.(input.workspaceName, markers.send);
-
-    const isEnv = (path: string) => path.startsWith(`${wsRemotePath}/environments/`);
-    const kept = new Set(keptStale);
-    return {
-      status: "pushed",
-      collectionPaths: [
-        ...plan.files.filter((f) => f.kind === "collection").map((f) => f.path),
-        ...[...kept].filter((p) => !isEnv(p)),
-      ],
-      envPaths: [
-        ...plan.files.filter((f) => f.kind === "environment").map((f) => f.path),
-        ...[...kept].filter(isEnv),
-      ],
-      removed,
-      keptStale,
-      collections,
-    };
-  }
-
-  // Push de um único workspace (por nome) — usado pelo ícone de push no menu
-  // de workspaces (ao lado do Pull), sem precisar trocar pro workspace nem
-  // enviar todos os outros junto. Carrega os dados locais do workspace ALVO
-  // direto do storage (não de currentCollections/currentEnvironments, que só
-  // refletem o workspace selecionado agora) e resolve os arquivos remotos
-  // desse workspace pra saber o que é create/update e o que ficou obsoleto.
-  const pushSingleWorkspace = useCallback(async (workspaceName: string, options?: PushOptions) => {
-    if (!isConfigValid) {
-      showStatus("error", "Configure GitHub sync before pushing.");
-      return;
-    }
-
-    if (!requirePassphrase()) return;
-
-    if (singleOpBusy || syncOpRef.current) {
-      showStatus("error", SYNC_BUSY_MESSAGE);
-      return;
-    }
-
-    syncOpRef.current = `push ${workspaceName}`;
-    setSingleOp(`Sending "${workspaceName}"...`);
-    showStatus("info", `Encrypting and sending "${workspaceName}"...`);
-
+  // ── Gravação de um push, qualquer alcance (lib/sync/pushPipeline) ───────
+  // A decisão do que sobe (mescla com o GitHub, o que entra aqui, a base) é
+  // do executor (AppLayout.runPush). Aqui fica só a gravação, igual pra
+  // todos os alcances: nomes que colidem → catálogo de marcadores → o que
+  // sobrou lá (no workspace inteiro, com confirmação; nos outros, só a
+  // renomeação do próprio item) → UM commit com checagem de versão.
+  async function commitPush(input: CommitPushInput): Promise<CommitPushResult> {
+    if (!isConfigValid) return { status: "error", message: "Configure GitHub sync before pushing." };
+    if (!requirePassphrase()) return { status: "error", message: PASSPHRASE_MISSING_MESSAGE };
+    if (syncOpRef.current) return { status: "busy", message: SYNC_BUSY_MESSAGE };
+    syncOpRef.current = `push ${input.workspaceName}`;
+    const label = input.label ?? input.workspaceName;
+    setSingleOp(`Sending "${label}"...`);
     try {
-      const storage = client({ force: options?.force });
-      const { collections, environments } = await loadWorkspaceLocalData(workspaceName);
-      // O catálogo de marcadores é POR WORKSPACE — ler `currentMarkers` (o
-      // catálogo do workspace SELECIONADO agora) enviaria o catálogo errado
-      // sempre que `workspaceName` não for o workspace ativo.
-      const markersToPush = (await loadWorkspaceMarkers(workspaceName)) as Marker[];
+      const storage = client({ force: input.force });
+      const { scope } = input;
+      const wsRemotePath = `${WORKSPACES_ROOT}/${input.workspaceName}`;
+      const allLocal = input.allLocal ?? { collections: input.collections, environments: input.environments };
 
-      let collectionsToPush: any[] = Array.isArray(collections) ? collections : [];
-      let envsToPush: any[] = Array.isArray(environments) ? environments : [];
+      // Nomes diferentes que viram o MESMO arquivo ("API's Tests" e "API S
+      // Tests"): o GitHub nunca vê isso como conflito, um apagaria o outro.
+      // No push de um item só, só conta o grupo que tem o que está subindo.
+      const sentIds = new Set([...input.collections.map((c) => c.id), ...input.environments.map((e) => e.id)]);
+      const collectionGroups = findNameCollisions(allLocal.collections, (c) => collectionFilePath(wsRemotePath, c));
+      const envGroups = findNameCollisions(allLocal.environments, (e) => environmentFilePath(wsRemotePath, e));
+      const relevant = <T extends { id: string }>(list: T[][]) =>
+        scope.kind === "workspace" ? list : list.filter((g) => g.some((x) => sentIds.has(x.id)));
+      const collisions = [
+        ...relevant(collectionGroups).map((g) => ({ kind: "collection" as const, names: g.map(collectionNameOf) })),
+        ...relevant(envGroups).map((g) => ({ kind: "environment" as const, names: g.map((e) => e.name || "environment") })),
+      ];
+      if (collisions.length > 0) return { status: "collision", message: collisionMessage(collisions) };
 
-      if (collectionsToPush.length === 0 && envsToPush.length === 0) {
-        showStatus("info", `Nothing to push — "${workspaceName}" has no local collections or environments.`);
-        return;
-      }
-
-      // Checagem PROATIVA: igual à de handlePushEverything, mas pra um
-      // workspace que pode não ser o selecionado — por isso o callback recebe
-      // o que foi lido do disco como "local". Pulada com `reviewed`/`force`.
-      const openReview = async () => {
-        if (!onWorkspacePushConflict) return false;
-        const remote = await fetchRemoteWorkspace(storage, workspaceName);
-        return onWorkspacePushConflict(workspaceName, collectionsToPush, envsToPush, remote.collections, remote.environments);
-      };
-      // Mesmo merge automático do push do workspace aberto (onRebasePush).
-      const canRebase = !options?.force && !!onRebasePush;
-      let incoming = 0;
-      let keptMine: string[] = [];
-      if (canRebase && !options?.reviewed) {
-        try {
-          const outcome = await rebaseOnRemote(storage, workspaceName, collectionsToPush, envsToPush);
-          if (outcome?.status === "review") {
-            showStatus("info", rebaseReviewMessage(workspaceName, outcome.conflicts));
-            return;
-          }
-          if (outcome) {
-            collectionsToPush = outcome.collections as any[];
-            envsToPush = outcome.environments as any[];
-            incoming = outcome.incoming;
-            keptMine = outcome.keptMine ?? [];
-          }
-        } catch (e: any) {
-          console.error(`❌ Erro no merge automático de "${workspaceName}" antes do push:`, e);
-          showStatus("error", `Push cancelled: ${e?.message ?? String(e)}`);
-          return;
-        }
-      } else if (!options?.reviewed && !options?.force) {
-        try {
-          if (await openReview()) {
-            showStatus("info", `Found changes on GitHub for "${workspaceName}" — review before sending.`);
-            return;
-          }
-        } catch (e) {
-          console.error(`❌ Erro ao checar o remoto de "${workspaceName}" antes do push:`, e);
-          // Não trava o push: a checagem de versão no commit é a rede.
+      // Uma collection só: o arquivo de mesmo nome lá é de OUTRA collection
+      // (alguém criou uma com esse nome) — gravar por cima apagaria a dela.
+      if ((scope.kind === "collection" || scope.kind === "item") && input.collections[0]) {
+        const root = input.collections[0];
+        const targetPath = collectionFilePath(wsRemotePath, root);
+        const idsThere = lastFetched.get(`${storage.repoKey}|${input.workspaceName}`)?.idsByPath[targetPath] ?? [];
+        const knownHere = (await removedHere(storage, [targetPath])).length > 0;
+        if (idsThere.length > 0 && !idsThere.includes(root.id) && !knownHere) {
+          return {
+            status: "collision",
+            message: `Push cancelled: GitHub already has a different collection named "${collectionNameOf(root)}" (someone else created it). Pull it first, or rename yours.`,
+          };
         }
       }
 
-      let result: Awaited<ReturnType<typeof runWorkspacePush>>;
-      for (let attempt = 0; ; attempt++) {
-        result = await runWorkspacePush(storage, {
-          workspaceName,
-          collections: collectionsToPush,
-          environments: envsToPush,
-          markers: markersToPush ?? [],
-          allowDeletes: true,
+      const existing = await storage.resolveWorkspaceFilePaths(wsRemotePath);
+      // Catálogo, árvore e plano saem juntos de UMA leitura do catálogo de lá
+      // — e são refeitos se só ele mudar no meio do envio (laço do commit).
+      // Environment sozinho não leva o catálogo.
+      const prepare = async () => {
+        const markers =
+          scope.kind === "environment" || !input.markers
+            ? null
+            : await markersForPush(storage, wsRemotePath, input.workspaceName, input.markers);
+        // Marcador com o mesmo nome de um do GitHub (outro id): a árvore sobe
+        // já com o id de lá, o mesmo que o catálogo enviado leva.
+        const collections = markers && markers.remapped.size > 0 ? remapMarkers(input.collections, markers.remapped) : input.collections;
+        const plan = buildPushPlan({
+          wsRemotePath,
+          collections,
+          // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
+          environments: withoutSessionTokens(input.environments),
+          markers: markers?.send ?? null,
+          existingPaths: [...existing.collectionPaths, ...existing.envPaths],
         });
-        if (result.status !== "conflict" || !canRebase || attempt >= 2) break;
-        const outcome = await rebaseOnRemote(storage, workspaceName, collectionsToPush, envsToPush);
-        if (!outcome) break;
-        if (outcome.status === "review") {
-          showStatus("info", rebaseReviewMessage(workspaceName, outcome.conflicts));
-          return;
-        }
-        collectionsToPush = outcome.collections as any[];
-        envsToPush = outcome.environments as any[];
-        incoming += outcome.incoming;
-        keptMine = outcome.keptMine ?? keptMine;
+        return { markers, collections, plan };
+      };
+      let { markers, collections, plan } = await prepare();
+
+      // O que sobrou lá: renomeação (o mesmo id gravado com outro nome) sai
+      // sem perguntar. O resto só no push do workspace inteiro — e só o que
+      // já esteve sincronizado aqui (você apagou), com confirmação.
+      const writtenIds = new Set(
+        plan.files.filter((f) => f.kind !== "markers").map((f) => rootIdOf(f.content)).filter((id): id is string => !!id)
+      );
+      const { renamed, ask } = await staleToRemove(storage, input.workspaceName, plan.stalePaths, writtenIds);
+      let removed: string[] = [...renamed];
+      let keptStale: string[] = [];
+      if (scope.kind === "workspace" && ask.length > 0) {
+        if (await askDeleteConfirmation(ask)) removed = [...removed, ...ask];
+        else keptStale = ask;
       }
 
-      if (result.status === "collision") {
-        showStatus("error", result.message);
-        return;
+      const message = input.message ?? pushCommitMessage(input.workspaceName, plan, removed.length);
+      // O catálogo também passa pela checagem de versão; se só ele mudou no
+      // meio, é relido e recalculado (ele é mesclado, não revisado).
+      const markersPath = markersFilePath(wsRemotePath);
+      let result: Awaited<ReturnType<typeof storage.commitFiles>>;
+      for (let attempt = 0; ; attempt++) {
+        result = await storage.commitFiles(
+          [...plan.files.map((f) => ({ path: f.path, content: f.content })), ...removed.map((path) => ({ path, delete: true }))],
+          message
+        );
+        if (result.ok || attempt >= 2 || !result.conflicts.every((path) => path === markersPath)) break;
+        ({ markers, collections, plan } = await prepare());
       }
-      if (result.status === "conflict") {
-        showStatus("error", conflictMessage(result.paths));
-        try {
-          await openReview();
-        } catch (e) {
-          console.error(`❌ Erro ao buscar o remoto de "${workspaceName}" pra revisão do conflito:`, e);
-        }
-        return;
-      }
+      if (!result.ok) return { status: "conflict", paths: result.conflicts };
 
-      // Só o workspace SELECIONADO tem os paths no painel.
-      if (workspaceName === workspace) {
-        setCollectionPaths(result.collectionPaths);
-        setEnvPaths(result.envPaths);
+      // A base do catálogo: o que ficou igual dos dois lados (markerBaseAfterPush).
+      if (markers) await recordSyncBase(input.workspaceName, markers.base, [MARKER_BASE_PREFIX]);
+      // Trocou id de marcador: o daqui passa a ser o que subiu (catálogo e
+      // marcas da árvore), pelo mesmo merge do pull.
+      if (markers && markers.remapped.size > 0) await onPullMarkers?.(input.workspaceName, markers.send);
+
+      // O painel guarda os paths do workspace aberto.
+      if (input.workspaceName === workspace) {
+        const isEnv = (path: string) => path.startsWith(`${wsRemotePath}/environments/`);
+        const written = plan.files.filter((f) => f.kind !== "markers").map((f) => f.path);
+        if (scope.kind === "workspace") {
+          setCollectionPaths([...written.filter((p) => !isEnv(p)), ...keptStale.filter((p) => !isEnv(p))]);
+          setEnvPaths([...written.filter(isEnv), ...keptStale.filter(isEnv)]);
+        } else {
+          setCollectionPaths((prev) => [...new Set([...prev.filter((p) => !removed.includes(p)), ...written.filter((p) => !isEnv(p))])]);
+          setEnvPaths((prev) => [...new Set([...prev.filter((p) => !removed.includes(p)), ...written.filter(isEnv)])]);
+        }
       }
-      // O commit subiu mesmo mantendo arquivos lá: registra (base, pendência)
-      // — antes voltava aqui, e o que tinha subido continuava "pendente", com
-      // a base velha gerando conflitos falsos depois.
-      onPushCompleted?.(workspaceName, {
-        // Como subiu (com os ids de marcador do time, se precisou trocar).
-        collections: result.collections,
-        environments: withoutSessionTokens(envsToPush),
-        keptStale: result.keptStale.length > 0,
-      });
-      if (result.keptStale.length > 0) showStatus("info", keptStaleMessage(workspaceName, result.keptStale.length));
-      else showStatus("success", pushedMessage(workspaceName, result.removed.length, incoming, keptMine));
-    } catch (e: any) {
+      return { status: "pushed", collections: collections as CollectionItem[], removed, keptStale };
+    } catch (e) {
       if (e instanceof MissingPassphraseError) {
-        // A senha sumiu no meio (apagada nas settings): só avisa.
         requirePassphrase();
-      } else {
-        console.error(`❌ Erro ao enviar workspace "${workspaceName}":`, e);
-        showStatus("error", `Push failed: ${e.message}`);
+        return { status: "error", message: PASSPHRASE_MISSING_MESSAGE };
       }
+      throw e;
     } finally {
       syncOpRef.current = null;
       setSingleOp(null);
     }
-  }, [isConfigValid, workspace, client, showStatus, singleOpBusy, requirePassphrase, onWorkspacePushConflict, onRebasePush]);
+  }
 
   // Renomeia a pasta remota de um workspace ("Postman/<nome>") — copia cada
   // arquivo pro novo nome e só então apaga os antigos. Sem isso, renomear só
@@ -2935,439 +1875,6 @@ useEffect(() => {
     };
   }, [isOpen]);
 
-  // `reviewed`: o push vem logo depois da tela de revisão (handleApplyDiff no
-  // AppLayout). Não compara de novo — a pessoa acabou de decidir, e comparar
-  // o resultado da mescla com o remoto reabriria a mesma tela sempre que algo
-  // do GitHub tivesse sido recusado. A proteção continua: grava com o sha da
-  // versão revisada, então se alguém enviou nesse meio tempo, dá 409.
-  // `force`: "Overwrite GitHub with mine" — nem compara, nem respeita o sha
-  // visto; o conteúdo daqui vence.
-  async function handlePushEverything(collectionsOverride?: any, environmentsOverride?: any, options?: PushOptions) {
-    if (!isConfigValid || !workspace) return;
-    if (!requirePassphrase()) return;
-
-    // `silent` é usado pelo auto-push disparado ao salvar uma única aba
-    // (Ctrl+S / botão Save do request) — nesse caso não queremos travar a
-    // tela inteira via `loading`/isBlocking, só impedir que outro
-    // save/download pontual comece em paralelo. O botão "Push" explícito
-    // do painel de sync continua usando `loading` normalmente.
-    const silent = options?.silent ?? false;
-
-    // Vale pros dois modos: o push completo também não pode começar com outra
-    // gravação em curso (antes só o silencioso checava).
-    if ((silent && singleOpBusy) || syncOpRef.current) {
-      showStatus("error", SYNC_BUSY_MESSAGE);
-      return;
-    }
-
-    const collectionsData = collectionsOverride !== undefined ? collectionsOverride : currentCollections;
-    const environmentsData = environmentsOverride !== undefined ? environmentsOverride : currentEnvironments;
-
-    syncOpRef.current = "push";
-    if (silent) setSingleOp("Saving to GitHub..."); else setLoading(true);
-    setPushConflict(null);
-
-    try {
-      const storage = client({ force: options?.force });
-
-      const toArray = (data: any): any[] => (Array.isArray(data) ? data : data ? [data] : []);
-      let collectionsToSend = toArray(collectionsData);
-      let environmentsToSend = toArray(environmentsData);
-      let incoming = 0;
-      let keptMine: string[] = [];
-
-      // Merge automático por item (onRebasePush): quem mexeu em OUTRAS
-      // requests da mesma collection não trava mais o push — o que mudou lá
-      // entra aqui, o que mudou aqui vai por cima, e só o que mudou dos dois
-      // lados pede revisão. Pulado no push silencioso (vê só uma aba) e no
-      // `force` (o conteúdo daqui vence por definição).
-      const canRebase = !silent && !options?.force && !!onRebasePush;
-      // Depois de uma revisão (`reviewed`) as collections já estão decididas
-      // e não passam de novo pelo merge — mas os environments sim: sem isto,
-      // o envio que segue a revisão gravava os environments daqui por cima
-      // das variáveis que mudaram lá.
-      if (canRebase && options?.reviewed) {
-        try {
-          const outcome = await rebaseOnRemote(storage, workspace, collectionsToSend, environmentsToSend, { environmentsOnly: true });
-          if (outcome?.status === "push") {
-            environmentsToSend = outcome.environments as any[];
-            keptMine = outcome.keptMine ?? [];
-          }
-        } catch (e: any) {
-          showStatus("error", `Push cancelled: ${e?.message ?? String(e)}`);
-          return;
-        }
-      }
-      if (canRebase && !options?.reviewed) {
-        showStatus("info", "Checking GitHub for changes before sending...");
-        try {
-          const outcome = await rebaseOnRemote(storage, workspace, collectionsToSend, environmentsToSend);
-          if (outcome?.status === "review") {
-            showStatus("info", rebaseReviewMessage(workspace, outcome.conflicts));
-            return;
-          }
-          if (outcome) {
-            collectionsToSend = outcome.collections as any[];
-            environmentsToSend = outcome.environments as any[];
-            incoming = outcome.incoming;
-            keptMine = outcome.keptMine ?? [];
-          }
-        } catch (e: any) {
-          // Sem a leitura do GitHub não há merge — e enviar mesmo assim
-          // gravaria a versão daqui por cima do que não deu pra ler.
-          console.error("❌ Erro no merge automático antes do push:", e);
-          showStatus("error", `Push cancelled: ${e?.message ?? String(e)}`);
-          return;
-        }
-      } else if (!silent && !options?.reviewed && !options?.force && onCompareRemote) {
-        // Sem merge automático: a checagem antiga, que abre a revisão.
-        showStatus("info", "Checking GitHub for changes before sending...");
-        try {
-          const remote = await fetchRemoteWorkspace(storage, workspace);
-          const { hasChanges } = onCompareRemote(workspace, remote.collections, remote.environments, true);
-          if (hasChanges) {
-            showStatus("info", "Found changes on GitHub — review before sending.");
-            return;
-          }
-        } catch (e) {
-          console.error("❌ Erro ao checar o remoto antes do push:", e);
-          // Não trava o push: a checagem de versão no commit é a rede.
-        }
-      }
-
-      showStatus("info", "Encrypting and sending files...");
-
-      let result: Awaited<ReturnType<typeof runWorkspacePush>>;
-      for (let attempt = 0; ; attempt++) {
-        result = await runWorkspacePush(storage, {
-          workspaceName: workspace,
-          collections: collectionsToSend,
-          environments: environmentsToSend,
-          markers: currentMarkers ?? [],
-          // Push silencioso (de UMA aba) não vê o workspace inteiro: calcular
-          // "o que sobrou lá" com ele acusaria todo o resto como apagado.
-          allowDeletes: !silent,
-        });
-        // Alguém enviou entre a checagem e o commit: refaz o merge (de
-        // collections e environments) em cima da versão nova.
-        if (result.status !== "conflict" || !canRebase || attempt >= 2) break;
-        const outcome = await rebaseOnRemote(storage, workspace, collectionsToSend, environmentsToSend);
-        if (!outcome) break;
-        if (outcome.status === "review") {
-          showStatus("info", rebaseReviewMessage(workspace, outcome.conflicts));
-          return;
-        }
-        collectionsToSend = outcome.collections as any[];
-        environmentsToSend = outcome.environments as any[];
-        incoming += outcome.incoming;
-        keptMine = outcome.keptMine ?? keptMine;
-      }
-
-      if (result.status === "collision") {
-        showStatus("error", result.message);
-        return;
-      }
-      if (result.status === "conflict") {
-        setPushConflict(result.paths);
-        showStatus("error", conflictMessage(result.paths));
-        // Abre a mesma revisão do Pull, marcada como parte do push — depois
-        // de mesclar, o AppLayout reenvia sozinho (handleApplyDiff).
-        if (onCompareRemote) {
-          try {
-            const remote = await fetchRemoteWorkspace(storage, workspace);
-            onCompareRemote(workspace, remote.collections, remote.environments, true);
-          } catch (e) {
-            console.error("❌ Erro ao buscar o remoto pra revisão do conflito:", e);
-          }
-        }
-        return;
-      }
-
-      if (silent) {
-        // Só ADICIONA: o push de uma aba não diz nada sobre os outros arquivos.
-        setCollectionPaths((prev) => Array.from(new Set([...prev, ...result.collectionPaths])));
-        setEnvPaths((prev) => Array.from(new Set([...prev, ...result.envPaths])));
-        showStatus("success", "Saved and sent to GitHub.");
-        return;
-      }
-
-      setCollectionPaths(result.collectionPaths);
-      setEnvPaths(result.envPaths);
-      // Ver pushSingleWorkspace: mantendo arquivos lá, o push vale do mesmo jeito.
-      onPushCompleted?.(workspace, {
-        // Como subiu (com os ids de marcador do time, se precisou trocar).
-        collections: result.collections,
-        environments: withoutSessionTokens(environmentsToSend),
-        keptStale: result.keptStale.length > 0,
-      });
-      if (result.keptStale.length > 0) showStatus("info", keptStaleMessage(workspace, result.keptStale.length));
-      else showStatus("success", pushedMessage(workspace, result.removed.length, incoming, keptMine));
-    } catch (e: any) {
-      console.error("❌ Erro no Push:", e);
-      showStatus("error", `Push failed: ${e.message}`);
-    } finally {
-      syncOpRef.current = null;
-      if (silent) setSingleOp(null); else setLoading(false);
-    }
-  }
-
-  async function handlePushSingleEnvironment(env: any) {
-  if (!isConfigValid || !workspace) {
-    showStatus("error", "✗ Configure GitHub and select a workspace before syncing.");
-    throw new Error("GitHub not configured or no workspace selected.");
-  }
-  if (!requirePassphrase()) {
-    throw new MissingPassphraseError();
-  }
-
-  // Não usa `loading` (que travaria a tela inteira via isBlocking) — só
-  // impede que outro save/pull pontual comece em paralelo.
-  if (singleOpBusy || syncOpRef.current) {
-    showStatus("error", SYNC_BUSY_MESSAGE);
-    throw new Error("Another sync is already in progress.");
-  }
-
-  syncOpRef.current = `push environment ${env.name}`;
-  setSingleOp(`Sending environment "${env.name}"...`);
-  showStatus("info", `Sending environment "${env.name}"...`);
-
-  try {
-    const storage = client();
-    const targetEnvPath = environmentFilePath(remotePath, env);
-
-    // Nome do arquivo sai do nome em minúsculas: "TST" e "tst" (ou "env tst"
-    // e "env-tst") viram o MESMO arquivo, e um sobrescreveria o outro. O push
-    // do workspace já barrava isso; o de um environment não.
-    const allEnvironments: any[] = Array.isArray(currentEnvironments) ? currentEnvironments : [];
-    const twin = allEnvironments.find(
-      (other) => other?.id && other.id !== env?.id && environmentFilePath(remotePath, other) === targetEnvPath
-    );
-    if (twin) {
-      throw new Error(
-        `"${env.name}" and "${twin.name}" are too similar and would overwrite each other on GitHub. Rename one of them first.`
-      );
-    }
-
-    // Renomear o environment e enviar só ele deixava o arquivo do nome antigo
-    // no GitHub — e ele voltava no próximo pull. Pergunta antes, pra a
-    // exclusão entrar no mesmo commit.
-    const expected = new Set(allEnvironments.map((other) => environmentFilePath(remotePath, other)));
-    // Só o que já foi sincronizado aqui: arquivo novo de colega não é "removido aqui".
-    // Renomeação deste environment (o arquivo antigo tem o mesmo id) sai sem perguntar.
-    const { renamed, ask: stale } = await staleToRemove(
-      storage,
-      workspace,
-      // Só arquivos DESTE workspace (ver o push de uma collection).
-      envPaths.filter((path) => path.startsWith(`${remotePath}/`) && path !== targetEnvPath && !expected.has(path)),
-      new Set(env?.id ? [env.id] : [])
-    );
-    const removed = [...renamed, ...(stale.length > 0 && (await askDeleteConfirmation(stale)) ? stale : [])];
-
-    const result = await storage.commitFiles(
-      // Token de sessão (OAuth2) não sobe: é de cada pessoa e expira (lib/jwt).
-      [{ path: targetEnvPath, content: withoutSessionTokens([env])[0] }, ...removed.map((path) => ({ path, delete: true }))],
-      `sync(${workspace}): environment "${env.name || "environment"}"${removed.length > 0 ? `, ${removed.length} file(s) removed` : ""}`
-    );
-    if (!result.ok) throw new GitHubConflictError(result.conflicts[0]);
-
-    setEnvPaths(prev => [...prev.filter((p) => !removed.includes(p)), ...(prev.includes(targetEnvPath) ? [] : [targetEnvPath])]);
-    showStatus("success", `Environment "${env.name}" pushed to GitHub.`);
-  } catch (e: any) {
-    if (e instanceof GitHubConflictError) {
-      showStatus("error", `"${env.name}" was changed on GitHub by someone else. Nothing was pushed — review the changes to merge them.`);
-    } else {
-      showStatus("error", `Push failed: ${e.message}`);
-    }
-    throw e;
-  } finally {
-    syncOpRef.current = null;
-    setSingleOp(null);
-  }
-}
-
-  // Envia UMA collection. Espelha o handlePushSingleEnvironment logo acima —
-  // o layout remoto já é um arquivo por collection, então o seletivo é só
-  // escolher qual arquivo escrever, sem mudança de formato.
-  //
-  // O que este caminho deliberadamente NÃO faz é o cálculo de arquivos
-  // "órfãos" do handlePushEverything, que compara o remoto com a lista local
-  // inteira e propõe apagar o que sobra. Aqui a lista local em jogo é de UMA
-  // collection, então esse cálculo concluiria que todas as outras precisam
-  // ser apagadas. É o mesmo motivo pelo qual o push silencioso do Ctrl+S
-  // pula essa etapa.
-  async function handlePushSingleCollection(col: CollectionItem, options?: { partOf?: string }) {
-    const partOf = options?.partOf;
-    if (!isConfigValid || !workspace) {
-      showStatus("error", "✗ Configure GitHub and select a workspace before syncing.");
-      throw new Error("GitHub not configured or no workspace selected.");
-    }
-    if (!requirePassphrase()) {
-      throw new MissingPassphraseError();
-    }
-
-    if (singleOpBusy || syncOpRef.current) {
-      showStatus("error", SYNC_BUSY_MESSAGE);
-      throw new Error("Another sync is already in progress.");
-    }
-
-    // Só `name`: aqui a collection vem da árvore, que é CollectionItem. O
-    // `info.name` que o handlePushEverything também aceita é do formato
-    // Postman, que não chega por este caminho.
-    //
-    // O nome do arquivo sai do nome da collection, igual ao push completo —
-    // tem que ser exatamente a mesma regra, senão renomear e enviar pelo menu
-    // criaria um arquivo novo no remoto em vez de atualizar o existente.
-    const rawName = col?.name || "collection";
-    const targetPath = collectionFilePath(remotePath, col);
-
-    // Mesmo risco do push completo: duas collections com nomes parecidos
-    // (ex. "API's Tests" e "API S Tests") viram o MESMO arquivo — e como os
-    // ids são diferentes, o GitHub nunca vê isso como conflito.
-    const allCollections: CollectionItem[] = Array.isArray(currentCollections) ? currentCollections : [];
-    const siblingCollision = allCollections.find(
-      (c) => c?.id && c.id !== col?.id && collectionFilePath(remotePath, c) === targetPath
-    );
-    if (siblingCollision) {
-      showStatus(
-        "error",
-        `Push cancelled: "${rawName}" and "${siblingCollision.name}" are too similar and would overwrite each other on GitHub. Rename one of them first.`
-      );
-      throw new Error("Collection name collides with another collection in this workspace.");
-    }
-
-    const what = partOf ? `"${partOf}" (in "${rawName}")` : `"${rawName}"`;
-    // Depois das checagens que lançam acima (sem await desde a checagem da trava).
-    syncOpRef.current = `push collection ${rawName}`;
-    setSingleOp(`Sending ${what}...`);
-    showStatus("info", `Sending ${what}...`);
-
-    try {
-      const storage = client();
-
-      // O arquivo lá (mesmo nome) é de OUTRA collection — alguém criou uma
-      // com esse nome. Os ids diferem, então nenhuma checagem via isso como
-      // conflito, e o envio gravava por cima da collection da pessoa. Só
-      // quando o arquivo nunca foi sincronizado aqui: um export do Postman
-      // (ids gerados a cada leitura) que já passou por aqui é o mesmo.
-      const fetched = lastFetched.get(`${storage.repoKey}|${workspace}`);
-      const idsThere = fetched?.idsByPath[targetPath] ?? [];
-      const knownHere = (await removedHere(storage, [targetPath])).length > 0;
-      if (col?.id && idsThere.length > 0 && !idsThere.includes(col.id) && !knownHere) {
-        const message = `Push cancelled: GitHub already has a different collection named "${rawName}" (someone else created it). Pull it first, or rename yours.`;
-        showStatus("error", message);
-        throw new Error(message);
-      }
-
-      // Renomear esta collection e enviar só ela deixava o arquivo do nome
-      // ANTIGO órfão no remoto. Path conhecido que não corresponde a NENHUMA
-      // collection local é candidato; pergunta ANTES, pra a exclusão entrar
-      // no mesmo commit do envio.
-      const expectedPaths = new Set(allCollections.map((c) => collectionFilePath(remotePath, c)));
-      // Envio de um item só não mexe em outros arquivos.
-      // Só o que já foi sincronizado aqui: arquivo novo de colega não é "removido aqui".
-      // Renomeação desta collection (o arquivo antigo tem o mesmo id) sai sem perguntar.
-      const { renamed, ask: stalePaths } = partOf
-        ? { renamed: [], ask: [] }
-        : await staleToRemove(
-            storage,
-            workspace,
-            // Só arquivos DESTE workspace: logo depois de trocar de workspace
-            // (ou com a listagem falhando) a lista ainda pode ser do anterior,
-            // e o diálogo propunha apagar arquivos de outra pasta.
-            collectionPaths.filter((p) => p.startsWith(`${remotePath}/`) && p !== targetPath && !expectedPaths.has(p)),
-            new Set(col?.id ? [col.id] : [])
-          );
-      const removed = [...renamed, ...(stalePaths.length > 0 && (await askDeleteConfirmation(stalePaths)) ? stalePaths : [])];
-
-      // O catálogo de marcadores é do workspace, não da collection — sobe
-      // junto, no mesmo commit, senão renomear/recolorir um marcador só
-      // chegaria ao GitHub num push do workspace inteiro.
-      // Sem conseguir ler o catálogo de lá, ele fica fora deste envio.
-      // Com checagem de versão, como no push do workspace (runWorkspacePush):
-      // se só o catálogo mudou lá no meio, relê, recalcula e tenta de novo.
-      const markersPath = markersFilePath(remotePath);
-      let markers: Awaited<ReturnType<typeof markersForPush>> = null;
-      let sent: CollectionItem = col;
-      let result: Awaited<ReturnType<typeof storage.commitFiles>>;
-      for (let attempt = 0; ; attempt++) {
-        markers = await markersForPush(storage, remotePath, workspace, currentMarkers ?? []);
-        // Marcador com o mesmo nome de um do GitHub (outro id): sobe com o de lá.
-        sent = markers && markers.remapped.size > 0 ? remapMarkers([col], markers.remapped)[0] : col;
-        result = await storage.commitFiles(
-          [
-            { path: targetPath, content: stripStarredFlags(sent) },
-            ...(markers ? [{ path: markersPath, content: { markers: markers.send } }] : []),
-            ...removed.map((path) => ({ path, delete: true })),
-          ],
-          partOf
-            ? `sync(${workspace}): "${partOf}" in collection "${rawName}"`
-            : `sync(${workspace}): collection "${rawName}"${removed.length > 0 ? `, ${removed.length} file(s) removed` : ""}`
-        );
-        if (result.ok || attempt >= 2 || !result.conflicts.every((path) => path === markersPath)) break;
-      }
-      // Quem chamou (AppLayout) abre a revisão ao ver o conflito.
-      if (!result.ok) throw new GitHubConflictError(result.conflicts[0]);
-      if (markers) await recordSyncBase(workspace, markers.base, [MARKER_BASE_PREFIX]);
-      // Trocou id de marcador: o catálogo e as marcas daqui passam a ser os
-      // que subiram (mesmo merge do pull).
-      if (markers && markers.remapped.size > 0) await onPullMarkers?.(workspace, markers.send);
-
-      setCollectionPaths(prev =>
-        [...prev.filter((p) => !removed.includes(p)), ...(prev.includes(targetPath) ? [] : [targetPath])]
-      );
-      if (partOf) {
-        showStatus("success", `"${partOf}" pushed to GitHub. Your other changes in "${rawName}" are still waiting to be pushed.`);
-      } else {
-        onCollectionPushed?.(col?.id, sent);
-        showStatus("success", `Collection "${rawName}" pushed to GitHub.`);
-      }
-    } catch (e) {
-      if (e instanceof GitHubConflictError) {
-        // Sem setPushConflict: aquele aviso oferece trocar o workspace
-        // inteiro, desproporcional pra quem enviou UMA collection. A
-        // revisão abre em seguida (AppLayout.handlePushCollection).
-        showStatus("error", `"${rawName}" was changed on GitHub by someone else. Nothing was pushed — review the changes first.`);
-      } else {
-        showStatus("error", `Push failed: ${(e as Error)?.message ?? String(e)}`);
-      }
-      throw e;
-    } finally {
-      syncOpRef.current = null;
-      setSingleOp(null);
-    }
-  }
-
-
-  async function handleReloadAfterConflict() {
-    setPushConflict(null);
-    await handlePullEverything();
-  }
-
-  // "Sobrescrever": tenta o MESMO push de novo. putFile busca o sha atual a
-  // cada chamada (getFileSha), então o reenvio pega o sha de quem escreveu
-  // por cima e o 409 não se repete — o conteúdo daqui vence, descartando o
-  // que a outra pessoa gravou. Mesmos dados de antes (currentCollections/
-  // currentEnvironments, sem override), já que nada local mudou desde a
-  // tentativa que esbarrou no conflito.
-  async function handleOverwriteAfterConflict() {
-    setPushConflict(null);
-    await handlePushEverything(undefined, undefined, { force: true });
-  }
-
-  // Reabre a tela de revisão — pro caso de o conflito já ter aberto ela
-  // automaticamente (handlePushEverything chama onCompareRemote na hora) e a
-  // pessoa ter fechado sem decidir nada. Mesma busca, só que manual.
-  async function handleReviewConflict() {
-    if (!onCompareRemote) return;
-    try {
-      const storage = client();
-      const remote = await fetchRemoteWorkspace(storage, workspace);
-      onCompareRemote(workspace, remote.collections, remote.environments, true);
-    } catch (e) {
-      showStatus("error", `✗ Could not read GitHub: ${(e as Error)?.message ?? String(e)}`);
-    }
-  }
-
   async function handlePullEverything() {
     if (!isConfigValid || !workspace) return;
     // Lista de agora, não a que o painel guardou: um arquivo apagado lá desde
@@ -3491,11 +1998,8 @@ useEffect(() => {
   }
 
 useImperativeHandle(ref, () => ({
-  push: (collectionsOverride?: any, environmentsOverride?: any, options?: PushOptions) =>
-  handlePushEverything(collectionsOverride, environmentsOverride, options),
-  pushEnvironment: (env: any) => handlePushSingleEnvironment(env),
-  pushCollection: (collection: CollectionItem, options?: { partOf?: string }) =>
-    handlePushSingleCollection(collection, options),
+  commitPush: (input: CommitPushInput) => commitPush(input),
+  report: (type: "success" | "error" | "info", message: string) => showStatus(type, message),
   fetchWorkspace: async (workspaceName: string, ref?: string, statusLabel?: string, options?: { peek?: boolean }) => {
     if (!statusLabel) return fetchRemoteWorkspace(client(), workspaceName, ref, options);
     setSingleOp(statusLabel);
@@ -3508,7 +2012,6 @@ useImperativeHandle(ref, () => ({
   isSynced: () => collectionPaths.length > 0 || envPaths.length > 0,
   // Configurações → Avançado: baixa todos os workspaces e substitui os daqui.
   replaceAllFromGitHub: () => handlePullAllWorkspaces(),
-  pushWorkspace: (workspaceName: string, options?: PushOptions) => pushSingleWorkspace(workspaceName, options),
   renameWorkspace: (oldName: string, newName: string) => renameRemoteWorkspace(oldName, newName),
   openCommitHistory: (workspaceName: string) => openCommitHistory(workspaceName),
   markReviewed: (workspaceName: string, scope: ReviewScope) => markReviewed(workspaceName, scope),
@@ -4186,7 +2689,6 @@ useImperativeHandle(ref, () => ({
                       title="Dismiss"
                       onClick={() => {
                         setStatus({ type: null, message: "" });
-                        setPushConflict(null);
                       }}
                       className="shrink-0 -mr-0.5 -mt-0.5 h-5 w-5 flex items-center justify-center rounded opacity-70 hover:opacity-100 hover:bg-black/20 cursor-pointer border-none bg-transparent text-current"
                     >
@@ -4196,60 +2698,6 @@ useImperativeHandle(ref, () => ({
                     </button>
                   </span>
 
-                  {pushConflict && (
-                    <div className="flex flex-col gap-1.5">
-                      <ul className="max-h-[100px] overflow-y-auto text-[11px] text-rose-300/90 bg-black/20 border border-rose-500/20 rounded-md p-1.5 list-disc list-inside">
-                        {pushConflict.map((p) => (
-                          <li key={p} className="truncate">{p.split("/").pop()}</li>
-                        ))}
-                      </ul>
-                      {/* A revisão já abriu sozinha quando o conflito aconteceu
-                          (ver handlePushEverything); este botão é só pra
-                          reabrir se ela tiver sido fechada sem decidir. */}
-                      {/* Três saídas, e só uma não perde nada: ela vem primeiro e
-                          com destaque. As outras duas apagam o trabalho de
-                          alguém — cada uma diz de QUEM, logo abaixo do botão. */}
-                      <div className="flex flex-col gap-1.5">
-                        <button
-                          type="button"
-                          className="inline-flex items-center justify-center gap-1.5 h-[28px] px-2.5 rounded-md text-[11px] font-semibold cursor-pointer border-none bg-[#007acc] text-white hover:bg-[#1a8ad4] transition-colors"
-                          onClick={handleReviewConflict}
-                        >
-                          Review &amp; merge
-                        </button>
-                        <p className="-mt-0.5 text-[10px] text-pm-text-muted leading-snug">
-                          Recommended — see both versions, pick per item, then push. Nothing is lost.
-                        </p>
-
-                        <div className="grid grid-cols-2 gap-1.5 pt-0.5">
-                          <div className="flex flex-col gap-0.5">
-                            <button
-                              type="button"
-                              className="inline-flex items-center justify-center gap-1 h-[26px] px-2 rounded-md text-[10.5px] font-semibold cursor-pointer border border-rose-500/40 bg-transparent text-rose-300 hover:bg-rose-500/15 transition-colors"
-                              onClick={handleOverwriteAfterConflict}
-                            >
-                              Overwrite GitHub
-                            </button>
-                            <span className="text-[9.5px] text-rose-300/70 leading-snug">
-                              Pushes yours as is. <strong className="font-semibold">Their</strong> changes are lost.
-                            </span>
-                          </div>
-                          <div className="flex flex-col gap-0.5">
-                            <button
-                              type="button"
-                              className="inline-flex items-center justify-center gap-1 h-[26px] px-2 rounded-md text-[10.5px] font-semibold cursor-pointer border border-rose-500/40 bg-transparent text-rose-300 hover:bg-rose-500/15 transition-colors"
-                              onClick={handleReloadAfterConflict}
-                            >
-                              <RefreshIcon /> Discard mine
-                            </button>
-                            <span className="text-[9.5px] text-rose-300/70 leading-snug">
-                              Replaces this workspace with GitHub&apos;s. <strong className="font-semibold">Your</strong> unpushed changes are lost.
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
 
