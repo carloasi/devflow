@@ -347,6 +347,14 @@ if (typeof window !== "undefined") {
   window.addEventListener("pagehide", () => seenShas.flush());
 }
 
+/** Um item do "Check setup" (GitHubStorageClient.diagnose). */
+export interface SyncCheck {
+  id: "token" | "repository" | "branch" | "passphrase" | "rateLimit";
+  /** null = não deu pra conferir (depende de um item anterior). */
+  ok: boolean | null;
+  detail: string;
+}
+
 /** Uma entrada da árvore do repositório (git/trees). */
 export interface TreeEntry {
   path: string;
@@ -694,6 +702,106 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       console.error(`❌ Erro ao baixar ${path}:`, err);
       throw new Error(`Error downloading ${path}: ${err.message}`);
     }
+  }
+
+  /**
+   * Confere a configuração do sync de uma vez (botão "Check setup"): token,
+   * acesso ao repositório (e permissão de gravar), branch, senha e quantas
+   * requisições ainda restam. Cada item vem com o que fazer quando falha —
+   * antes cada problema só aparecia quando um push ou pull falhava.
+   * `ok: null` = não deu pra conferir (depende de um item anterior).
+   */
+  async diagnose(root: string): Promise<SyncCheck[]> {
+    const checks: SyncCheck[] = [];
+    const get = async (url: string) => {
+      try {
+        return await githubRequest(url, { method: "GET", headers: this.headers() });
+      } catch {
+        return null;
+      }
+    };
+    const { owner, repo, branch } = this.config;
+
+    const user = await get(`${this.baseUrl}/user`);
+    const tokenOk = !!user?.ok;
+    checks.push(
+      tokenOk
+        ? { id: "token", ok: true, detail: `Signed in as ${((await user!.json().catch(() => ({}))) as { login?: string }).login ?? "?"}.` }
+        : {
+            id: "token",
+            ok: false,
+            detail: user
+              ? user.status === 401
+                ? "The token is invalid or has expired. Create a new one and paste it in the settings."
+                : `GitHub answered HTTP ${user.status}.`
+              : "Could not reach GitHub. Check the connection.",
+          }
+    );
+
+    const repoRes = tokenOk ? await get(`${this.baseUrl}/repos/${owner}/${repo}`) : null;
+    let repoOk = false;
+    if (!tokenOk) checks.push({ id: "repository", ok: null, detail: "Depends on a valid token." });
+    else if (repoRes?.ok) {
+      repoOk = true;
+      const info = (await repoRes.json().catch(() => ({}))) as { permissions?: { push?: boolean } };
+      const canPush = info.permissions?.push;
+      checks.push(
+        canPush === false
+          ? { id: "repository", ok: false, detail: `${owner}/${repo} is readable, but this token cannot write to it — pushes will fail. Give the token write access (Contents: read and write).` }
+          : { id: "repository", ok: true, detail: `${owner}/${repo} found${canPush ? ", with write access" : ""}.` }
+      );
+    } else {
+      checks.push({
+        id: "repository",
+        ok: false,
+        detail: repoRes?.status === 404
+          ? `${owner}/${repo} does not exist, or this token has no access to it. Check owner and repository, and the token's repository access.`
+          : `Could not read ${owner}/${repo}${repoRes ? ` (HTTP ${repoRes.status})` : ""}.`,
+      });
+    }
+
+    if (!repoOk) checks.push({ id: "branch", ok: null, detail: "Depends on the repository." });
+    else {
+      const ref = await this.gitJson<{ object: { sha: string } }>(`/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`).catch(() => null);
+      checks.push(
+        ref?.data
+          ? { id: "branch", ok: true, detail: `Branch "${branch}" found.` }
+          : ref?.status === 409
+            ? { id: "branch", ok: true, detail: "The repository is empty — the first push creates it." }
+            : { id: "branch", ok: false, detail: `Branch "${branch}" not found. Create it on GitHub or pick an existing one.` }
+      );
+    }
+
+    if (!this.passphrase) checks.push({ id: "passphrase", ok: false, detail: "No sync passphrase set — pushes are blocked until you set the team's passphrase." });
+    else if (!repoOk) checks.push({ id: "passphrase", ok: null, detail: "Depends on the repository." });
+    else {
+      const opens = await this.passphraseOpensRepo(root);
+      checks.push(
+        opens === true
+          ? { id: "passphrase", ok: true, detail: "The passphrase opens the files in this repository." }
+          : opens === false
+            ? { id: "passphrase", ok: false, detail: "This passphrase does not open the files in this repository. Use the team's passphrase." }
+            : { id: "passphrase", ok: null, detail: "Nothing encrypted in the repository yet to check against." }
+      );
+    }
+
+    // /rate_limit não conta no limite.
+    const rate = tokenOk ? await get(`${this.baseUrl}/rate_limit`) : null;
+    if (rate?.ok) {
+      const data = (await rate.json().catch(() => ({}))) as { resources?: { core?: { remaining?: number; limit?: number; reset?: number } } };
+      const core = data.resources?.core;
+      if (core && typeof core.remaining === "number" && typeof core.limit === "number") {
+        const resetAt = core.reset ? new Date(core.reset * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "?";
+        checks.push({
+          id: "rateLimit",
+          ok: core.remaining > Math.min(100, core.limit * 0.05),
+          detail: `${core.remaining} of ${core.limit} GitHub requests left this hour (resets at ${resetAt}).`,
+        });
+      }
+    } else if (tokenOk) {
+      checks.push({ id: "rateLimit", ok: null, detail: "Could not read the request limit." });
+    }
+    return checks;
   }
 
   /**

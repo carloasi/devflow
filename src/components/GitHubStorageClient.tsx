@@ -49,6 +49,7 @@ import {
   type CommitInfo,
   type GitHubConfig,
   type RepoItem,
+  type SyncCheck,
 } from "@/lib/sync/githubStorage";
 // Os erros e o commit do histórico continuam saindo daqui pra quem já importava.
 export { GitHubConflictError, GitHubRateLimitError };
@@ -309,6 +310,14 @@ const GH_PASSPHRASE_KEY = 'gh_sync_passphrase'
 
 
 const WORKSPACES_ROOT = "Postman";
+
+const SETUP_CHECK_LABELS: Record<SyncCheck["id"], string> = {
+  token: "Token",
+  repository: "Repository",
+  branch: "Branch",
+  passphrase: "Passphrase",
+  rateLimit: "Requests",
+};
 
 // Catálogo de marcadores, nomes de arquivo e nomes que colidem: ver
 // lib/sync/pushPlan.ts — a regra é uma só pra todos os caminhos de push.
@@ -1006,6 +1015,18 @@ const verifyPassphrase = (value: string) => {
     }
   });
 };
+
+// "Check setup": token, repositório, branch, senha e limite numa conferida só.
+const [setupChecks, setSetupChecks] = useState<SyncCheck[] | null>(null);
+const [checkingSetup, setCheckingSetup] = useState(false);
+const handleCheckSetup = useCallback(async () => {
+  setCheckingSetup(true);
+  try {
+    setSetupChecks(await client().diagnose(WORKSPACES_ROOT));
+  } finally {
+    setCheckingSetup(false);
+  }
+}, [client]);
 
 const handleListRemoteWorkspaces = useCallback(async () => {
   if (!isConfigValid) return;
@@ -2648,6 +2669,39 @@ useImperativeHandle(ref, () => ({
               </div>
 
               <div className="h-[1px] bg-pm-border my-0.5" />
+
+              <div className="flex items-center justify-between -mb-1">
+                <span className="text-[10px] font-bold text-pm-text-muted uppercase tracking-wider">
+                  Setup
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleCheckSetup()}
+                  disabled={!isConfigValid || checkingSetup}
+                  data-testid="check-setup"
+                  className="text-[11px] text-[#3794ff] hover:underline cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
+                >
+                  {checkingSetup ? "Checking..." : "Check setup"}
+                </button>
+              </div>
+              {setupChecks !== null && (
+                <ul data-testid="setup-checks" className="shrink-0 rounded-md border border-pm-border bg-pm-hover flex flex-col p-1.5 gap-1">
+                  {setupChecks.map((check) => (
+                    <li key={check.id} data-check={check.id} data-ok={String(check.ok)} className="flex items-start gap-1.5 text-[11px] leading-snug">
+                      <span
+                        aria-hidden
+                        className={`shrink-0 w-3 text-center font-bold ${check.ok === true ? "text-emerald-400" : check.ok === false ? "text-rose-400" : "text-pm-text-muted"}`}
+                      >
+                        {check.ok === true ? "✓" : check.ok === false ? "✗" : "–"}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="font-semibold text-pm-text">{SETUP_CHECK_LABELS[check.id]}: </span>
+                        <span className="text-pm-text-secondary">{check.detail}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
 
               <div className="flex items-center justify-between -mb-1">
                 <span className="text-[10px] font-bold text-pm-text-muted uppercase tracking-wider">
