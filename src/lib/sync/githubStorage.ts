@@ -112,7 +112,10 @@ export class GitHubRateLimitError extends Error {
  */
 export function rateLimitErrorFrom(res: Response): GitHubRateLimitError | null {
   if (res.status !== 403 && res.status !== 429) return null;
-  if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") !== "0") return null;
+  // 403 de limite: o por hora (Remaining: 0) ou o "secundário" (muitas
+  // requisições seguidas), que vem com Retry-After. Sem nenhum dos dois, é
+  // um 403 de permissão de verdade.
+  if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") !== "0" && !res.headers.get("Retry-After")) return null;
 
   const retryAfter = res.headers.get("Retry-After");
   if (retryAfter && !Number.isNaN(Number(retryAfter))) {
@@ -126,6 +129,104 @@ export function rateLimitErrorFrom(res: Response): GitHubRateLimitError | null {
   }
 
   return new GitHubRateLimitError(null);
+}
+
+// ─── Toda chamada ao GitHub passa por aqui ───────────────────────────────
+//
+// 1. Limite de requisições: em vez de falhar na hora ("try again later"),
+//    espera o que o GitHub pede (Retry-After / X-RateLimit-Reset) e tenta de
+//    novo — se a espera for curta. Espera longa (o limite por hora) continua
+//    sendo erro, com quanto falta: ninguém fica olhando o app parado.
+// 2. Erro temporário do GitHub (502/503/504) numa LEITURA: tenta de novo,
+//    com espera crescente. Escrita não: se a primeira chegou e só a resposta
+//    se perdeu, repetir duplicaria (o commit fica com a checagem de versão).
+// 3. Leitura repetida do que não mudou: pergunta "mudou desde esta versão?"
+//    (If-None-Match com o ETag da última resposta). A resposta "não mudou"
+//    (304) não gasta a cota do GitHub — e é o caso comum da checagem de
+//    fundo a cada 3 minutos e de reler um arquivo que já se leu.
+
+/** Espera mais longa que vale aguardar sozinho, antes de desistir. */
+export const MAX_RATE_LIMIT_WAIT_MS = 60_000;
+const MAX_ATTEMPTS = 4;
+const TRANSIENT = new Set([502, 503, 504]);
+
+/** Trocável nos testes (sem esperar de verdade). */
+export const requestTiming = {
+  sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+};
+
+// Última resposta de cada leitura com ETag: o corpo, pra devolver quando o
+// GitHub responder 304. Só em memória, e só as mais recentes.
+const ETAG_CACHE_MAX = 400;
+const etagCache = new Map<string, { etag: string; body: unknown; headers: [string, string][] }>();
+
+/** Esquece as respostas guardadas (troca de token/repositório, testes). */
+export function clearRequestCache(): void {
+  etagCache.clear();
+}
+
+interface GitHubResponse {
+  ok: boolean;
+  status: number;
+  headers: { get(name: string): string | null };
+  json(): Promise<unknown>;
+}
+
+function cachedResponse(entry: { body: unknown; headers: [string, string][] }): GitHubResponse {
+  const headers = new Map(entry.headers.map(([k, v]) => [k.toLowerCase(), v]));
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
+    // Cópia: quem lê pode mexer no objeto, e o guardado tem que continuar igual.
+    json: async () => structuredClone(entry.body),
+  };
+}
+
+export async function githubRequest(
+  url: string,
+  init: { method?: string; headers: Record<string, string>; body?: string }
+): Promise<Response> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const isRead = method === "GET";
+  const cacheKey = `${init.headers.Authorization ?? ""}|${url}`;
+  for (let attempt = 1; ; attempt++) {
+    const cached = isRead ? etagCache.get(cacheKey) : undefined;
+    const headers = cached ? { ...init.headers, "If-None-Match": cached.etag } : init.headers;
+    const res = await tauriFetch(url, { ...init, method, headers });
+
+    if (res.status === 304 && cached) {
+      // Volta pro fim (mais recente) da fila do cache.
+      etagCache.delete(cacheKey);
+      etagCache.set(cacheKey, cached);
+      return cachedResponse(cached) as unknown as Response;
+    }
+
+    const limited = rateLimitErrorFrom(res);
+    if (limited && attempt < MAX_ATTEMPTS) {
+      const wait = limited.retryAfterMs ?? 2 ** attempt * 1000;
+      if (wait <= MAX_RATE_LIMIT_WAIT_MS) {
+        await requestTiming.sleep(Math.max(wait, 250));
+        continue;
+      }
+    }
+    if (isRead && TRANSIENT.has(res.status) && attempt < MAX_ATTEMPTS) {
+      await requestTiming.sleep(2 ** (attempt - 1) * 1000);
+      continue;
+    }
+
+    const etag = res.headers.get("ETag");
+    if (isRead && res.status === 200 && etag) {
+      const body = await res.json();
+      const entries = typeof res.headers.entries === "function" ? ([...res.headers.entries()] as [string, string][]) : [];
+      const entry = { etag, body, headers: entries };
+      etagCache.delete(cacheKey);
+      etagCache.set(cacheKey, entry);
+      while (etagCache.size > ETAG_CACHE_MAX) etagCache.delete(etagCache.keys().next().value as string);
+      return cachedResponse(entry) as unknown as Response;
+    }
+    return res;
+  }
 }
 
 // ─── Versão de cada arquivo que este app viu por último ──────────────────
@@ -273,7 +374,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
    */
   async listDirectoryStrict(path: string = "", ref?: string): Promise<RepoItem[]> {
     const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(ref || this.config.branch)}`;
-    const res = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
+    const res = await githubRequest(targetUrl, { method: "GET", headers: this.headers() });
     if (res.status === 404) return [];
     if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status} while listing ${path || "/"} on GitHub`);
     const data = await res.json();
@@ -284,7 +385,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   async listDirectory(path: string = "", ref?: string): Promise<RepoItem[]> {
     const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(ref || this.config.branch)}`;
     try {
-      const res = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
+      const res = await githubRequest(targetUrl, { method: "GET", headers: this.headers() });
       if (res.status === 404) return [];
       if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -302,7 +403,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   // Usamos a API de Git Blobs (que aceita até 100MB) como fallback.
   private async fetchBlobContent(sha: string): Promise<string> {
     const targetUrl = `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/git/blobs/${sha}`;
-    const res = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
+    const res = await githubRequest(targetUrl, { method: "GET", headers: this.headers() });
     if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status} while downloading blob ${sha}`);
     const data = (await res.json()) as any;
     if (!data.content || data.encoding !== "base64") return "";
@@ -349,7 +450,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   private async getFileSha(path: string): Promise<string | undefined> {
     const targetUrl = `${this.repoUrl(path)}?ref=${encodeURIComponent(this.config.branch)}`;
     try {
-      const metaRes = await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
+      const metaRes = await githubRequest(targetUrl, { method: "GET", headers: this.headers() });
       if (!metaRes.ok) return undefined;
       const metaData = (await metaRes.json()) as any;
       return metaData?.sha;
@@ -376,7 +477,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       // sha do blob, que não muda), sem passar pela Contents API.
       const recent = !ref && opts?.peek ? recentWriteOf(this.repoKey, path) : undefined;
       const metaRes =
-        typeof recent === "string" ? null : await tauriFetch(targetUrl, { method: "GET", headers: this.headers() });
+        typeof recent === "string" ? null : await githubRequest(targetUrl, { method: "GET", headers: this.headers() });
 
       if (metaRes && metaRes.status === 404) {
         console.warn(`⚠️ Arquivo não encontrado (404): ${path}`);
@@ -432,7 +533,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/commits` +
       `?path=${encodeURIComponent(path)}&sha=${encodeURIComponent(this.config.branch)}&per_page=${perPage}`;
 
-    const res = await tauriFetch(url, { method: "GET", headers: this.headers() });
+    const res = await githubRequest(url, { method: "GET", headers: this.headers() });
 
     if (res.status === 404) return [];
     if (!res.ok) {
@@ -463,7 +564,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   // (ver lib/commitDiff).
   async getCommitChanges(sha: string, workspacePath: string): Promise<FileChange[]> {
     const url = `${this.baseUrl}/repos/${this.config.owner}/${this.config.repo}/commits/${encodeURIComponent(sha)}`;
-    const res = await tauriFetch(url, { method: "GET", headers: this.headers() });
+    const res = await githubRequest(url, { method: "GET", headers: this.headers() });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({} as any));
       throw new Error(`HTTP ${res.status}${errBody?.message ? `: ${errBody.message}` : ""}`);
@@ -555,7 +656,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
         body.committer = identity;
       }
 
-      const res = await tauriFetch(targetUrl, {
+      const res = await githubRequest(targetUrl, {
         method: "PUT",
         headers: this.headers(),
         body: JSON.stringify(body),
@@ -605,7 +706,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   }
 
   private async gitJson<T>(path: string, init?: { method: string; body: unknown }): Promise<{ status: number; data: T | null }> {
-    const res = await tauriFetch(this.gitUrl(path), {
+    const res = await githubRequest(this.gitUrl(path), {
       method: init?.method ?? "GET",
       headers: this.headers(),
       ...(init ? { body: JSON.stringify(init.body) } : {}),
@@ -794,7 +895,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   async deleteFile(path: string, message: string): Promise<void> {
     const targetUrl = this.repoUrl(path);
     try {
-      const metaRes = await tauriFetch(
+      const metaRes = await githubRequest(
         `${targetUrl}?ref=${encodeURIComponent(this.config.branch)}`,
         { method: "GET", headers: this.headers() }
       );
@@ -818,7 +919,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
         deleteBody.committer = identity;
       }
 
-      const res = await tauriFetch(targetUrl, {
+      const res = await githubRequest(targetUrl, {
         method: "DELETE",
         headers: this.headers(),
         body: JSON.stringify(deleteBody),

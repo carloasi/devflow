@@ -34,7 +34,7 @@ vi.stubGlobal('localStorage', {
   removeItem: () => undefined,
 });
 
-import { GitHubStorageClient } from './githubStorage';
+import { clearRequestCache, GitHubRateLimitError, GitHubStorageClient, requestTiming } from './githubStorage';
 
 // ─── GitHub de mentira ────────────────────────────────────────────────────
 type Tree = Map<string, string>; // path → sha do blob
@@ -73,9 +73,15 @@ class FakeGitHub {
     return sha ? this.commits.get(sha)!.tree : null;
   }
 
-  handle = async (url: string, init: { method?: string; body?: string }) => {
+  /** Respostas forçadas antes do caminho normal (limite, erro temporário). */
+  queued: { match: (method: string, url: string) => boolean; response: ReturnType<typeof res> }[] = [];
+  notModified = 0;
+
+  handle = async (url: string, init: { method?: string; body?: string; headers?: Record<string, string> }) => {
     const method = init.method ?? 'GET';
     this.calls.push({ method, url });
+    const forced = this.queued.findIndex(q => q.match(method, url));
+    if (forced >= 0) return this.queued.splice(forced, 1)[0].response;
     const u = new URL(url);
     const path = decodeURIComponent(u.pathname.replace(/^\/repos\/o\/r/, ''));
     const body = init.body ? JSON.parse(init.body) : undefined;
@@ -119,7 +125,12 @@ class FakeGitHub {
       if (!tree) return res(404, {});
       const file = tree.get(target);
       if (file) {
-        return res(200, { sha: file, encoding: 'base64', content: btoa(this.blobs.get(file)!) });
+        const etag = `"${file}"`;
+        if (init.headers?.['If-None-Match'] === etag) {
+          this.notModified++;
+          return res(304, null);
+        }
+        return res(200, { sha: file, encoding: 'base64', content: btoa(this.blobs.get(file)!) }, { ETag: etag });
       }
       const entries = [...tree.entries()].filter(([p]) => p.startsWith(`${target}/`) && !p.slice(target.length + 1).includes('/'));
       if (entries.length === 0) return res(404, {});
@@ -138,11 +149,11 @@ class FakeGitHub {
   }
 }
 
-function res(status: number, data: unknown) {
+function res(status: number, data: unknown, headers: Record<string, string> = {}) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    headers: { get: () => null },
+    headers: { get: (name: string) => headers[name] ?? null },
     json: async () => data,
   };
 }
@@ -153,6 +164,8 @@ const client = (options: { force?: boolean } = {}) =>
   new GitHubStorageClient({ token: 't', owner: 'o', repo: 'r', branch: BRANCH }, 'pass', options);
 
 beforeEach(() => {
+  clearRequestCache();
+  requestTiming.sleep = vi.fn(async () => undefined);
   BRANCH = `main-${Math.random().toString(36).slice(2)}`; // "visto" é global por branch
   gh = new FakeGitHub();
   http.fetch.mockReset();
@@ -266,5 +279,62 @@ describe('commitFiles', () => {
     const c = new GitHubStorageClient({ token: 't', owner: 'o', repo: 'r', branch: 'nope' }, 'pass');
     await expect(c.commitFiles([{ path: 'Postman/W/a.json', content: 'a1' }], 'push')).rejects.toThrow(/HTTP 404.*nope/);
     expect(gh.calls.some(call => call.method === 'PUT')).toBe(false);
+  });
+});
+
+describe('githubRequest — rate limit, temporary errors, conditional reads', () => {
+  it('rate limit with a short wait: waits and retries by itself', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    gh.queued.push({ match: (m, u) => m === 'GET' && u.includes('/contents/'), response: res(429, {}, { 'Retry-After': '2' }) });
+    const file = await client().getFile('Postman/W/a.json');
+    expect(file?.content).toBe('a0');
+    expect(requestTiming.sleep).toHaveBeenCalledWith(2000);
+  });
+
+  it('secondary rate limit (403 + Retry-After) also waits and retries', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    gh.queued.push({ match: (m, u) => m === 'GET' && u.includes('/contents/'), response: res(403, {}, { 'Retry-After': '1' }) });
+    expect((await client().getFile('Postman/W/a.json'))?.content).toBe('a0');
+  });
+
+  it('hourly limit with a long wait is an error saying how long, without waiting', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    const reset = String(Math.floor(Date.now() / 1000) + 30 * 60);
+    gh.queued.push({ match: (m, u) => m === 'GET' && u.includes('/contents/'), response: res(403, {}, { 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': reset }) });
+    await expect(client().listDirectoryStrict('Postman/W')).rejects.toBeInstanceOf(GitHubRateLimitError);
+    expect(requestTiming.sleep).not.toHaveBeenCalled();
+  });
+
+  it('a 403 that is not a rate limit is not retried', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    gh.queued.push({ match: (m, u) => m === 'GET' && u.includes('/contents/'), response: res(403, { message: 'Forbidden' }) });
+    await expect(client().listDirectoryStrict('Postman/W')).rejects.toThrow(/HTTP 403/);
+    expect(requestTiming.sleep).not.toHaveBeenCalled();
+  });
+
+  it('a temporary GitHub error on a READ is retried', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    gh.queued.push({ match: (m, u) => m === 'GET' && u.includes('/contents/'), response: res(503, {}) });
+    expect((await client().getFile('Postman/W/a.json'))?.content).toBe('a0');
+  });
+
+  it('a temporary GitHub error on a WRITE is not repeated', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    const c = client();
+    await c.getFile('Postman/W/a.json');
+    gh.queued.push({ match: (m, u) => m === 'POST' && u.endsWith('/git/blobs'), response: res(503, {}) });
+    await expect(c.commitFiles([{ path: 'Postman/W/a.json', content: 'a1' }], 'push')).rejects.toThrow(/HTTP 503/);
+    expect(gh.calls.filter(call => call.method === 'POST' && call.url.endsWith('/git/blobs'))).toHaveLength(1);
+  });
+
+  it('reading a file that did not change asks "changed since?" and gets it back without spending quota', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    const c = client();
+    expect((await c.getFile('Postman/W/a.json'))?.content).toBe('a0');
+    expect((await c.getFile('Postman/W/a.json'))?.content).toBe('a0');
+    expect(gh.notModified).toBe(1);
+    // Mudou lá: a resposta nova vem inteira.
+    gh.commit({ 'Postman/W/a.json': '"a1"' });
+    expect((await c.getFile('Postman/W/a.json'))?.content).toBe('a1');
   });
 });
