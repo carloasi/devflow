@@ -42,6 +42,12 @@ export interface PushRequest {
   workspace: string;
   scope: PushScope;
   mode: PushMode;
+  /**
+   * Trava de uma operação já em andamento (lib/sync/syncLock) que dispara
+   * este envio — o Aplicar da revisão. Sem ela o envio esbarraria na trava
+   * de quem o chamou.
+   */
+  lockToken?: string | null;
 }
 
 export interface PreparePushInput {

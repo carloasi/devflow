@@ -55,6 +55,8 @@ import {
 import { REST, restOf } from '@/lib/sync/fieldMerge'
 import { sameContent } from '@/lib/canonicalCompare'
 import { useSyncDiffStrings, type SyncDiffStrings } from '@/lib/i18n/syncDiffStrings'
+import { SYNC_BUSY_MESSAGE, syncLockHolder } from '@/lib/sync/syncLock'
+import { toast } from 'sonner'
 import { useLanguage } from '@/lib/i18n/language'
 import { fieldOrigin, fieldValue, MERGE_FIELDS, type FieldOrigin, type MergeField } from '@/lib/sync/fieldMerge'
 import { diffableText } from '@/lib/textDiff'
@@ -1988,6 +1990,13 @@ export function SyncDiffDialog({
             </button>
             <button
               onClick={() => {
+                // Um sync rodando (um push): aplicar agora gravaria por cima
+                // dele. A revisão fica como está — inclusive as edições da
+                // prévia, que só saem quando a aplicação vai acontecer.
+                if (syncLockHolder()) {
+                  toast.error(SYNC_BUSY_MESSAGE, { description: t.applyWaitSync })
+                  return
+                }
                 // As edições da prévia destes itens entraram (ou foram trocadas).
                 clearPreparedEdits(workspace, nodes.map(n => n.id))
                 onApply(

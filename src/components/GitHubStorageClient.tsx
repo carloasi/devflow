@@ -15,7 +15,7 @@ import { loadWorkspaceLocalData, loadWorkspaceMarkers } from "@/storage/localSyn
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
 import type { PushScope } from "@/lib/sync/pushPipeline";
-import { acquireSyncLock, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE } from "@/lib/sync/syncLock";
+import { acquireSyncLock, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder } from "@/lib/sync/syncLock";
 import { stripStarredFlags } from "@/components/collection-tree/utils/tree.utils";
 import { clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
 import type { FileChange } from "@/lib/commitDiff";
@@ -1136,7 +1136,9 @@ useEffect(() => {
     const tick = () => {
       // Durante um push/pull nosso, a listagem já mostra o commit novo antes
       // de ele ser registrado como sincronizado — o aviso seria sobre nós.
-      if (document.visibilityState !== "visible" || busyRef.current) return;
+      // A trava cobre também o que roda fora deste painel (o push e o
+      // Aplicar da revisão, no AppLayout).
+      if (document.visibilityState !== "visible" || busyRef.current || syncLockHolder()) return;
       if (Date.now() - lastWatchRef.current < WATCH_MIN_GAP_MS) return;
       lastWatchRef.current = Date.now();
       void resolveWorkspaceFiles({ quiet: true });
@@ -1150,7 +1152,7 @@ useEffect(() => {
   }, [canSync, resolveWorkspaceFiles]);
 
   useEffect(() => {
-    if (!remoteShas || !remotePath || busyRef.current) return;
+    if (!remoteShas || !remotePath || busyRef.current || syncLockHolder()) return;
     const { changed, added, deleted } = behindPaths(
       remoteShas,
       syncedShas,

@@ -424,6 +424,7 @@ const en = {
   discardLocal: (n: number) => ` · ${n} discard local work`,
   cancelPush: 'Cancel push',
   cancelPushTitle: 'Close without pushing anything',
+  applyWaitSync: 'Nothing was applied. The review stays open — apply it again when the sync finishes.',
   fixJsonFirst: (n: number) => `Fix ${n} invalid JSON value(s) first`,
   pushMineTitle: "Push your version as is. GitHub's changes listed here are replaced by yours.",
   mergePushTitle: (n: number) =>
@@ -888,6 +889,7 @@ const ptBR: SyncDiffStrings = {
   discardLocal: (n: number) => ` · ${n} descartam trabalho local`,
   cancelPush: 'Cancelar push',
   cancelPushTitle: 'Fechar sem enviar nada',
+  applyWaitSync: 'Nada foi aplicado. A revisão continua aberta — aplique de novo quando o sync terminar.',
   fixJsonFirst: (n: number) => `Corrija antes ${n} valor(es) JSON inválido(s)`,
   pushMineTitle: 'Enviar a sua versão como está. As mudanças do GitHub listadas aqui são substituídas pelas suas.',
   mergePushTitle: (n: number) =>

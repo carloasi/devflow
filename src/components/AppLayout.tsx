@@ -145,7 +145,7 @@ import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
 import { mergeTabSave } from '@/lib/sync/tabSaveMerge';
-import { acquireSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE } from '@/lib/sync/syncLock';
+import { acquireSyncLock, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder } from '@/lib/sync/syncLock';
 import { baseAfterPush, preparePush, type PushReport, type PushRequest, type PushScope } from '@/lib/sync/pushPipeline';
 import { sameContent } from '@/lib/canonicalCompare';
 import { exampleNameFor } from '@/lib/exampleName';
@@ -5088,10 +5088,12 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     [pushWorkspaceAfterDiff]
   );
 
-  const handleApplyDiff = useCallback(async (
+  const applyDiffLocked = useCallback(async (
     selectedIds: Set<string>,
     overrides: OverrideMap,
-    decisions: ReviewDecision[] = []
+    decisions: ReviewDecision[],
+    // A trava do Aplicar (handleApplyDiff): o envio que a mescla destrava segue com ela.
+    lockToken: string
   ) => {
     const workspace = selectedWorkspaceRef.current;
     setDiffConflictsOnly(false);
@@ -5195,7 +5197,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         setCollections(merged);
       }
       try {
-        await runPushRef.current?.({ workspace: pendingWorkspace, scope: { kind: 'workspace' }, mode: 'reviewed' });
+        await runPushRef.current?.({ workspace: pendingWorkspace, scope: { kind: 'workspace' }, mode: 'reviewed', lockToken });
       } catch {
         /* reportado pelo painel de sync */
       }
@@ -5299,7 +5301,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           // declarado depois daqui, e citá-lo na lista de dependências
           // quebraria no render. Um segundo conflito aqui também não deve
           // reabrir esta tela — seria um laço — e o painel de sync já diz.
-          await runPushRef.current?.({ workspace, scope: { kind: 'collection', rootId: reconciled.id }, mode: 'reviewed' });
+          await runPushRef.current?.({ workspace, scope: { kind: 'collection', rootId: reconciled.id }, mode: 'reviewed', lockToken });
         } catch {
           /* reportado pelo painel de sync */
         }
@@ -5325,7 +5327,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       // exatamente a versão que acabou de ser reconciliada.
       setDiffOpen(false);
       try {
-        await runPushRef.current?.({ workspace, scope: { kind: 'workspace' }, mode: 'reviewed' });
+        await runPushRef.current?.({ workspace, scope: { kind: 'workspace' }, mode: 'reviewed', lockToken });
       } catch {
         /* reportado pelo painel de sync */
       }
@@ -5344,13 +5346,47 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // primeira renderização — e escreveria valores velhos por cima dos atuais.
   }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments, pushAfterDiff, pushAllAfterDiff, pushWorkspaceAfterDiff, pushItemAfterDiff, diffLocalOverride, pendingEnvReview, openEnvironmentReview, diffReviewScope, diffSnapshotLabel, diffNodes, diffBase, takeUndoSnapshot, undoLastPull, syncText]);
 
+  // Aplicar a revisão de um pull é a parte que GRAVA: a árvore e a base da
+  // sincronização daqui. A revisão fica aberta o tempo que a pessoa quiser,
+  // e a trava do pull (lib/sync/syncLock) saía quando ela abria — um push
+  // podia rodar entre abrir e aplicar, ou no meio do Aplicar, e um gravava
+  // por cima do outro. O envio que a mescla destrava (runPush) segue com a
+  // mesma trava, pelo token.
+  const handleApplyDiff = useCallback(async (
+    selectedIds: Set<string>,
+    overrides: OverrideMap,
+    decisions: ReviewDecision[] = []
+  ): Promise<boolean> => {
+    const lock = acquireSyncLock('apply review');
+    if (!lock) {
+      toast.error(SYNC_BUSY_MESSAGE, { description: 'Nothing was applied. The review stays open — apply it again when the sync finishes.' });
+      return false;
+    }
+    try {
+      await applyDiffLocked(selectedIds, overrides, decisions, lock);
+      return true;
+    } finally {
+      releaseSyncLock(lock);
+    }
+  }, [applyDiffLocked]);
+
   // A revisão aberta por uma ação da Central: aplica e VOLTA pra Central, com
   // o resultado do que veio depois (o envio que a mescla destrava, o
   // "Desfazer"). Antes a Central fechava pra revisão e não voltava — e o
   // resultado desse envio ia pro painel do GitHub, que estava fechado.
   const handleApplyDiffAndReturn = useCallback(async (...args: Parameters<typeof handleApplyDiff>) => {
     const resume = takeResumeAfterReview();
-    if (!resume) return handleApplyDiff(...args);
+    if (!resume) {
+      await handleApplyDiff(...args);
+      return;
+    }
+    // Ocupado (um push rodando): nada aplicado, a revisão continua aberta e
+    // a volta pra Central continua valendo pra quando ela for aplicada.
+    if (syncLockHolder()) {
+      markResumeAfterReview(resume);
+      await handleApplyDiff(...args);
+      return;
+    }
     const capture = captureSyncStatus();
     reviewRequestedRef.current = false;
     let continueSend = resume.continueSend === true;
@@ -5651,7 +5687,11 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
     // Um sync por vez (lib/sync/syncLock): o push inteiro — leitura, mescla,
     // gravação — sem um pull aplicando outra árvore no meio.
-    const lock = acquireSyncLock('push');
+    // Chamado de dentro de uma operação travada (o Aplicar da revisão): segue
+    // com a trava dela.
+    const inherited = holdsSyncLock(request.lockToken) ? request.lockToken! : null;
+    const ownLock = inherited ? null : acquireSyncLock('push');
+    const lock = inherited ?? ownLock;
     if (!lock) {
       fail(SYNC_BUSY_MESSAGE);
       return 'failed';
@@ -5792,7 +5832,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       fail(`Push failed: ${(e as Error)?.message ?? String(e)}`);
       return 'failed';
     } finally {
-      releaseSyncLock(lock);
+      releaseSyncLock(ownLock);
     }
     // applyPushedLocally / finishPush / pushMessageFor são funções deste
     // componente (abaixo), estáveis pelos refs que usam.
