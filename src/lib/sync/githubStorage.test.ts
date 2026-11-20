@@ -76,6 +76,8 @@ class FakeGitHub {
   /** Respostas forçadas antes do caminho normal (limite, erro temporário). */
   queued: { match: (method: string, url: string) => boolean; response: ReturnType<typeof res> }[] = [];
   notModified = 0;
+  /** Simula a árvore grande demais (o GitHub a devolve cortada). */
+  truncateTrees = false;
 
   handle = async (url: string, init: { method?: string; body?: string; headers?: Record<string, string> }) => {
     const method = init.method ?? 'GET';
@@ -118,6 +120,24 @@ class FakeGitHub {
       if (commit.parent !== this.head) return res(422, { message: 'Update is not a fast forward' });
       this.head = body.sha;
       return res(200, { object: { sha: body.sha } });
+    }
+    if (path.startsWith('/git/trees/') && method === 'GET') {
+      const ref = path.slice('/git/trees/'.length);
+      const commitSha = ref.startsWith('t:') ? ref.slice(2) : ref.startsWith('c') ? ref : ref === BRANCH ? this.head : null;
+      if (!commitSha || !this.commits.has(commitSha)) return res(404, {});
+      const files = [...this.commits.get(commitSha)!.tree.entries()];
+      const dirs = new Set<string>();
+      for (const [p] of files) {
+        const parts = p.split('/');
+        for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+      }
+      return res(200, {
+        truncated: this.truncateTrees,
+        tree: [
+          ...[...dirs].map(p => ({ path: p, type: 'tree', sha: `tree-${p}` })),
+          ...files.map(([p, sha]) => ({ path: p, type: 'blob', sha })),
+        ],
+      });
     }
     if (path.startsWith('/contents/') && method === 'GET') {
       const target = path.slice('/contents/'.length);
@@ -336,5 +356,69 @@ describe('githubRequest — rate limit, temporary errors, conditional reads', ()
     // Mudou lá: a resposta nova vem inteira.
     gh.commit({ 'Postman/W/a.json': '"a1"' });
     expect((await c.getFile('Postman/W/a.json'))?.content).toBe('a1');
+  });
+});
+
+describe('listing — one call for the whole repository', () => {
+  const files = {
+    'Postman/W/api.postman_collection.json': '"api"',
+    'Postman/W/environments/dev.postman_environment.json': '"dev"',
+    'Postman/W/devflow-markers.json': '"m"',
+    'Postman/Other/x.postman_collection.json': '"x"',
+  };
+
+  it('a workspace (collections, environments, shas) comes from ONE call', async () => {
+    gh.commit(files);
+    const listing = await client().workspaceListing('Postman/W');
+    expect(listing.exists).toBe(true);
+    expect(listing.collectionPaths).toEqual(['Postman/W/api.postman_collection.json']);
+    expect(listing.envPaths).toEqual(['Postman/W/environments/dev.postman_environment.json']);
+    expect(Object.keys(listing.shas)).toHaveLength(2);
+    expect(gh.calls.filter(c => c.method === 'GET')).toHaveLength(1);
+    expect(gh.calls[0].url).toContain('/git/trees/');
+  });
+
+  it('a folder with more than 1,000 files is listed whole', async () => {
+    const many: Record<string, string> = {};
+    for (let i = 0; i < 1200; i++) many[`Postman/Big/c${i}.postman_collection.json`] = '"c"';
+    gh.commit(many);
+    const listing = await client().workspaceListing('Postman/Big');
+    expect(listing.collectionPaths).toHaveLength(1200);
+  });
+
+  it('workspaces and every file of one (rename/delete) also come from the tree', async () => {
+    gh.commit(files);
+    const c = client();
+    expect((await c.listFolders('Postman')).map(f => f.name).sort()).toEqual(['Other', 'W']);
+    expect((await c.listAllFilesRecursive('Postman/W')).map(f => f.path).sort()).toEqual([
+      'Postman/W/api.postman_collection.json',
+      'Postman/W/devflow-markers.json',
+      'Postman/W/environments/dev.postman_environment.json',
+    ]);
+  });
+
+  it('a tree too big (cut by GitHub) falls back to the per-folder listing', async () => {
+    gh.commit(files);
+    gh.truncateTrees = true;
+    const listing = await client().workspaceListing('Postman/W');
+    expect(listing.collectionPaths).toEqual(['Postman/W/api.postman_collection.json']);
+    expect(gh.calls.some(c => c.url.includes('/contents/Postman/W'))).toBe(true);
+  });
+
+  it('the commit reads the current versions from the tree, not one listing per folder', async () => {
+    gh.commit(files);
+    const c = client();
+    await c.getFile('Postman/W/api.postman_collection.json');
+    await c.getFile('Postman/W/environments/dev.postman_environment.json');
+    gh.calls = [];
+    const result = await c.commitFiles(
+      [
+        { path: 'Postman/W/api.postman_collection.json', content: 'api2' },
+        { path: 'Postman/W/environments/dev.postman_environment.json', content: 'dev2' },
+      ],
+      'push'
+    );
+    expect(result.ok).toBe(true);
+    expect(gh.calls.some(c => c.url.includes('/contents/'))).toBe(false);
   });
 });

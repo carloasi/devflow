@@ -245,6 +245,22 @@ export async function githubRequest(
 // checagem falhou), cai no comportamento antigo — sha atual na hora.
 export const seenShas = new Map<string, string>();
 
+/** Uma entrada da árvore do repositório (git/trees). */
+export interface TreeEntry {
+  path: string;
+  type: "blob" | "tree" | "commit";
+  sha: string;
+}
+
+/** Os filhos diretos de uma pasta, no formato da listagem por pasta. */
+export function childrenOf(tree: TreeEntry[], dir: string): RepoItem[] {
+  const prefix = dir ? `${dir.replace(/\/+$/, "")}/` : "";
+  return tree
+    .filter((e) => e.path.startsWith(prefix) && e.path.length > prefix.length && !e.path.slice(prefix.length).includes("/"))
+    .filter((e) => e.type === "blob" || e.type === "tree")
+    .map((e) => ({ name: e.path.slice(prefix.length), path: e.path, type: e.type === "blob" ? "file" : "dir", sha: e.sha }));
+}
+
 export class GitHubStorageClient {
   private baseUrl = "https://api.github.com";
   /**
@@ -301,11 +317,65 @@ export class GitHubStorageClient {
   }
 
   async listFolders(basePath: string = ""): Promise<RepoItem[]> {
-  // Estrita: com o token vencido (ou sem acesso), a listagem que engolia o
-  // erro dizia "nenhum workspace no repositório" em vez de "token inválido".
-  const items = await this.listDirectoryStrict(basePath);
-  return items.filter((item) => item.type === "dir");
-}
+    // Estrita: com o token vencido (ou sem acesso), a listagem que engolia o
+    // erro dizia "nenhum workspace no repositório" em vez de "token inválido".
+    const tree = await this.repoTree();
+    const items = tree ? childrenOf(tree, basePath) : await this.listDirectoryStrict(basePath);
+    return items.filter((item) => item.type === "dir");
+  }
+
+  /**
+   * Todos os arquivos e pastas do repositório num `ref` (branch, commit ou
+   * árvore), numa chamada SÓ (git/trees, recursivo) — no lugar de uma
+   * listagem por pasta, e sem o limite de 1.000 itens por pasta da Contents
+   * API. `null` = não deu pra usar: a árvore veio cortada (grande demais) ou
+   * a branch tem "/" (a rota não a distingue de um caminho). Quem chama cai
+   * na listagem por pasta, como antes.
+   */
+  async repoTree(ref?: string): Promise<TreeEntry[] | null> {
+    const target = ref || this.config.branch;
+    if (target.includes("/")) return null;
+    const res = await githubRequest(this.gitUrl(`/trees/${encodeURIComponent(target)}?recursive=1`), {
+      method: "GET",
+      headers: this.headers(),
+    });
+    // Branch que não existe, ou repositório ainda vazio: nada lá.
+    if (res.status === 404 || res.status === 409) return [];
+    if (!res.ok) throw rateLimitErrorFrom(res) ?? new Error(`HTTP ${res.status} while listing the repository on GitHub`);
+    const data = (await res.json()) as { tree?: TreeEntry[]; truncated?: boolean };
+    if (data.truncated || !Array.isArray(data.tree)) return null;
+    return data.tree;
+  }
+
+  /**
+   * Os arquivos de um workspace — collections na pasta dele, environments na
+   * subpasta "environments" —, com o sha de cada um. Numa chamada só
+   * (repoTree); `exists` = a pasta do workspace existe lá.
+   */
+  async workspaceListing(
+    remotePathForWs: string,
+    ref?: string
+  ): Promise<{ exists: boolean; collectionPaths: string[]; envPaths: string[]; shas: FileShas }> {
+    // Strict: daqui saem as decisões de sync — falha não pode parecer "vazio".
+    const tree = await this.repoTree(ref);
+    const list = async (dir: string) => (tree ? childrenOf(tree, dir) : await this.listDirectoryStrict(dir, ref));
+    const rootFiles = await list(remotePathForWs);
+    const collectionFiles = rootFiles.filter(
+      (f) => f.type === "file" && /(\.postman_collection\.json|collection.*\.json)$/i.test(f.name)
+    );
+    const envDirItem = rootFiles.find((f) => f.type === "dir" && f.name.toLowerCase() === "environments");
+    const envFiles = envDirItem
+      ? (await list(envDirItem.path)).filter((f) => f.type === "file" && /(\.postman_environment\.json|\.json)$/i.test(f.name))
+      : [];
+    const shas: FileShas = {};
+    for (const f of [...collectionFiles, ...envFiles]) if (f.sha) shas[f.path] = f.sha;
+    return {
+      exists: rootFiles.length > 0,
+      collectionPaths: collectionFiles.map((f) => f.path),
+      envPaths: envFiles.map((f) => f.path),
+      shas,
+    };
+  }
 
   // Mesma lógica usada por resolveWorkspaceFiles (arquivos de collection na
   // raiz + arquivos de environment na subpasta "environments"), mas
@@ -315,32 +385,8 @@ export class GitHubStorageClient {
   // arquivos NAQUELE commit em vez do topo da branch — usado pelo histórico
   // de commits do workspace ("baixar esta versão").
   async resolveWorkspaceFilePaths(remotePathForWs: string, ref?: string): Promise<{ collectionPaths: string[]; envPaths: string[] }> {
-    // Strict: daqui saem as decisões de sync — falha não pode parecer "vazio".
-    const rootFiles = await this.listDirectoryStrict(remotePathForWs, ref);
-
-    const collectionFiles = rootFiles.filter(
-      (f) =>
-        f.type === "file" &&
-        /(\.postman_collection\.json|collection.*\.json)$/i.test(f.name)
-    );
-
-    const envDirItem = rootFiles.find(
-      (f) => f.type === "dir" && f.name.toLowerCase() === "environments"
-    );
-
-    let envPaths: string[] = [];
-    if (envDirItem) {
-      const envFolderFiles = await this.listDirectoryStrict(envDirItem.path, ref);
-      envPaths = envFolderFiles
-        .filter(
-          (f) =>
-            f.type === "file" &&
-            /(\.postman_environment\.json|\.json)$/i.test(f.name)
-        )
-        .map((f) => f.path);
-    }
-
-    return { collectionPaths: collectionFiles.map((f) => f.path), envPaths };
+    const { collectionPaths, envPaths } = await this.workspaceListing(remotePathForWs, ref);
+    return { collectionPaths, envPaths };
   }
 
 // Lista recursivamente todos os arquivos (não diretórios) dentro de um path,
@@ -350,6 +396,14 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
   // Strict: rename e exclusão decidem o que mover/apagar por esta lista — uma
   // falha de rede não pode parecer "a pasta está vazia" (rename que não faz
   // nada sem avisar, exclusão que apaga só parte e diz que terminou).
+  // A árvore inteira numa chamada; sem ela, pasta por pasta.
+  const tree = await this.repoTree();
+  if (tree) {
+    const prefix = `${path.replace(/\/+$/, "")}/`;
+    return tree
+      .filter((e) => e.type === "blob" && e.path.startsWith(prefix))
+      .map((e) => ({ name: e.path.split("/").pop() ?? e.path, path: e.path, type: "file", sha: e.sha }));
+  }
   const items = await this.listDirectoryStrict(path);
   const files: RepoItem[] = [];
 
@@ -780,9 +834,14 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       if (!commit.data) throw new Error(`HTTP ${commit.status} while reading ${this.config.branch}`);
       const baseTree = commit.data.tree.sha;
 
-      // Versão de cada arquivo NESTE topo — uma listagem por pasta.
+      // Versão de cada arquivo NESTE topo — a árvore dele numa chamada só
+      // (sem ela, uma listagem por pasta).
       const current: FileShas = {};
-      const dirs = new Set(changes.map((c) => c.path.slice(0, c.path.lastIndexOf("/"))));
+      const headTree = await this.repoTree(baseTree);
+      if (headTree) {
+        for (const e of headTree) if (e.type === "blob") current[e.path] = e.sha;
+      }
+      const dirs = headTree ? new Set<string>() : new Set(changes.map((c) => c.path.slice(0, c.path.lastIndexOf("/"))));
       for (const dir of dirs) {
         // Strict: com a listagem falhando, todo arquivo parecia "mudado lá"
         // (conflito falso) e as exclusões eram puladas em silêncio.

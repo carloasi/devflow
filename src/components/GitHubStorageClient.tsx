@@ -1021,31 +1021,10 @@ useEffect(() => {
       // Estrita (falha em vez de devolver []): com a pasta environments
       // vazia por um erro de rede, todo environment aparecia como "removido
       // no GitHub" no aviso e no contador. Na falha fica o que se sabia.
-      const rootFiles = await client().listDirectoryStrict(remotePath);
-
-      const collectionFiles = rootFiles.filter(
-        (f) =>
-          f.type === "file" &&
-          /(\.postman_collection\.json|collection.*\.json)$/i.test(f.name)
-      );
-
-      const envDirItem = rootFiles.find(
-        (f) => f.type === "dir" && f.name.toLowerCase() === "environments"
-      );
-
-      let foundEnvPaths: string[] = [];
-      const shas: FileShas = {};
-      for (const f of collectionFiles) if (f.sha) shas[f.path] = f.sha;
-      if (envDirItem) {
-        const envFolderFiles = await client().listDirectoryStrict(envDirItem.path);
-        const envFiles = envFolderFiles.filter(
-          (f) =>
-            f.type === "file" &&
-            /(\.postman_environment\.json|\.json)$/i.test(f.name)
-        );
-        for (const f of envFiles) if (f.sha) shas[f.path] = f.sha;
-        foundEnvPaths = envFiles.map((f) => f.path);
-      }
+      // Numa chamada só (a árvore do repositório; ver workspaceListing) — e
+      // com a leitura condicional, a checagem de fundo a cada 3 minutos não
+      // gasta a cota do GitHub quando nada mudou.
+      const listing = await client().workspaceListing(remotePath);
 
       // Um push/pull registrou versões no meio: esta listagem já nasceu velha.
       // A próxima checagem (ou a abertura do painel) traz a atual.
@@ -1053,10 +1032,10 @@ useEffect(() => {
       // Trocou de workspace (ou de repositório) no meio: é a listagem do
       // anterior, e gravá-la punha os arquivos dele no lugar dos deste.
       if (listingKeyRef.current !== listingKey) return;
-      setCollectionPaths(collectionFiles.map((f) => f.path));
-      setEnvPaths(foundEnvPaths);
+      setCollectionPaths(listing.collectionPaths);
+      setEnvPaths(listing.envPaths);
       // Pasta do workspace que não existe lá (404): nada pra comparar.
-      setRemoteShas(rootFiles.length > 0 ? shas : null);
+      setRemoteShas(listing.exists ? listing.shas : null);
     } catch (e: any) {
       console.error("❌ Erro ao resolver arquivos do workspace:", e);
       if (!quiet) showStatus("error", `✗ Failed to fetch files: ${e.message}`);
