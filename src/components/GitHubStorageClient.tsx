@@ -37,6 +37,7 @@ import {
 import { isPendingEmpty, readPendingPush, type PendingPush } from "@/storage/pendingPushStore";
 import { DevFlowBusyCard, DevFlowSpinner } from "@/components/helper/DevFlowLoader";
 import {
+  clearContentCache,
   GitHubConflictError,
   GitHubRateLimitError,
   GitHubStorageClient,
@@ -825,6 +826,10 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   const savePassphrase = useCallback(async (value: string) => {
     const trimmed = value.trim();
     clearDerivedKeyCache();
+    // E o conteúdo conhecido de cada versão: um arquivo igual ao de lá não é
+    // regravado (lib/sync/githubStorage), e sem isto ele ficaria cifrado com
+    // a senha antiga — quem já usa a nova não conseguiria lê-lo.
+    clearContentCache();
     if (trimmed) await saveSecret(GH_PASSPHRASE_KEY, trimmed);
     else await deleteSecret(GH_PASSPHRASE_KEY);
     setPassphrase(trimmed);

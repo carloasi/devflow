@@ -663,6 +663,9 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
 
       try {
         const decryptedContent = await decryptData(rawStringContent, this.passphrase);
+        // Só o que veio cifrado: um arquivo antigo em texto puro (abaixo) tem
+        // que ser regravado, cifrado, mesmo sem mudança.
+        rememberContent(metaData.sha, decryptedContent);
         return { content: decryptedContent, sha: metaData.sha };
       } catch (decErr: any) {
         try {
@@ -913,9 +916,13 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       );
     }
 
-    // Cifra e cria os blobs UMA vez: o retry só refaz árvore e commit.
+    // Cifra e cria cada blob UMA vez (o retry reaproveita) — e só dos
+    // arquivos que mudaram de verdade (ver contentBySha).
     const blobs = new Map<string, string>();
-    for (const w of writes) {
+    const prints = new Map(writes.map((w) => [w.path, contentPrint(w.content)]));
+    const blobFor = async (w: { path: string; content?: unknown }) => {
+      const known = blobs.get(w.path);
+      if (known) return known;
       const encrypted = await encryptData(w.content, this.passphrase ?? "");
       const blob = await this.gitJson<{ sha: string }>("/blobs", {
         method: "POST",
@@ -923,7 +930,8 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       });
       if (!blob.data) throw new Error(`HTTP ${blob.status} while uploading ${w.path}`);
       blobs.set(w.path, blob.data.sha);
-    }
+      return blob.data.sha;
+    };
 
     const identity = await buildCommitIdentity();
     let headSha = head0.data.object.sha;
@@ -967,15 +975,40 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       }
       if (conflicts.length > 0) return { ok: false, conflicts };
 
+      // O que já está lá com este mesmo conteúdo não entra no commit: fica a
+      // versão de lá, e ela conta como gravada (é o que o GitHub tem).
+      const unchanged = new Map<string, string>();
+      for (const w of writes) {
+        const there = current[w.path];
+        if (there && contentBySha.get(there) === prints.get(w.path)) unchanged.set(w.path, there);
+      }
+      const toWrite = writes.filter((w) => !unchanged.has(w.path));
+      for (const w of toWrite) await blobFor(w);
+      const finish = async (extra: Record<string, string | null>) => {
+        const written: FileShas = {};
+        const recorded: Record<string, string | null> = { ...extra };
+        for (const w of writes) {
+          const sha = unchanged.get(w.path) ?? blobs.get(w.path)!;
+          written[w.path] = sha;
+          recorded[w.path] = sha;
+          this.rememberSha(w.path, sha);
+          rememberContent(sha, w.content);
+          if (!unchanged.has(w.path)) rememberRecentWrite(this.repoKey, w.path, sha);
+        }
+        await recordSyncedShas(this.repoKey, recorded);
+        return { ok: true as const, written };
+      };
+
       const tree = [
-        ...writes.map((w) => ({ path: w.path, mode: "100644", type: "blob", sha: blobs.get(w.path)! })),
+        ...toWrite.map((w) => ({ path: w.path, mode: "100644", type: "blob", sha: blobs.get(w.path)! })),
         // Apagar o que já não existe lá daria erro na árvore — e o efeito
         // desejado já está feito.
         ...deletes
           .filter((d) => current[d.path])
           .map((d) => ({ path: d.path, mode: "100644", type: "blob", sha: null })),
       ];
-      if (tree.length === 0) return { ok: true, written: {} };
+      // Nada mudou de verdade: sem commit vazio.
+      if (tree.length === 0) return writes.length > 0 ? finish({}) : { ok: true, written: {} };
       // Último ponto seguro: até aqui nada mudou no GitHub (os blobs soltos
       // não aparecem em lugar nenhum). Depois do commit, o envio está feito.
       throwIfSyncCancelled();
@@ -1002,22 +1035,13 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
         body: { sha: newCommit.data.sha, force: false },
       });
       if (moved.data) {
-        const written: FileShas = {};
-        const recorded: Record<string, string | null> = {};
-        for (const w of writes) {
-          const sha = blobs.get(w.path)!;
-          written[w.path] = sha;
-          recorded[w.path] = sha;
-          this.rememberSha(w.path, sha);
-          rememberRecentWrite(this.repoKey, w.path, sha);
-        }
+        const gone: Record<string, null> = {};
         for (const d of deletes) {
-          recorded[d.path] = null;
+          gone[d.path] = null;
           this.rememberSha(d.path, undefined);
           rememberRecentWrite(this.repoKey, d.path, null);
         }
-        await recordSyncedShas(this.repoKey, recorded);
-        return { ok: true, written };
+        return finish(gone);
       }
 
       // 422 = não é fast-forward: alguém enviou entre ler o topo e mover a
@@ -1105,6 +1129,50 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
 // esconder por muito tempo a mudança de um colega que viesse logo depois.
 export const RECENT_WRITE_MS = 120_000;
 // sha = gravado; null = apagado.
+// ─── Conteúdo de cada versão de arquivo (pelo sha do blob) ──────────────
+//
+// A cifra sorteia o IV a cada gravação: o MESMO conteúdo vira outro texto e
+// outro blob. Todo push do workspace inteiro regravava TODOS os arquivos —
+// o "quem mudou" (último commit do arquivo) passava a ser quem enviou por
+// último qualquer coisa, o histórico de cada collection enchia de commits
+// que não a mudaram, e cada arquivo custava um upload.
+//
+// Aqui fica, por sha, a impressão do conteúdo já decifrado (lido ou
+// gravado daqui). Um arquivo cujo conteúdo é o mesmo da versão que está lá
+// não é regravado. Sha de blob nunca muda de conteúdo, então não há o que
+// invalidar; o limite é só pra não crescer sem fim.
+const CONTENT_BY_SHA_MAX = 2000;
+const contentBySha = new Map<string, string>();
+
+/** JSON com as chaves em ordem: a mesma impressão pro mesmo conteúdo. */
+export function contentPrint(value: unknown): string {
+  const seen = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(seen);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(v as Record<string, unknown>).sort()) {
+        const inner = (v as Record<string, unknown>)[key];
+        if (inner !== undefined) out[key] = seen(inner);
+      }
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(seen(value) ?? null);
+}
+
+export function rememberContent(sha: string | undefined, content: unknown) {
+  if (!sha) return;
+  contentBySha.delete(sha);
+  contentBySha.set(sha, contentPrint(content));
+  while (contentBySha.size > CONTENT_BY_SHA_MAX) contentBySha.delete(contentBySha.keys().next().value as string);
+}
+
+/** Pros testes. */
+export function clearContentCache() {
+  contentBySha.clear();
+}
+
 export const recentWrites = new Map<string, { sha: string | null; at: number }>();
 export function rememberRecentWrite(repoKey: string, path: string, sha: string | null) {
   recentWrites.set(`${repoKey}|${path}`, { sha, at: Date.now() });

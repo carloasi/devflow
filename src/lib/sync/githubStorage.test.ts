@@ -37,6 +37,7 @@ vi.stubGlobal('localStorage', {
 });
 
 import {
+  clearContentCache,
   clearRequestCache,
   GitHubRateLimitError,
   GitHubStorageClient,
@@ -195,6 +196,7 @@ const client = (options: { force?: boolean } = {}) =>
 
 beforeEach(() => {
   clearRequestCache();
+  clearContentCache(); // os shas do GitHub de mentira se repetem entre testes
   requestTiming.sleep = vi.fn(async () => undefined);
   BRANCH = `main-${Math.random().toString(36).slice(2)}`; // "visto" é global por branch
   gh = new FakeGitHub();
@@ -494,3 +496,48 @@ describe('last seen version survives closing the app', () => {
     expect(seenShas.get(`k${SEEN_SHAS_MAX_ENTRIES + 9}`)).toBe('s');
   });
 });
+
+describe('commitFiles — unchanged files are not rewritten', () => {
+  it('a file with the same content as on GitHub stays as it is (no new version)', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"', 'Postman/W/b.json': '"b0"' });
+    const c = client();
+    const a = await c.getFile('Postman/W/a.json');
+    await c.getFile('Postman/W/b.json');
+    const result = await c.commitFiles(
+      [
+        { path: 'Postman/W/a.json', content: 'a0' },
+        { path: 'Postman/W/b.json', content: 'b1' },
+      ],
+      'push'
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // a: o mesmo blob de antes; b: o novo.
+    expect(result.written['Postman/W/a.json']).toBe(a!.sha);
+    expect(gh.fileAtHead('Postman/W/b.json')).toBe('b1');
+    expect(gh.calls.filter(x => x.method === 'POST' && x.url.endsWith('/git/blobs'))).toHaveLength(1);
+  });
+
+  it('nothing changed: no commit at all', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    const c = client();
+    await c.getFile('Postman/W/a.json');
+    const head = gh.head;
+    const result = await c.commitFiles([{ path: 'Postman/W/a.json', content: 'a0' }], 'push');
+    expect(result.ok).toBe(true);
+    expect(gh.head).toBe(head);
+  });
+
+  it('the version this app just wrote is also known: pushing it again writes nothing', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    const c = client();
+    await c.getFile('Postman/W/a.json');
+    await c.commitFiles([{ path: 'Postman/W/a.json', content: { x: 1, y: [1, 2] } }], 'push');
+    const head = gh.head;
+    // Mesmo conteúdo, chaves em outra ordem.
+    const again = await c.commitFiles([{ path: 'Postman/W/a.json', content: { y: [1, 2], x: 1 } }], 'push');
+    expect(again.ok).toBe(true);
+    expect(gh.head).toBe(head);
+  });
+});
+
