@@ -5749,9 +5749,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     }
     throwIfSyncCancelled();
 
+    // O catálogo de marcadores vem junto, como no pull de uma collection
+    // (união, nunca substituição): sem ele, um marcador que o colega criou e
+    // pôs no item recebido chegava como marca invisível até o próximo pull.
+    if (remote.markers) await handlePullMarkers(workspace, remote.markers);
+
     const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
     const base = await loadSyncBase(workspace);
-    // Depois das esperas: a árvore de agora.
+    // Depois das esperas (e do remap de marcadores): a árvore de agora.
     const local = collectionsRef.current;
     const result = rebaseCollections(local, remoteTree, base, new Set(readPendingPush(workspace).collections));
     const inItem = (id: string) => result.nodes.some(n => n.id === id && isInSubtree(n, itemId));
@@ -5811,9 +5816,24 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     );
     // As abas abertas do item recebido são recarregadas pelo efeito de
     // `collections` (suppressPendingMarkRef acima), como num pull.
+
+    // Nada mais a trazer nesta collection (nem conflito) além do item: o
+    // arquivo dela no GitHub passa a contar como lido — sem isto o "↓ N
+    // mudou no GitHub" da barra continuava contando-o até um pull do
+    // workspace inteiro. Sobrando outra mudança lá, ele segue "a receber".
+    const rootIds = new Set([localRoot?.id, remoteRoot?.id].filter((id): id is string => !!id));
+    const nodeById = new Map(result.nodes.map(n => [n.id, n]));
+    const othersPending = [...result.incomingDetails.map(d => d.id), ...result.conflicts].some(id => {
+      const node = nodeById.get(id);
+      return !!node && rootIds.has(node.rootId) && !isInSubtree(node, itemId);
+    });
+    if (!othersPending && rootIds.size > 0) {
+      await githubSyncRef.current?.markReviewed(workspace, { rootIds: [...rootIds] }).catch(() => undefined);
+    }
+
     toast.success(`"${label}" received from GitHub.`);
     reportSyncStatus('success', `"${label}" received from GitHub.`);
-  }, [importData, handlePullCollection]);
+  }, [importData, handlePullCollection, handlePullMarkers]);
 
   useEffect(() => {
     receiveItemRef.current = handleReceiveItem;
