@@ -15,6 +15,7 @@ import { loadWorkspaceLocalData, loadWorkspaceMarkers } from "@/storage/localSyn
 import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
 import type { PushScope } from "@/lib/sync/pushPipeline";
+import { acquireSyncLock, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE } from "@/lib/sync/syncLock";
 import { stripStarredFlags } from "@/components/collection-tree/utils/tree.utils";
 import { clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
 import type { FileChange } from "@/lib/commitDiff";
@@ -276,6 +277,8 @@ export interface CommitPushInput {
   message?: string;
   /** Nome no aviso "Sending ...". */
   label?: string;
+  /** Trava do push que chama (runPush): a gravação é parte dele (lib/sync/syncLock). */
+  lockToken?: string;
 }
 
 export type CommitPushResult =
@@ -760,15 +763,9 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   // desenhado dentro do popover do GitHub Sync — que está fechado nessa hora.
   const [singleOp, setSingleOp] = useState<string | null>(null);
   const singleOpBusy = singleOp !== null;
-  // Trava ÚNICA das gravações no GitHub (pushes, rename, exclusão do
-  // workspace remoto). O `singleOpBusy` acima é estado: lido numa closure de
-  // um render anterior, ele ainda dizia "livre" — e o push completo nem o
-  // checava. Dois pushes ao mesmo tempo se atropelavam: o segundo diálogo de
-  // exclusão tomava o lugar do primeiro (que ficava pendurado pra sempre,
-  // com a operação presa), e o segundo commit partia de uma leitura que o
-  // primeiro já tinha tornado velha. O ref vale na hora, sem render.
-  const syncOpRef = useRef<string | null>(null);
-  const SYNC_BUSY_MESSAGE = "Another save/download is already in progress. Wait for it to finish.";
+  // A trava de uma operação de sync por vez (push, pull, rename, exclusão)
+  // é a de lib/sync/syncLock — a MESMA do AppLayout, pra um pull não rodar
+  // no meio de um push.
   const [status, setStatus] = useState<SyncStatus>({ type: null, message: "" });
   const [showToken, setShowToken] = useState(false);
   const [collectionPaths, setCollectionPaths] = useState<string[]>([]);
@@ -916,12 +913,12 @@ const handleRequestDeleteRemoteWorkspace = useCallback(async () => {
 
 const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
   if (!pendingDeleteWorkspace) return;
-  if (syncOpRef.current) {
+  const lock = acquireSyncLock("delete workspace");
+  if (!lock) {
     showStatus("error", SYNC_BUSY_MESSAGE);
     return;
   }
 
-  syncOpRef.current = "delete workspace";
   setDeletingWorkspace(true);
   showStatus("info", "Deleting workspace from GitHub...");
   try {
@@ -940,7 +937,7 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
     console.error("❌ Erro ao excluir workspace remoto:", e);
     showStatus("error", `✗ Delete failed: ${e.message}`);
   } finally {
-    syncOpRef.current = null;
+    releaseSyncLock(lock);
     setDeletingWorkspace(false);
   }
 }, [pendingDeleteWorkspace, client, workspace]);
@@ -1316,6 +1313,12 @@ useEffect(() => {
         return;
       }
 
+      // Um sync por vez (lib/sync/syncLock).
+      const lock = acquireSyncLock("pull");
+      if (!lock) {
+        showStatus("error", SYNC_BUSY_MESSAGE);
+        return;
+      }
       setLoading(true);
       showStatus("info", `Downloading and decrypting files...`);
 
@@ -1413,6 +1416,7 @@ useEffect(() => {
         console.error("❌ Erro durante o performPull:", e);
         showStatus("error", `✗ Pull failed: ${e.message}`);
       } finally {
+        releaseSyncLock(lock);
         setLoading(false);
       }
     },
@@ -1528,6 +1532,12 @@ useEffect(() => {
       return;
     }
 
+    // Um sync por vez (lib/sync/syncLock).
+    const lock = acquireSyncLock("pull");
+    if (!lock) {
+      showStatus("error", SYNC_BUSY_MESSAGE);
+      return;
+    }
     setRestoringCommit(true);
     showStatus("info", `Downloading "${workspaceName}" at ${sha.slice(0, 7)}...`);
 
@@ -1599,6 +1609,7 @@ useEffect(() => {
       console.error(`❌ Erro ao baixar commit de "${workspaceName}":`, e);
       showStatus("error", `✗ Pull failed: ${e.message}`);
     } finally {
+      releaseSyncLock(lock);
       setRestoringCommit(false);
     }
   }, [isConfigValid, workspace, client, onPullWorkspaceData, onReviewSnapshot, showStatus]);
@@ -1612,8 +1623,10 @@ useEffect(() => {
   async function commitPush(input: CommitPushInput): Promise<CommitPushResult> {
     if (!isConfigValid) return { status: "error", message: "Configure GitHub sync before pushing." };
     if (!requirePassphrase()) return { status: "error", message: PASSPHRASE_MISSING_MESSAGE };
-    if (syncOpRef.current) return { status: "busy", message: SYNC_BUSY_MESSAGE };
-    syncOpRef.current = `push ${input.workspaceName}`;
+    // Chamada de dentro do push (runPush), já com a trava dele: segue. Sozinha,
+    // pega a própria.
+    const ownLock = holdsSyncLock(input.lockToken) ? null : acquireSyncLock("push");
+    if (!holdsSyncLock(input.lockToken) && !ownLock) return { status: "busy", message: SYNC_BUSY_MESSAGE };
     const label = input.label ?? input.workspaceName;
     setSingleOp(`Sending "${label}"...`);
     try {
@@ -1730,7 +1743,7 @@ useEffect(() => {
       }
       throw e;
     } finally {
-      syncOpRef.current = null;
+      releaseSyncLock(ownLock);
       setSingleOp(null);
     }
   }
@@ -1772,12 +1785,13 @@ useEffect(() => {
       return;
     }
 
-    if (singleOpBusy || syncOpRef.current) {
+    const lock = acquireSyncLock("rename");
+    if (singleOpBusy || !lock) {
+      releaseSyncLock(lock);
       showStatus("error", SYNC_BUSY_MESSAGE);
       return;
     }
 
-    syncOpRef.current = `rename ${oldName}`;
     setSingleOp(`Renaming "${oldName}" on GitHub...`);
     showStatus("info", `Renaming "${oldName}" to "${newName}" on GitHub...`);
 
@@ -1806,7 +1820,7 @@ useEffect(() => {
       console.error(`❌ Erro ao renomear a pasta remota de "${oldName}" para "${newName}":`, e);
       throw e;
     } finally {
-      syncOpRef.current = null;
+      releaseSyncLock(lock);
       setSingleOp(null);
     }
   }, [isConfigValid, client, passphrase, showStatus, singleOpBusy]);
@@ -1906,6 +1920,12 @@ useEffect(() => {
       return;
     }
 
+    // Um sync por vez (lib/sync/syncLock).
+    const lock = acquireSyncLock("pull");
+    if (!lock) {
+      showStatus("error", SYNC_BUSY_MESSAGE);
+      return;
+    }
     setLoading(true);
     showStatus("info", "Discovering workspaces in the repository...");
 
@@ -1993,6 +2013,7 @@ useEffect(() => {
       console.error("❌ Erro ao baixar todos os workspaces:", e);
       showStatus("error", `✗ Pull failed: ${e.message}`);
     } finally {
+      releaseSyncLock(lock);
       setLoading(false);
     }
   }

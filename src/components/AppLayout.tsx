@@ -145,6 +145,7 @@ import { applyRemoteMoves, rebaseCollections } from '@/lib/sync/rebase';
 import { buildRemoteChangePreview, commitChangeItems, detailItems } from '@/lib/sync/remoteChangeAlert';
 import { reloadedTab, tabsAfterSync } from '@/lib/sync/openTabsRefresh';
 import { mergeTabSave } from '@/lib/sync/tabSaveMerge';
+import { acquireSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE } from '@/lib/sync/syncLock';
 import { baseAfterPush, preparePush, type PushReport, type PushRequest, type PushScope } from '@/lib/sync/pushPipeline';
 import { sameContent } from '@/lib/canonicalCompare';
 import { exampleNameFor } from '@/lib/exampleName';
@@ -4765,6 +4766,14 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
    */
   const handlePullWorkspaceWithReview = useCallback(async () => {
     if (pullingCollectionRef.current) return;
+    // Um sync por vez (lib/sync/syncLock): um pull no meio de um push
+    // aplicava aqui a árvore dele por cima da que o push tinha mesclado.
+    const lock = acquireSyncLock('pull');
+    if (!lock) {
+      toast.info(SYNC_BUSY_MESSAGE);
+      reportSyncStatus('error', SYNC_BUSY_MESSAGE);
+      return;
+    }
     pullingCollectionRef.current = true;
 
     const workspace = selectedWorkspaceRef.current;
@@ -4913,6 +4922,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       reportSyncStatus('error', `Could not read GitHub: ${(e as Error)?.message ?? String(e)}`);
     } finally {
       pullingCollectionRef.current = false;
+      releaseSyncLock(lock);
     }
   }, [environments, importData, handleCompareRemote, handlePullMarkers, openEnvironmentReview, setEnvironments, takeUndoSnapshot, mergeReportSections, undoLastPull, syncText]);
 
@@ -5479,7 +5489,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
   // pasta ou request —, sem mexer no resto da árvore. Mesma mescla do pull
   // (lib/sync/rebase) recortada pela subárvore: o que mudou só lá entra, o
   // que é seu fica; conflito dentro do item abre a revisão só dele.
-  const handleReceiveItem = useCallback(async (itemId: string, label: string) => {
+  const receiveItemLocked = useCallback(async (itemId: string, label: string) => {
     const workspace = selectedWorkspaceRef.current;
     const fail = (title: string, description?: string) => {
       toast.error(title, description ? { description } : undefined);
@@ -5588,6 +5598,21 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     reportSyncStatus('success', `"${label}" received from GitHub.`);
   }, [importData, handlePullCollection, handlePullMarkers]);
 
+  const handleReceiveItem = useCallback(async (itemId: string, label: string) => {
+    // Um sync por vez (lib/sync/syncLock).
+    const lock = acquireSyncLock('receive');
+    if (!lock) {
+      toast.info(SYNC_BUSY_MESSAGE);
+      reportSyncStatus('error', SYNC_BUSY_MESSAGE);
+      return;
+    }
+    try {
+      await receiveItemLocked(itemId, label);
+    } finally {
+      releaseSyncLock(lock);
+    }
+  }, [receiveItemLocked]);
+
   useEffect(() => {
     receiveItemRef.current = handleReceiveItem;
   }, [handleReceiveItem]);
@@ -5624,6 +5649,13 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           ? workspace
           : findNodeById(collectionsRef.current, scope.kind === 'item' ? scope.itemId : scope.rootId)?.name ?? workspace;
 
+    // Um sync por vez (lib/sync/syncLock): o push inteiro — leitura, mescla,
+    // gravação — sem um pull aplicando outra árvore no meio.
+    const lock = acquireSyncLock('push');
+    if (!lock) {
+      fail(SYNC_BUSY_MESSAGE);
+      return 'failed';
+    }
     let mode = request.mode;
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -5722,6 +5754,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
           force: mode === 'force',
           label,
           message: pushMessageFor(workspace, scope, label),
+          // A gravação é parte deste push: segue com a trava dele.
+          lockToken: lock,
         });
 
         // 6. Alguém enviou no meio: de novo, mesclando com a versão nova.
@@ -5757,6 +5791,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       }
       fail(`Push failed: ${(e as Error)?.message ?? String(e)}`);
       return 'failed';
+    } finally {
+      releaseSyncLock(lock);
     }
     // applyPushedLocally / finishPush / pushMessageFor são funções deste
     // componente (abaixo), estáveis pelos refs que usam.
