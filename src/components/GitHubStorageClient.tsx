@@ -242,6 +242,10 @@ interface GitHubSyncProps {
   // Catalogo que veio do repositorio. Quem funde com o local e o AppLayout
   // (ver mergeCatalogs): aqui so se sabe baixar.
   onPullMarkers?: (workspaceName: string, markers: Marker[]) => void | Promise<void>;
+  // A pasta do workspace foi apagada do GitHub (o daqui fica). Quem esquece
+  // a base da sincronização e marca o que existe aqui como "para enviar" é o
+  // AppLayout — sem isso o sync seguinte lia tudo como "apagado lá".
+  onRemoteWorkspaceDeleted?: (workspaceName: string) => void | Promise<void>;
   // Pull do workspace ATUAL passando pela tela de revisão. Quando existe, é
   // o que o botão Pull faz; o pull de todos os workspaces (que substitui o
   // local sem mescla) fica numa ação à parte.
@@ -733,6 +737,7 @@ const GitHubSync = forwardRef<GitHubSyncHandle, GitHubSyncProps>(function GitHub
   onShowConflictHistory,
   currentMarkers,
   onPullMarkers,
+  onRemoteWorkspaceDeleted,
 }, ref) {
   // Sem repositório padrão: dono e repositório vêm só do que a pessoa
   // configurou. Vazios, o sync fica desligado (isConfigValid).
@@ -885,7 +890,12 @@ const requirePassphrase = (): boolean => {
   return false;
 };
 
-const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<{ files: RepoItem[] } | null>(null);
+// O workspace e a pasta ficam guardados com a confirmação: trocar de
+// workspace com ela aberta não pode mudar o que é apagado (nem o nome na
+// mensagem, nem a listagem que é zerada no fim).
+const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<
+  { files: RepoItem[]; workspace: string; remotePath: string } | null
+>(null);
 const [deletingWorkspace, setDeletingWorkspace] = useState(false);
 
 // ✅ mover pra cá, depois de isConfigValid
@@ -904,17 +914,18 @@ const handleRequestDeleteRemoteWorkspace = useCallback(async () => {
       setDeletingWorkspace(false);
       return;
     }
-    setPendingDeleteWorkspace({ files });
+    setPendingDeleteWorkspace({ files, workspace, remotePath });
   } catch (e: any) {
     console.error("❌ Erro ao listar arquivos para exclusão:", e);
     showStatus("error", `✗ Failed to check files: ${e.message}`);
   } finally {
     setDeletingWorkspace(false);
   }
-}, [isConfigValid, remotePath, client]);
+}, [isConfigValid, remotePath, client, workspace]);
 
 const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
   if (!pendingDeleteWorkspace) return;
+  const target = pendingDeleteWorkspace;
   const lock = acquireSyncLock("delete workspace");
   if (!lock) {
     showStatus("error", SYNC_BUSY_MESSAGE);
@@ -927,14 +938,30 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
     // Um commit só, e sem checagem de versão: a pessoa confirmou apagar a
     // pasta inteira, seja qual for a versão que está lá.
     const storage = client();
-    await storage.commitFiles(
-      pendingDeleteWorkspace.files.map((file) => ({ path: file.path, delete: true, noCheck: true })),
-      `sync: remove workspace "${workspace}"`
-    );
+    // A lista de AGORA, não a de quando a confirmação abriu: um arquivo que
+    // alguém enviou no meio ficava lá, a pasta continuava existindo e o
+    // "Pull de todos" recriava o workspace.
+    const files = await storage.listAllFilesRecursive(target.remotePath);
+    if (files.length > 0) {
+      await storage.commitFiles(
+        files.map((file) => ({ path: file.path, delete: true, noCheck: true })),
+        `sync: remove workspace "${target.workspace}"`
+      );
+    }
     setPendingDeleteWorkspace(null);
-    setCollectionPaths([]);
-    setEnvPaths([]);
-    showStatus("success", `Workspace "${workspace}" removed from GitHub.`);
+    if (target.workspace === workspace) {
+      setCollectionPaths([]);
+      setEnvPaths([]);
+    }
+    // O registro do que estava sincronizado sai junto: o GitHub não tem mais
+    // nada desse workspace.
+    const prefix = `${target.remotePath}/`;
+    const synced = await loadSyncedShas(storage.repoKey);
+    const gone: Record<string, null> = {};
+    for (const path of Object.keys(synced)) if (path.startsWith(prefix)) gone[path] = null;
+    await recordSyncedShas(storage.repoKey, gone);
+    await onRemoteWorkspaceDeleted?.(target.workspace);
+    showStatus("success", `Workspace "${target.workspace}" removed from GitHub.`);
   } catch (e: any) {
     console.error("❌ Erro ao excluir workspace remoto:", e);
     showStatus("error", `✗ Delete failed: ${e.message}`);
@@ -942,7 +969,7 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
     releaseSyncLock(lock);
     setDeletingWorkspace(false);
   }
-}, [pendingDeleteWorkspace, client, workspace]);
+}, [pendingDeleteWorkspace, client, workspace, onRemoteWorkspaceDeleted]);
 
 const handleListRemoteWorkspaces = useCallback(async () => {
   if (!isConfigValid) return;
@@ -2176,12 +2203,12 @@ useImperativeHandle(ref, () => ({
             <div className="px-4 py-3 flex flex-col gap-2">
               <p className="text-[12px] text-pm-text-muted leading-relaxed">
                 {pendingDeleteWorkspace.files.length === 1
-                  ? `1 file will be permanently removed from "${remotePath}" in the repository:`
-                  : `${pendingDeleteWorkspace.files.length} files will be permanently removed from "${remotePath}" in the repository:`}
+                  ? `1 file will be permanently removed from "${pendingDeleteWorkspace.remotePath}" in the repository:`
+                  : `${pendingDeleteWorkspace.files.length} files will be permanently removed from "${pendingDeleteWorkspace.remotePath}" in the repository:`}
               </p>
               <ul className="max-h-[140px] overflow-y-auto text-[11.5px] text-pm-text-secondary bg-pm-hover/60 border border-pm-border rounded-md p-2 list-disc list-inside">
                 {pendingDeleteWorkspace.files.map((f) => (
-                  <li key={f.path} className="truncate">{f.path.replace(`${remotePath}/`, "")}</li>
+                  <li key={f.path} className="truncate">{f.path.replace(`${pendingDeleteWorkspace.remotePath}/`, "")}</li>
                 ))}
               </ul>
               <p className="text-[11px] text-amber-400/90">

@@ -185,3 +185,24 @@ describe('baseAfterPush — one environment', () => {
   });
 });
 
+// Workspace apagado do GitHub e mantido aqui (handleRemoteWorkspaceDeleted).
+describe('preparePush — after the workspace was deleted from GitHub', () => {
+  const empty = { collections: [] as CollectionItem[], environments: [] as Environment[] };
+
+  it("with the old base, the push would remove everything here (why the base is forgotten)", () => {
+    const out = preparePush(input({ remote: empty, pendingCollectionIds: new Set() }));
+    expect(out.status).toBe('ready');
+    if (out.status !== 'ready') return;
+    expect(out.localNext.collections).toEqual([]);
+  });
+
+  it("with the base forgotten, everything here stays and is sent", () => {
+    const out = preparePush(input({ remote: empty, base: null, pendingCollectionIds: new Set(['c1', 'c2']) }));
+    expect(out.status).toBe('ready');
+    if (out.status !== 'ready') return;
+    expect(out.localNext.collections).toBeNull();
+    expect(out.send.collections.map(c => c.id)).toEqual(['c1', 'c2']);
+    expect(out.send.environments.map(e => e.id)).toEqual(['e1']);
+  });
+});
+

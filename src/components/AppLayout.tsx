@@ -4263,6 +4263,33 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     }
   }, [importData, setEnvironments]);
 
+  // A pasta do workspace foi apagada do GitHub e o daqui fica ("The local
+  // workspace will not be affected"). A base da sincronização tinha tudo
+  // como sincronizado: o sync seguinte lia as collections como "apagadas
+  // lá" e as tirava daqui, sem revisão nem Desfazer. Sem base, ele volta a
+  // ser um workspace que nunca subiu — e o que existe aqui fica marcado pra
+  // enviar, pro próximo push o recriar inteiro.
+  const handleRemoteWorkspaceDeleted = useCallback(async (workspaceName: string) => {
+    if (!workspaceName) return;
+    await clearSyncBase(workspaceName);
+    const isOpen = selectedWorkspaceRef.current === workspaceName;
+    const local = isOpen
+      ? { collections: collectionsRef.current, environments: environmentsRef.current }
+      : await loadWorkspaceLocalData(workspaceName);
+    const collectionIds = (Array.isArray(local.collections) ? (local.collections as CollectionItem[]) : [])
+      .map(c => c?.id)
+      .filter((id): id is string => !!id);
+    const environmentIds = (Array.isArray(local.environments) ? (local.environments as Environment[]) : [])
+      .map(e => e?.id)
+      .filter((id): id is string => !!id);
+    if (collectionIds.length > 0) markCollectionsPendingPush(workspaceName, collectionIds);
+    if (environmentIds.length > 0) markEnvironmentsPendingPush(workspaceName, environmentIds);
+    // O Desfazer de um pull voltaria a base de antes dele — a do GitHub que
+    // já não existe.
+    if (undoRef.current?.workspace === workspaceName) undoRef.current = null;
+    if (isOpen) setPendingPush(readPendingPush(workspaceName));
+  }, []);
+
   // Abre a janela de histórico de commits do workspace (ícone de relógio no
   // menu de workspaces) — de lá dá pra baixar o estado dos arquivos em um
   // commit específico, e não só a versão mais recente da branch.
@@ -7201,6 +7228,7 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
               onShowConflictHistory={() => void handleShowConflictHistory()}
               currentMarkers={markers}
               onPullMarkers={handlePullMarkers}
+              onRemoteWorkspaceDeleted={handleRemoteWorkspaceDeleted}
             />
 
             <div className="w-[1px] h-3 bg-pm-border ml-2"></div>
