@@ -28,13 +28,23 @@ vi.mock('@/lib/syncCrypto', () => ({
 }));
 
 // O nome do autor do commit vem do usuário do Windows guardado aqui.
+// O resto (versões vistas) é um storage de verdade, em memória.
+const storage = new Map<string, string>([['app_win_username', 'tester']]);
 vi.stubGlobal('localStorage', {
-  getItem: () => 'tester',
-  setItem: () => undefined,
-  removeItem: () => undefined,
+  getItem: (k: string) => storage.get(k) ?? null,
+  setItem: (k: string, v: string) => void storage.set(k, v),
+  removeItem: (k: string) => void storage.delete(k),
 });
 
-import { clearRequestCache, GitHubRateLimitError, GitHubStorageClient, requestTiming } from './githubStorage';
+import {
+  clearRequestCache,
+  GitHubRateLimitError,
+  GitHubStorageClient,
+  requestTiming,
+  SEEN_SHAS_MAX_ENTRIES,
+  SEEN_SHAS_STORAGE_KEY,
+  seenShas,
+} from './githubStorage';
 
 // ─── GitHub de mentira ────────────────────────────────────────────────────
 type Tree = Map<string, string>; // path → sha do blob
@@ -420,5 +430,67 @@ describe('listing — one call for the whole repository', () => {
     );
     expect(result.ok).toBe(true);
     expect(gh.calls.some(c => c.url.includes('/contents/'))).toBe(false);
+  });
+});
+
+describe('last seen version survives closing the app', () => {
+  /** Fechar e abrir o app: o que estava em memória some; fica o storage. */
+  const reopenApp = () => {
+    seenShas.flush();
+    seenShas.reload();
+  };
+
+  it('a file changed on GitHub while the app was closed is still a conflict', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    await client().getFile('Postman/W/a.json');
+    reopenApp();
+    gh.commit({ 'Postman/W/a.json': '"a-theirs"' }); // o colega enviou com o app fechado
+    const head = gh.head;
+    const result = await client().commitFiles([{ path: 'Postman/W/a.json', content: 'a-mine' }], 'push');
+    expect(result).toEqual({ ok: false, conflicts: ['Postman/W/a.json'] });
+    expect(gh.head).toBe(head);
+  });
+
+  it('a file unchanged on GitHub since the last opening is written normally', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    await client().getFile('Postman/W/a.json');
+    reopenApp();
+    const result = await client().commitFiles([{ path: 'Postman/W/a.json', content: 'a1' }], 'push');
+    expect(result.ok).toBe(true);
+    expect(gh.fileAtHead('Postman/W/a.json')).toBe('a1');
+  });
+
+  it('the version written by this app is also remembered', async () => {
+    gh.commit({ 'Postman/W/a.json': '"a0"' });
+    await client().getFile('Postman/W/a.json');
+    await client().commitFiles([{ path: 'Postman/W/a.json', content: 'a1' }], 'push');
+    reopenApp();
+    const result = await client().commitFiles([{ path: 'Postman/W/a.json', content: 'a2' }], 'push');
+    expect(result.ok).toBe(true);
+    expect(gh.fileAtHead('Postman/W/a.json')).toBe('a2');
+  });
+
+  it('a listing of many files is saved in one write', async () => {
+    const setItem = vi.spyOn(localStorage, 'setItem');
+    for (let i = 0; i < 50; i++) seenShas.set(`batch:${i}`, `s${i}`);
+    await new Promise(r => setTimeout(r, 0));
+    expect(setItem.mock.calls.filter(([k]) => k === SEEN_SHAS_STORAGE_KEY)).toHaveLength(1);
+    setItem.mockRestore();
+  });
+
+  it('unreadable storage starts empty instead of breaking', () => {
+    storage.set(SEEN_SHAS_STORAGE_KEY, '{not json');
+    seenShas.reload();
+    expect(seenShas.get('anything')).toBeUndefined();
+    seenShas.set('k', 'v');
+    expect(seenShas.get('k')).toBe('v');
+  });
+
+  it('keeps at most the limit, dropping the oldest', () => {
+    seenShas.clear();
+    for (let i = 0; i < SEEN_SHAS_MAX_ENTRIES + 10; i++) seenShas.set(`k${i}`, 's');
+    expect(seenShas.size).toBe(SEEN_SHAS_MAX_ENTRIES);
+    expect(seenShas.get('k0')).toBeUndefined();
+    expect(seenShas.get(`k${SEEN_SHAS_MAX_ENTRIES + 9}`)).toBe('s');
   });
 });

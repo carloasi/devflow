@@ -240,10 +240,109 @@ export async function githubRequest(
 // Gravar com ele é o equivalente ao `git push` sem `--force`: se o arquivo
 // mudou desde então, o GitHub recusa e a revisão abre de novo.
 //
-// Em memória, de propósito: todo push começa com uma leitura do remoto (a
-// checagem proativa), que renova estes valores. Sem leitura nenhuma (a
-// checagem falhou), cai no comportamento antigo — sha atual na hora.
-export const seenShas = new Map<string, string>();
+// Salvo entre aberturas do app. Só em memória, fechar o app esquecia a versão
+// vista: na abertura seguinte, um arquivo que alguém mudou enquanto o app
+// estava fechado era gravado com o sha ATUAL (ou visto como "criado por
+// outro") — a mudança dele não era reconhecida como conflito com a sua.
+// O dado local e a base da sincronização já sobrevivem ao fechamento; a
+// versão vista é a terceira peça do mesmo estado.
+//
+// Chave: owner/repo@branch:caminho → sha. Nada de token. Limite de entradas
+// (as mais antigas saem) pra não crescer sem fim na cota do localStorage.
+export const SEEN_SHAS_STORAGE_KEY = "devflow.github.seenShas.v1";
+export const SEEN_SHAS_MAX_ENTRIES = 5000;
+
+class PersistedShaMap {
+  private map: Map<string, string> | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private load(): Map<string, string> {
+    if (this.map) return this.map;
+    this.map = new Map();
+    try {
+      const raw = typeof localStorage !== "undefined" ? localStorage.getItem(SEEN_SHAS_STORAGE_KEY) : null;
+      const parsed: unknown = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) {
+        for (const e of parsed) {
+          if (Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "string") this.map.set(e[0], e[1]);
+        }
+      }
+    } catch {
+      // Ilegível: começa vazio — cai no comportamento de antes (sha atual).
+    }
+    return this.map;
+  }
+
+  /** Grava agora o que estiver pendente. */
+  flush(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (!this.map) return;
+    try {
+      localStorage.setItem(SEEN_SHAS_STORAGE_KEY, JSON.stringify([...this.map]));
+    } catch {
+      // Sem espaço / sem storage: segue em memória nesta sessão.
+    }
+  }
+
+  // Uma listagem lembra centenas de arquivos de uma vez: junta numa gravação só.
+  private scheduleSave() {
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => this.flush(), 0);
+  }
+
+  get(key: string): string | undefined {
+    return this.load().get(key);
+  }
+
+  has(key: string): boolean {
+    return this.load().has(key);
+  }
+
+  set(key: string, sha: string): this {
+    const map = this.load();
+    if (map.get(key) === sha) return this;
+    map.delete(key); // vai pro fim: as menos recentes saem primeiro
+    map.set(key, sha);
+    while (map.size > SEEN_SHAS_MAX_ENTRIES) map.delete(map.keys().next().value as string);
+    this.scheduleSave();
+    return this;
+  }
+
+  delete(key: string): boolean {
+    const removed = this.load().delete(key);
+    if (removed) this.scheduleSave();
+    return removed;
+  }
+
+  clear(): void {
+    this.load().clear();
+    this.scheduleSave();
+  }
+
+  get size(): number {
+    return this.load().size;
+  }
+
+  /** Esquece o que está em memória; o próximo acesso relê do storage (abertura do app; testes). */
+  reload(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.map = null;
+  }
+}
+
+export const seenShas = new PersistedShaMap();
+
+// O app pode fechar antes da gravação agendada.
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => seenShas.flush());
+  window.addEventListener("pagehide", () => seenShas.flush());
+}
 
 /** Uma entrada da árvore do repositório (git/trees). */
 export interface TreeEntry {
@@ -858,7 +957,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
           if (seen !== undefined) {
             if (current[c.path] !== seen) conflicts.push(c.path);
           } else if (!c.delete && current[c.path] !== undefined) {
-            // Nunca lido NESTA sessão, mas existe lá: alguém o criou depois
+            // Nunca lido por este app, mas existe lá: alguém o criou depois
             // da última leitura (ex.: duas pessoas criando a mesma collection).
             // Gravar por cima apagaria o dele — vira conflito, e o merge do
             // push relê e decide (na segunda volta ele já foi lido).
