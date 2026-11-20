@@ -4,7 +4,7 @@ import type { Environment } from '@/app/types/Environment';
 import { adoptedRemoteBase, nodeHashes, type NodeHashes } from '@/lib/syncBase';
 import { rebaseCollections } from './rebase';
 import { withSubtreeFrom } from './subtreePush';
-import { adoptedRemoteEnvBase, environmentHashes, rebaseEnvironments } from './envMerge';
+import { adoptedRemoteEnvBase, environmentHashes, rebaseEnvironments, remoteEnvIdAdoption } from './envMerge';
 
 // O merge automático do push grava aqui o que veio do GitHub ANTES do commit.
 // Se o commit falha (rede, cancelar, alguém enviando sem parar), o push
@@ -179,3 +179,20 @@ describe('adoptedRemoteEnvBase', () => {
     expect(Object.keys(hashes).sort()).toEqual(['env:e1', 'env:e1:a']);
   });
 });
+
+describe('remoteEnvIdAdoption', () => {
+  it('an environment matched only by name takes the GitHub id', () => {
+    expect(remoteEnvIdAdoption([env({ a: '1' }, 'e1')], [env({ a: '2' }, 'gh-1')])).toEqual(new Map([['e1', 'gh-1']]));
+  });
+
+  it('same id, or the GitHub id already used by another one here: nothing to adopt', () => {
+    expect(remoteEnvIdAdoption([env({}, 'e1')], [env({}, 'e1')]).size).toBe(0);
+    const other = { ...env({}, 'gh-1'), name: 'other' };
+    expect(remoteEnvIdAdoption([env({}, 'e1'), other], [env({}, 'gh-1')]).size).toBe(0);
+  });
+
+  it('no environment on GitHub: nothing', () => {
+    expect(remoteEnvIdAdoption([env({}, 'e1')], []).size).toBe(0);
+  });
+});
+

@@ -337,3 +337,26 @@ export function rebaseEnvironments(
     incoming, keptMine, keptMineNames, incomingNames, outgoingNames, sessionTokenNames, values,
   };
 }
+
+/**
+ * Environments daqui casados com os do GitHub SÓ pelo nome (o mesmo "Dev"
+ * criado em duas máquinas tem um id em cada uma): daqui → id de lá. Quem
+ * chama troca o id daqui pelo de lá, e o caso especial de "id diferente"
+ * some de todo o resto (base, pendência, merge). Só quando o id de lá não é
+ * de outro environment daqui.
+ */
+export function remoteEnvIdAdoption(
+  local: Environment[] | null | undefined,
+  remote: Environment[] | null | undefined
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const localIds = new Set((local ?? []).map(e => e?.id).filter(Boolean));
+  for (const pair of matchEnvironments(local ?? [], remote ?? [])) {
+    const mine = pair.local?.id;
+    const theirs = pair.remote?.id;
+    if (!mine || !theirs || mine === theirs || localIds.has(theirs)) continue;
+    out.set(mine, theirs);
+  }
+  return out;
+}
+

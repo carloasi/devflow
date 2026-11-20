@@ -409,6 +409,16 @@ describe('listing — one call for the whole repository', () => {
     ]);
   });
 
+  it('a branch with "/" also lists in one call (through the commit at its top)', async () => {
+    BRANCH = `feature/${Math.random().toString(36).slice(2)}`;
+    gh.commit(files);
+    gh.calls = [];
+    const listing = await client().workspaceListing('Postman/W');
+    expect(listing.collectionPaths).toEqual(['Postman/W/api.postman_collection.json']);
+    expect(gh.calls.some(c => c.url.includes('/contents/'))).toBe(false);
+    expect(gh.calls.filter(c => c.url.includes('/git/trees/'))).toHaveLength(1);
+  });
+
   it('a tree too big (cut by GitHub) falls back to the per-folder listing', async () => {
     gh.commit(files);
     gh.truncateTrees = true;

@@ -146,6 +146,9 @@ export function rateLimitErrorFrom(res: Response): GitHubRateLimitError | null {
 //    fundo a cada 3 minutos e de reler um arquivo que já se leu.
 
 /** Espera mais longa que vale aguardar sozinho, antes de desistir. */
+/** Quantos arquivos sobem ao mesmo tempo num push. */
+export const BLOB_UPLOAD_CONCURRENCY = 4;
+
 export const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 const MAX_ATTEMPTS = 4;
 const TRANSIENT = new Set([502, 503, 504]);
@@ -432,8 +435,20 @@ export class GitHubStorageClient {
    * na listagem por pasta, como antes.
    */
   async repoTree(ref?: string): Promise<TreeEntry[] | null> {
-    const target = ref || this.config.branch;
-    if (target.includes("/")) return null;
+    let target = ref || this.config.branch;
+    // Branch com "/" ("feature/x") não cabe na rota da árvore: resolve antes
+    // o commit do topo dela (a rota da ref aceita os segmentos) e lista a
+    // árvore desse commit. Antes caía na listagem pasta por pasta, com o
+    // limite de 1.000 arquivos por pasta.
+    if (target.includes("/")) {
+      const segments = target.split("/").map(encodeURIComponent).join("/");
+      const head = await this.gitJson<{ object: { sha: string } }>(`/ref/heads/${segments}`);
+      if (!head.data) {
+        if (head.status === 404 || head.status === 409) return [];
+        throw new Error(`HTTP ${head.status} while reading branch "${target}" on GitHub`);
+      }
+      target = head.data.object.sha;
+    }
     const res = await githubRequest(this.gitUrl(`/trees/${encodeURIComponent(target)}?recursive=1`), {
       method: "GET",
       headers: this.headers(),
@@ -678,6 +693,26 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
     } catch (err: any) {
       console.error(`❌ Erro ao baixar ${path}:`, err);
       throw new Error(`Error downloading ${path}: ${err.message}`);
+    }
+  }
+
+  /**
+   * A senha de criptografia deste cliente abre os arquivos do repositório?
+   * Tenta UM arquivo cifrado (o primeiro .json sob `root`). `true` = abre;
+   * `false` = não abre (a senha é outra); `null` = não deu pra dizer (nada
+   * lá ainda, ou falha de rede). Só olha: não conta como versão vista.
+   */
+  async passphraseOpensRepo(root: string): Promise<boolean | null> {
+    try {
+      const tree = await this.repoTree();
+      const prefix = `${root.replace(/\/+$/, "")}/`;
+      const sample = (tree ?? []).find((e) => e.type === "blob" && e.path.startsWith(prefix) && /\.json$/i.test(e.path));
+      if (!sample) return null;
+      await this.getFile(sample.path, undefined, { peek: true });
+      return true;
+    } catch (e) {
+      // getFile: "Failed to read …" = não decifrou nem é JSON puro.
+      return /Failed to read/.test((e as Error)?.message ?? "") ? false : null;
     }
   }
 
@@ -983,7 +1018,15 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
         if (there && contentBySha.get(there) === prints.get(w.path)) unchanged.set(w.path, there);
       }
       const toWrite = writes.filter((w) => !unchanged.has(w.path));
-      for (const w of toWrite) await blobFor(w);
+      // Em paralelo, poucos de cada vez: um workspace grande subia um arquivo
+      // por vez. Um que falhe derruba o envio (os blobs soltos não aparecem
+      // em lugar nenhum até o commit).
+      const pending = [...toWrite];
+      await Promise.all(
+        Array.from({ length: Math.min(BLOB_UPLOAD_CONCURRENCY, pending.length) }, async () => {
+          for (let next = pending.shift(); next; next = pending.shift()) await blobFor(next);
+        })
+      );
       const finish = async (extra: Record<string, string | null>) => {
         const written: FileShas = {};
         const recorded: Record<string, string | null> = { ...extra };

@@ -151,6 +151,13 @@ import { acquireSyncLock, acquireSyncLockQueued, holdsSyncLock, releaseSyncLock,
  * Pega a trava de sync esperando a vez (lib/sync/syncLock, fila): com outro
  * push ou pull rodando, avisa que está esperando em vez de falhar.
  */
+/** O envio que a revisão aberta destrava quando aplicada (ver reviewPush). */
+type ReviewPush =
+  | { kind: 'collection'; item: CollectionItem }
+  | { kind: 'item'; item: CollectionItem }
+  | { kind: 'all' }
+  | { kind: 'workspace'; workspace: string };
+
 function waitForSyncTurn(what: string): Promise<string | null> {
   return acquireSyncLockQueued(what, {
     onWait: running => {
@@ -165,11 +172,12 @@ import { exampleNameFor } from '@/lib/exampleName';
 import { withLocalOnlyValues } from '@/lib/sync/pulledEnvironments';
 import { buildSyncOverview, namePathTo, withContentPreviews, type SyncOverview } from '@/lib/sync/syncOverview';
 import { discardEnvironmentChange, discardLocalChange } from '@/lib/sync/discardChange';
+import { GitHubRateLimitError } from '@/lib/sync/githubStorage';
 import { envPendingAfterDiscard, pendingAfterDiscard, pendingIdsToKeepLocal, pushVoidsUndo, remoteRenameFailure, undoDecision } from '@/lib/sync/workspaceSyncState';
 import { asCancelled, SyncCancelledError, isSyncCancelRequested, requestSyncCancel, resetSyncCancel, SYNC_CANCELLED_MESSAGE, throwIfSyncCancelled, captureSyncStatus, withoutActions, markResumeAfterReview, openSyncCenter, reportSyncStatus, setKnownConflicts, setSyncCenterBusy, takeResumeAfterReview, type SyncAction, type SyncActionResult, type SyncActionScope, type SyncCenterTab } from '@/lib/sync/syncCenterStore';
 import { SyncCenter } from '@/components/SyncCenter/SyncCenter';
 import { isInSubtree, withSubtreeFrom } from '@/lib/sync/subtreePush';
-import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, envVarsPrefix, rebaseEnvironments } from '@/lib/sync/envMerge';
+import { adoptedRemoteEnvBase, ENV_BASE_PREFIX, environmentHashes, envVarsPrefix, rebaseEnvironments, remoteEnvIdAdoption } from '@/lib/sync/envMerge';
 
 // Grava na base o que o merge automático do push acabou de trazer pra cá
 // (ver adoptedRemoteBase / adoptedRemoteEnvBase).
@@ -1086,14 +1094,35 @@ export default function AppLayout() {
    * para resolver, e o envio continua de onde parou em vez de obrigar a
    * clicar em "Push to GitHub" outra vez.
    */
-  const [pushAfterDiff, setPushAfterDiff] = useState<CollectionItem | null>(null);
-  // Mesma ideia do pushAfterDiff acima, mas pro push INTEIRO (handlePushEverything,
-  // via onCompareRemote com isPushConflict) — sem item nenhum pra guardar, só
-  // "depois de mesclar, reenvie tudo".
-  const [pushAllAfterDiff, setPushAllAfterDiff] = useState(false);
+  //
+  // UM envio pendente só (reviewPush): antes eram quatro estados separados
+  // (collection, tudo, item, outro workspace), e um esquecido marcado fazia a
+  // próxima revisão aplicada — de qualquer coisa — enviar o que ele guardava.
+  // Marcar um novo substitui o anterior. Os quatro nomes de antes continuam,
+  // derivados dele, e os "set" só limpam se o pendente for do mesmo tipo.
+  const [reviewPush, setReviewPush] = useState<ReviewPush | null>(null);
+  // Collection inteira (o push de uma collection que esbarrou em conflito).
+  const pushAfterDiff = reviewPush?.kind === 'collection' ? reviewPush.item : null;
+  // O push INTEIRO (handlePushEverything, via onCompareRemote com
+  // isPushConflict) — "depois de mesclar, reenvie tudo".
+  const pushAllAfterDiff = reviewPush?.kind === 'all';
   // "Push deste item" que esbarrou em conflito: depois da revisão, o envio
   // do item recomeça (via pushItemRef — handlePushItem é declarado depois).
-  const [pushItemAfterDiff, setPushItemAfterDiff] = useState<CollectionItem | null>(null);
+  const pushItemAfterDiff = reviewPush?.kind === 'item' ? reviewPush.item : null;
+  const setPushAfterDiff = useCallback(
+    (item: CollectionItem | null) =>
+      setReviewPush(prev => (item ? { kind: 'collection', item } : prev?.kind === 'collection' ? null : prev)),
+    []
+  );
+  const setPushAllAfterDiff = useCallback(
+    (on: boolean) => setReviewPush(prev => (on ? { kind: 'all' } : prev?.kind === 'all' ? null : prev)),
+    []
+  );
+  const setPushItemAfterDiff = useCallback(
+    (item: CollectionItem | null) =>
+      setReviewPush(prev => (item ? { kind: 'item', item } : prev?.kind === 'item' ? null : prev)),
+    []
+  );
   const pushItemRef = useRef<((item: CollectionItem) => Promise<void>) | null>(null);
   // Envio de item que a revisão dispara no próximo tick (ver handleApplyDiff).
   const deferredPushRef = useRef<Promise<void> | null>(null);
@@ -1101,7 +1130,13 @@ export default function AppLayout() {
   const lastSyncPeekRef = useRef<{ workspace: string; remoteTree: CollectionItem[]; remoteEnvs: Environment[] } | null>(null);
   // Conflito ao enviar um workspace que pode não ser o selecionado agora (menu
   // de workspaces) — guarda o NOME pra saber qual reenviar depois da mescla.
-  const [pushWorkspaceAfterDiff, setPushWorkspaceAfterDiff] = useState<string | null>(null);
+  // (o quarto tipo de reviewPush, acima).
+  const pushWorkspaceAfterDiff = reviewPush?.kind === 'workspace' ? reviewPush.workspace : null;
+  const setPushWorkspaceAfterDiff = useCallback(
+    (workspace: string | null) =>
+      setReviewPush(prev => (workspace ? { kind: 'workspace', workspace } : prev?.kind === 'workspace' ? null : prev)),
+    []
+  );
   // Base local do merge quando o conflito é de OUTRO workspace: `collections`
   // é sempre o workspace SELECIONADO, que pode não ter nada a ver com o que
   // está em conflito — sem isso a mescla usaria a árvore errada.
@@ -1399,6 +1434,9 @@ export default function AppLayout() {
   const receiveItemRef = useRef<((itemId: string, label: string) => Promise<void>) | null>(null);
   // O push, num fluxo só (runPush, declarado mais abaixo).
   const runPushRef = useRef<((request: PushRequest) => Promise<'pushed' | 'review' | 'nothing' | 'failed'>) | null>(null);
+  // Push parado pelo limite de requisições da HORA (espera longa demais pra
+  // ficar esperando dentro do envio): agendado pra quando o GitHub liberar.
+  const rateLimitRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Mesma razão do tabsRef: os callbacks de sync têm deps vazias e leriam
   // uma árvore congelada na primeira renderização.
   const collectionsRef = useRef<CollectionItem[]>(collections);
@@ -1859,6 +1897,35 @@ const forgetRemoteBaseKeepLocal = async (workspaceName: string) => {
   if (undoRef.current?.workspace === workspaceName) undoRef.current = null;
   if (isOpen) setPendingPush(readPendingPush(workspaceName));
 };
+
+// Environments daqui casados com os do GitHub só pelo nome passam a ter o
+// id de lá (lib/sync/envMerge remoteEnvIdAdoption): o environment ativo e a
+// pendência vão junto. Só no workspace aberto (é o que está em memória).
+// Devolve se mudou algo — quem chama relê os environments dos refs.
+const adoptRemoteEnvIdsHere = useCallback(async (workspaceName: string, remoteEnvs: Environment[]): Promise<boolean> => {
+  if (workspaceName !== selectedWorkspaceRef.current) return false;
+  const remap = remoteEnvIdAdoption(environmentsRef.current, remoteEnvs);
+  if (remap.size === 0) return false;
+  const next = environmentsRef.current.map(e => (remap.has(e.id) ? { ...e, id: remap.get(e.id)! } : e));
+  suppressEnvPendingMarkRef.current = true;
+  environmentsRef.current = next;
+  setEnvironments(next);
+  await saveWorkspaceEnvironments(workspaceName, next);
+  const pendingEnvs = readPendingPush(workspaceName).environments;
+  const moved = pendingEnvs.filter(id => remap.has(id));
+  if (moved.length > 0) {
+    clearEnvironmentsPendingPush(workspaceName, moved);
+    markEnvironmentsPendingPush(workspaceName, moved.map(id => remap.get(id)!));
+    setPendingPush(readPendingPush(workspaceName));
+  }
+  const active = selectedEnvIdRef.current;
+  if (active && remap.has(active)) {
+    selectedEnvIdRef.current = remap.get(active)!;
+    setSelectedEnvId(remap.get(active)!);
+    await saveActiveEnvironmentId(workspaceName, remap.get(active)!);
+  }
+  return true;
+}, [setEnvironments, setSelectedEnvId]);
 
 const handleCreateWorkspace = useCallback(async (workspace: WorkspaceInfo) => {
   isSwitchingWorkspaceRef.current = true;
@@ -4377,7 +4444,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
 
     if (nodes.length === 0) return { summary, hasChanges: false };
     return { summary: `${summary} (${nodes.length} item${nodes.length === 1 ? '' : 's'})`, hasChanges: true };
-  }, [collections, importData]);
+  }, [collections, importData, setPushAllAfterDiff]);
 
   // Conflito ao enviar um workspace pelo menu (handlePushSingleWorkspace) —
   // esse workspace pode não ser o selecionado agora, então a base local do
@@ -4411,7 +4478,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     setPushWorkspaceAfterDiff(workspaceName);
     openReviewDialog();
     return true;
-  }, [importData]);
+  }, [importData, setPushWorkspaceAfterDiff]);
 
   // Guarda o estado de antes de um pull/revisão — o "Desfazer" volta a ele.
   // Só o workspace aberto (é o que tem a árvore em memória).
@@ -4899,6 +4966,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         return;
       }
       const remoteEnvs = importData(remote.environments).environments ?? [];
+      // Casados só pelo nome: o daqui adota o id de lá antes da revisão.
+      await adoptRemoteEnvIdsHere(workspace, remoteEnvs);
 
       // Arquivo antigo de uma renomeação ainda no GitHub (mesmo id de outro):
       // a leitura usou o mais novo. Diz isso, em vez de calar.
@@ -5015,7 +5084,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       pullingCollectionRef.current = false;
       releaseSyncLock(lock);
     }
-  }, [environments, importData, handleCompareRemote, handlePullMarkers, openEnvironmentReview, setEnvironments, takeUndoSnapshot, mergeReportSections, undoLastPull, syncText]);
+  }, [environments, importData, adoptRemoteEnvIdsHere, handleCompareRemote, handlePullMarkers, openEnvironmentReview, setEnvironments, takeUndoSnapshot, mergeReportSections, undoLastPull, syncText]);
 
   // Envia UM environment, com o mesmo merge por variável do push do
   // workspace (lib/sync/envMerge) — o "Só enviar" da Central aberta a partir
@@ -5435,7 +5504,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // `diffTarget`, `environments` e `diffRemoteEnvs` entram de verdade: sem
     // eles o callback aplicaria o ramo de environment com dados congelados da
     // primeira renderização — e escreveria valores velhos por cima dos atuais.
-  }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments, pushAfterDiff, pushAllAfterDiff, pushWorkspaceAfterDiff, pushItemAfterDiff, diffLocalOverride, pendingEnvReview, openEnvironmentReview, diffReviewScope, diffSnapshotLabel, diffNodes, diffBase, takeUndoSnapshot, undoLastPull, syncText]);
+  }, [collections, diffRemoteTree, diffTarget, environments, diffRemoteEnvs, setEnvironments, pushAfterDiff, pushAllAfterDiff, pushWorkspaceAfterDiff, pushItemAfterDiff, diffLocalOverride, pendingEnvReview, openEnvironmentReview, diffReviewScope, diffSnapshotLabel, diffNodes, diffBase, takeUndoSnapshot, undoLastPull, syncText, setPushAfterDiff, setPushAllAfterDiff, setPushItemAfterDiff, setPushWorkspaceAfterDiff]);
 
   // Aplicar a revisão de um pull é a parte que GRAVA: a árvore e a base da
   // sincronização daqui. A revisão fica aberta o tempo que a pessoa quiser,
@@ -5610,7 +5679,7 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     } finally {
       pullingCollectionRef.current = false;
     }
-  }, [collections, importData, handlePullMarkers, takeUndoSnapshot]);
+  }, [collections, importData, handlePullMarkers, takeUndoSnapshot, setPushAfterDiff, setPushItemAfterDiff]);
 
   // "Receber só este" (Central): traz do GitHub SÓ um item — collection,
   // pasta ou request —, sem mexer no resto da árvore. Mesma mescla do pull
@@ -5642,6 +5711,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     // O catálogo de marcadores vem junto, como no pull de uma collection
     // (união, nunca substituição): sem ele, um marcador que o colega criou e
     // pôs no item recebido chegava como marca invisível até o próximo pull.
+    // Desfazer: o estado de ANTES dos marcadores e do item (como no pull).
+    await takeUndoSnapshot(workspace);
     if (remote.markers) await handlePullMarkers(workspace, remote.markers);
 
     const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
@@ -5721,9 +5792,15 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
       await githubSyncRef.current?.markReviewed(workspace, { rootIds: [...rootIds] }).catch(() => undefined);
     }
 
-    toast.success(`"${label}" received from GitHub.`);
-    reportSyncStatus('success', `"${label}" received from GitHub.`);
-  }, [importData, handlePullCollection, handlePullMarkers]);
+    // Desfazer, como no pull: volta o item (e o catálogo, a base e o
+    // registro de sincronizado) ao de antes de receber.
+    const undo = () => void undoLastPull();
+    toast.success(`"${label}" received from GitHub.`, {
+      duration: 15000,
+      cancel: { label: syncText.undo, onClick: undo },
+    });
+    reportSyncStatus('success', `"${label}" received from GitHub.`, { label: syncText.undo, run: undo });
+  }, [importData, handlePullCollection, handlePullMarkers, takeUndoSnapshot, undoLastPull, syncText]);
 
   const handleReceiveItem = useCallback(async (itemId: string, label: string) => {
     // Um sync por vez (lib/sync/syncLock).
@@ -5807,6 +5884,8 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
         const remoteTree = backfillExampleRequests(importData(remote.collections).collections ?? []);
         const remoteEnvs = importData(remote.environments).environments ?? [];
         const base = await loadSyncBase(workspace);
+        // Casados só pelo nome: o daqui adota o id de lá antes do merge.
+        if (isCurrent) await adoptRemoteEnvIdsHere(workspace, remoteEnvs);
 
         // A árvore DAQUI de agora (depois das esperas).
         const stored = isCurrent ? null : await loadWorkspaceLocalData(workspace);
@@ -5927,6 +6006,35 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     } catch (e) {
       if (e instanceof SyncCancelledError) {
         reportSyncStatus('error', SYNC_CANCELLED_MESSAGE);
+        return 'failed';
+      }
+      // Limite da HORA: a espera (minutos) é longa demais pra ficar dentro do
+      // envio (githubRequest só espera até MAX_RATE_LIMIT_WAIT_MS). O push
+      // fica agendado pra quando o GitHub liberar — de novo do começo, com o
+      // merge normal: o que foi revisado antes pode já não ser o GitHub de lá.
+      // Só o envio de primeiro nível: um que roda dentro de outra operação
+      // (o Aplicar da revisão) volta pra ela.
+      if (e instanceof GitHubRateLimitError && e.retryAfterMs && !inherited) {
+        if (rateLimitRetryRef.current) clearTimeout(rateLimitRetryRef.current);
+        const at = new Date(Date.now() + e.retryAfterMs + 5_000);
+        const when = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        rateLimitRetryRef.current = setTimeout(() => {
+          rateLimitRetryRef.current = null;
+          void runPushRef.current?.({ workspace: request.workspace, scope: request.scope, mode: request.mode === 'force' ? 'force' : 'normal' });
+        }, at.getTime() - Date.now());
+        const cancel = () => {
+          if (rateLimitRetryRef.current) clearTimeout(rateLimitRetryRef.current);
+          rateLimitRetryRef.current = null;
+          toast.info('Automatic push cancelled.');
+        };
+        const message = `${e.message} "${label}" will be pushed again automatically at ${when}.`;
+        gh?.report('error', message);
+        reportSyncStatus('error', message, { label: 'Cancel', run: cancel });
+        toast.warning('GitHub rate limit reached', {
+          description: `"${label}" will be pushed again automatically at ${when}.`,
+          duration: 15000,
+          action: { label: 'Cancel', onClick: cancel },
+        });
         return 'failed';
       }
       fail(`Push failed: ${(e as Error)?.message ?? String(e)}`);
@@ -7909,10 +8017,8 @@ const handleDeleteWorkspace = useCallback(async (path: string) => {
     // collection, dispararia um push que ninguém pediu. Vale pros QUATRO
     // tipos de envio pendente — antes só o de uma collection era limpo, e
     // um "Pull" revisado depois de um push cancelado reenviava o workspace.
-    setPushAfterDiff(null)
-    setPushAllAfterDiff(false)
-    setPushWorkspaceAfterDiff(null)
-    setPushItemAfterDiff(null)
+    // Hoje é um pendente só (reviewPush).
+    setReviewPush(null)
     setDiffLocalOverride(null)
     setPendingEnvReview(null)
     setDiffReviewScope(null)

@@ -16,6 +16,8 @@ import type { CollectionItem } from '@/app/types/CollectionItem';
 import type { Environment } from '@/app/types/Environment';
 import type { PushScope } from "@/lib/sync/pushPipeline";
 import { syncedPathsToForget } from "@/lib/sync/workspaceSyncState";
+import { firstRealChange, WHO_CHANGED_MAX_READS } from "@/lib/sync/whoChanged";
+import { listWorkspaces } from "@/storage/workspaceStore";
 import { acquireSyncLock, acquireSyncLockQueued, holdsSyncLock, releaseSyncLock, SYNC_BUSY_MESSAGE, syncLockHolder, syncWaitMessage } from "@/lib/sync/syncLock";
 import { stripStarredFlags } from "@/components/collection-tree/utils/tree.utils";
 import { clearDerivedKeyCache, MissingPassphraseError } from "@/lib/syncCrypto";
@@ -912,6 +914,10 @@ const [deletingWorkspace, setDeletingWorkspace] = useState(false);
 const [remoteWorkspaces, setRemoteWorkspaces] = useState<RepoItem[] | null>(null);
 const [loadingRemoteWorkspaces, setLoadingRemoteWorkspaces] = useState(false);
 const [importingName, setImportingName] = useState<string | null>(null);
+// Os workspaces que existem aqui — pra marcar, na lista do repositório, as
+// pastas que só existem no GitHub (um renomear que não moveu a pasta, um
+// workspace apagado só daqui): dá pra importá-las ou apagá-las de lá.
+const [localWorkspaceNames, setLocalWorkspaceNames] = useState<Set<string> | null>(null);
 
 const handleRequestDeleteRemoteWorkspace = useCallback(async () => {
   if (!isConfigValid || !remotePath) return;
@@ -964,6 +970,8 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
       );
     }
     setPendingDeleteWorkspace(null);
+    // Sai também da lista do repositório, se ela estiver aberta.
+    setRemoteWorkspaces((prev) => prev?.filter((w) => w.path !== target.remotePath) ?? prev);
     if (target.workspace === workspace) {
       setCollectionPaths([]);
       setEnvPaths([]);
@@ -982,12 +990,33 @@ const handleConfirmDeleteRemoteWorkspace = useCallback(async () => {
   }
 }, [pendingDeleteWorkspace, client, workspace, onRemoteWorkspaceDeleted]);
 
+// Senha diferente da do time só aparecia depois, como "não consegui ler o
+// arquivo" num pull. Confere ao salvar, num arquivo do repositório.
+const verifyPassphrase = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed || !isConfigValid) return;
+  void new GitHubStorageClient(config, trimmed).passphraseOpensRepo(WORKSPACES_ROOT).then((opens) => {
+    if (opens === false) {
+      showStatus(
+        "error",
+        "✗ This passphrase does not open the files in this repository. Use the same passphrase as the rest of the team — pushing with a different one makes your files unreadable for them."
+      );
+    } else if (opens === true) {
+      showStatus("success", "Passphrase checked: it opens the files in this repository.");
+    }
+  });
+};
+
 const handleListRemoteWorkspaces = useCallback(async () => {
   if (!isConfigValid) return;
   setLoadingRemoteWorkspaces(true);
   try {
-    const folders = await client().listFolders(WORKSPACES_ROOT);
+    const [folders, locals] = await Promise.all([
+      client().listFolders(WORKSPACES_ROOT),
+      listWorkspaces().catch(() => null),
+    ]);
     setRemoteWorkspaces(folders);
+    setLocalWorkspaceNames(locals ? new Set(locals.map((w) => w.path)) : null);
     if (folders.length === 0) {
       showStatus("info", `No workspace found under "${WORKSPACES_ROOT}/" in this repository.`);
     }
@@ -997,6 +1026,25 @@ const handleListRemoteWorkspaces = useCallback(async () => {
     setRemoteWorkspaces(null);
   } finally {
     setLoadingRemoteWorkspaces(false);
+  }
+}, [isConfigValid, client]);
+
+// Apagar do GitHub uma pasta que só existe lá: a mesma confirmação (e a
+// mesma releitura da lista ao confirmar) da exclusão do workspace aberto.
+const handleRequestDeleteRemoteFolder = useCallback(async (folder: RepoItem) => {
+  if (!isConfigValid) return;
+  setDeletingWorkspace(true);
+  try {
+    const files = await client().listAllFilesRecursive(folder.path);
+    if (files.length === 0) {
+      showStatus("info", `No files found in "${folder.path}" — nothing to delete.`);
+      return;
+    }
+    setPendingDeleteWorkspace({ files, workspace: folder.name, remotePath: folder.path });
+  } catch (e) {
+    showStatus("error", `✗ Failed to check files: ${(e as Error)?.message ?? String(e)}`);
+  } finally {
+    setDeletingWorkspace(false);
   }
 }, [isConfigValid, client]);
 
@@ -1131,7 +1179,19 @@ useEffect(() => {
     const key = `${storage.repoKey}|${path}@${fetched.shas[path] ?? ""}`;
     if (lastCommitCache.has(key)) return lastCommitCache.get(key) ?? null;
     try {
-      const [latest] = await storage.listCommits(path, 1);
+      // O commit que mudou o CONTEÚDO (lib/sync/whoChanged): um push de outra
+      // collection, por uma versão do app que regravava tudo, não conta.
+      const commits = await storage.listCommits(path, WHO_CHANGED_MAX_READS + 2);
+      const read = (sha: string) => {
+        const at = `${storage.repoKey}|${path}@${sha}`;
+        let pending = fileAtCommitCache.get(at);
+        if (!pending) {
+          pending = storage.getFile(path, sha).then((f) => f?.content ?? null).catch(() => null);
+          fileAtCommitCache.set(at, pending);
+        }
+        return pending;
+      };
+      const latest = await firstRealChange(commits, read);
       lastCommitCache.set(key, latest ?? null);
       return latest ?? null;
     } catch {
@@ -2523,7 +2583,10 @@ useImperativeHandle(ref, () => ({
                     className="w-full bg-pm-hover border border-pm-border text-pm-text pr-8 pl-2 py-1.5 rounded-md text-xs outline-none focus:border-[#007acc] transition-colors"
                     placeholder="Required to encrypt what goes to GitHub"
                     defaultValue={passphrase}
-                    onBlur={(e) => savePassphrase(e.target.value)}
+                    onBlur={(e) => {
+                      const value = e.target.value;
+                      void savePassphrase(value).then(() => verifyPassphrase(value));
+                    }}
                   />
                   <button
                     type="button"
@@ -2610,21 +2673,40 @@ useImperativeHandle(ref, () => ({
                       No workspace found
                     </div>
                   ) : (
-                    remoteWorkspaces.map((w) => (
-                      <button
-                        key={w.path}
-                        type="button"
-                        onClick={() => handleImportClick(w.name)}
-                        disabled={importingName === w.name}
-                        className="flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-pm-text hover:bg-pm-row-active transition-colors cursor-pointer text-left disabled:opacity-50 disabled:cursor-wait"
-                      >
-                        <span className="text-pm-text-muted shrink-0"><FolderIcon /></span>
-                        <span className="flex-1 truncate">{w.name}</span>
-                        {importingName === w.name && (
-                          <span className="text-[10px] text-pm-text-muted shrink-0">importing...</span>
-                        )}
-                      </button>
-                    ))
+                    remoteWorkspaces.map((w) => {
+                      const onlyOnGitHub = !!localWorkspaceNames && !localWorkspaceNames.has(w.name);
+                      return (
+                        <div key={w.path} className="flex items-center gap-1 rounded hover:bg-pm-row-active transition-colors">
+                          <button
+                            type="button"
+                            onClick={() => handleImportClick(w.name)}
+                            disabled={importingName === w.name}
+                            title={onlyOnGitHub ? "Not on this computer — import it here" : "Open this workspace"}
+                            className="flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-pm-text cursor-pointer text-left disabled:opacity-50 disabled:cursor-wait"
+                          >
+                            <span className="text-pm-text-muted shrink-0"><FolderIcon /></span>
+                            <span className="flex-1 truncate">{w.name}</span>
+                            {importingName === w.name ? (
+                              <span className="text-[10px] text-pm-text-muted shrink-0">importing...</span>
+                            ) : onlyOnGitHub ? (
+                              <span className="text-[10px] text-amber-400/90 shrink-0">only on GitHub</span>
+                            ) : null}
+                          </button>
+                          {onlyOnGitHub && (
+                            <button
+                              type="button"
+                              onClick={() => void handleRequestDeleteRemoteFolder(w)}
+                              disabled={deletingWorkspace}
+                              title={`Delete "${w.name}" from GitHub`}
+                              aria-label={`Delete "${w.name}" from GitHub`}
+                              className="shrink-0 h-6 px-1.5 mr-1 rounded text-[10px] text-rose-400 hover:bg-rose-500/15 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               )}
