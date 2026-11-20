@@ -79,9 +79,10 @@ export function namePathIn(tree: CollectionItem[], id: string): string[] | null 
 }
 
 /**
- * O item `id` daqui volta a ser o do GitHub. Pasta volta inteira, com o que
- * tinha dentro lá — e o que estava dentro dela lá mas foi movido pra outro
- * lugar aqui volta pra dentro dela (senão ficaria duplicado).
+ * O item `id` daqui volta a ser o do GitHub. Pasta volta com o que tinha
+ * dentro lá — e o que estava dentro dela lá mas foi movido pra outro lugar
+ * aqui volta pra dentro dela (senão ficaria duplicado). O que foi CRIADO aqui
+ * dentro dela fica (ver keepCreatedHere).
  */
 export function discardLocalChange(
   local: CollectionItem[],
@@ -95,6 +96,10 @@ export function discardLocalChange(
   if (!theirs) return { tree: removeIds(local, new Set([id])), action: 'deleted' };
 
   const clone = structuredClone(theirs);
+  // O que foi CRIADO aqui dentro da pasta (não existe em lugar nenhum lá)
+  // continua nela: tem a própria linha na Central, e descartar a mudança da
+  // pasta (um nome, a ordem) apagava junto as requests novas, sem aviso.
+  if (mine) keepCreatedHere(mine, clone, remote);
   // Tudo que a versão de lá traz sai de onde estiver aqui (o próprio item, e
   // filhos que aqui foram movidos pra fora dele).
   const base = removeIds(local, idsOf(clone));
@@ -120,6 +125,29 @@ export function discardLocalChange(
   const here = locate(local, id);
   if (!here) return { tree: local, action: 'none' };
   return { tree: insertAt(base, here.parentId, here.index, clone), action: 'reverted' };
+}
+
+/**
+ * Põe em `clone` (a pasta como está no GitHub) os itens que existem dentro
+ * de `mine` (a pasta daqui) e em lugar nenhum de `remote` — criados aqui —,
+ * no mesmo pai e posição de aqui (no fim do pai, se ele não existir lá).
+ * Muda `clone` no lugar.
+ */
+function keepCreatedHere(mine: CollectionItem, clone: CollectionItem, remote: CollectionItem[]): void {
+  if (!mine.item?.length) return;
+  const walk = (parent: CollectionItem) => {
+    (parent.item ?? []).forEach((child, index) => {
+      if (findItem(remote, child.id)) {
+        walk(child);
+        return;
+      }
+      // Novo aqui (e tudo o que tem dentro vai junto, inteiro).
+      const target = parent.id === mine.id ? clone : findItem([clone], parent.id) ?? clone;
+      const siblings = (target.item ??= []);
+      siblings.splice(Math.min(index, siblings.length), 0, structuredClone(child));
+    });
+  };
+  walk(mine);
 }
 
 /** As pastas acima do item, da collection até o pai direto. */

@@ -189,6 +189,12 @@ export interface CommitInfo {
   message: string;
   authorName: string;
   date: string;
+  /**
+   * Quando o commit entrou no GitHub (committer). A data do autor (`date`) é
+   * a do relógio de quem criou o commit; pra decidir qual de dois arquivos é
+   * o mais novo, vale esta.
+   */
+  committedAt?: string;
 }
 
 export interface PushOptions {
@@ -503,7 +509,9 @@ class GitHubStorageClient {
   }
 
   async listFolders(basePath: string = ""): Promise<RepoItem[]> {
-  const items = await this.listDirectory(basePath);
+  // Estrita: com o token vencido (ou sem acesso), a listagem que engolia o
+  // erro dizia "nenhum workspace no repositório" em vez de "token inválido".
+  const items = await this.listDirectoryStrict(basePath);
   return items.filter((item) => item.type === "dir");
 }
 
@@ -754,6 +762,7 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       // `author.login` só existe quando o e-mail bate com uma conta GitHub.
       authorName: c?.commit?.author?.name ?? c?.author?.login ?? "unknown",
       date: c?.commit?.author?.date ?? "",
+      committedAt: c?.commit?.committer?.date ?? c?.commit?.author?.date ?? "",
     }));
   }
 
@@ -877,7 +886,10 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
       // segunda gravação do mesmo arquivo nesta sessão esbarraria no sha
       // antigo e acusaria conflito consigo mesma.
       const written = (await res.json().catch(() => null)) as any;
-      this.rememberSha(path, written?.content?.sha);
+      // Sem o sha novo na resposta, o "visto" não é apagado: apagado, a
+      // próxima gravação usava o sha ATUAL (getFileSha) e sobrescrevia sem
+      // checar nada. Mantendo o antigo, no pior caso dá um conflito falso.
+      if (written?.content?.sha) this.rememberSha(path, written.content.sha);
       // Gravado = local e remoto iguais neste arquivo (ver lib/remoteVersions).
       void recordSyncedShas(this.repoKey, { [path]: written?.content?.sha ?? null });
     } catch (err: any) {
@@ -934,14 +946,27 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
     changes: { path: string; content?: unknown; delete?: boolean; noCheck?: boolean }[],
     message: string
   ): Promise<{ ok: true; written: FileShas } | { ok: false; conflicts: string[] }> {
-    const branch = encodeURIComponent(this.config.branch);
+    // Segmento a segmento: uma branch "feature/x" é o caminho heads/feature/x
+    // na rota da ref. Codificada inteira ("feature%2Fx"), a rota não acha a
+    // branch.
+    const branch = this.config.branch.split("/").map(encodeURIComponent).join("/");
     const writes = changes.filter((c) => !c.delete);
     const deletes = changes.filter((c) => c.delete);
 
     // "Cancelar" da Central: antes de mandar qualquer coisa.
     throwIfSyncCancelled();
     const head0 = await this.gitJson<{ object: { sha: string } }>(`/ref/heads/${branch}`);
-    if (!head0.data) return this.commitFilesOneByOne(changes, message);
+    if (!head0.data) {
+      // 409 = repositório ainda sem nenhum commit: só a Contents API cria o
+      // primeiro. Qualquer outra resposta (404: branch que não existe, ou
+      // token sem acesso ao repositório) é erro — cair no envio arquivo por
+      // arquivo aqui fazia um commit por arquivo, sem a garantia de tudo ou
+      // nada, e no fim falhava do mesmo jeito.
+      if (head0.status === 409) return this.commitFilesOneByOne(changes, message);
+      throw new Error(
+        `HTTP ${head0.status}: branch "${this.config.branch}" not found in ${this.config.owner}/${this.config.repo} (or this token has no access to it).`
+      );
+    }
 
     // Cifra e cria os blobs UMA vez: o retry só refaz árvore e commit.
     const blobs = new Map<string, string>();
@@ -1112,7 +1137,9 @@ async listAllFilesRecursive(path: string): Promise<RepoItem[]> {
         const rateLimit = rateLimitErrorFrom(res);
         if (rateLimit) throw rateLimit;
         const errJson = (await res.json().catch(() => ({}))) as any;
-        throw new Error(errJson.message || `HTTP ${res.status}`);
+        // Com o status no texto: é por ele que o aviso de token inválido
+        // (HTTP 401) é reconhecido — só "Bad credentials" passava batido.
+        throw new Error(`HTTP ${res.status}${errJson.message ? `: ${errJson.message}` : ""}`);
       }
       this.rememberSha(path, undefined);
       void recordSyncedShas(this.repoKey, { [path]: null });
@@ -1133,6 +1160,22 @@ const WORKSPACES_ROOT = "Postman";
 // de um workspace só quanto pelo Pull de todos os workspaces do repositório.
 // Cada arquivo é baixado individualmente (allSettled) pra que a falha de um
 // não derrube os outros; retorna também quais paths falharam.
+/**
+ * Environment de arquivo sem `id` (editado à mão, export antigo) ganha um id
+ * estável, derivado do caminho e da posição no arquivo. Sem id, todos caíam
+ * na mesma chave `undefined` da deduplicação por id: só o último sobrevivia
+ * ao pull, e o push seguinte propunha apagar os outros arquivos. Estável (e
+ * não aleatório) pra que o mesmo arquivo dê o mesmo id a cada leitura — a
+ * base da sincronização e a pendência são por id.
+ */
+function withEnvironmentIds<T>(list: T[], path: string): T[] {
+  return list.map((env, index) =>
+    env && typeof env === "object" && typeof (env as { id?: unknown }).id !== "string"
+      ? ({ ...env, id: `gh-env:${path}#${index}` } as T)
+      : env
+  );
+}
+
 async function downloadWorkspaceFilesData(
   storage: GitHubStorageClient,
   cPaths: string[],
@@ -1186,7 +1229,7 @@ async function downloadWorkspaceFilesData(
     if (typeof content === "string") {
       try { content = JSON.parse(content); } catch (e) {}
     }
-    const list = Array.isArray(content) ? content : [content];
+    const list = withEnvironmentIds(Array.isArray(content) ? content : [content], ePaths[i]);
     idsByPath[ePaths[i]] = list
       .map((env: any) => env?.id)
       .filter((id: unknown): id is string => typeof id === "string");
@@ -1206,7 +1249,7 @@ async function downloadWorkspaceFilesData(
   ];
   for (const group of groups) {
     const dates = await Promise.all(
-      group.map((p) => storage.listCommits(p, 1).then((c) => c[0]?.date).catch(() => undefined))
+      group.map((p) => storage.listCommits(p, 1).then((c) => c[0]?.committedAt || c[0]?.date).catch(() => undefined))
     );
     const keep = newestOf(group, (p) => dates[group.indexOf(p)]);
     for (const p of group) {
@@ -2235,7 +2278,8 @@ useEffect(() => {
               if (typeof content === "string") {
                 try { content = JSON.parse(content); } catch (e) {}
               }
-              return Array.isArray(content) ? content : [content];
+              // Sem id, todos colapsavam numa chave só (ver withEnvironmentIds).
+              return withEnvironmentIds(Array.isArray(content) ? content : [content], ePaths[i]);
             })
             .filter((content) => content !== null)
             .flat();

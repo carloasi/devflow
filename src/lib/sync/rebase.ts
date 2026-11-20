@@ -212,10 +212,12 @@ export function rebaseCollections(
           local: (node.local.item ?? []).map(c => c.id),
           remote: (node.remote.item ?? []).map(c => c.id),
         });
-        if (decision === 'remote') incoming++;
-        else outgoing++;
-        // Só a ordem mudou: nada mais a decidir neste item.
+        // Só a ordem mudou: nada mais a decidir neste item — e só aqui ele
+        // conta. Com outros campos mudados, quem conta é a decisão do
+        // conteúdo, abaixo (antes contava duas vezes no relatório).
         if (node.fields.every(f => f.field === 'order')) {
+          if (decision === 'remote') incoming++;
+          else outgoing++;
           (decision === 'remote' ? incomingDetails : outgoingDetails).push({ id: node.id, path: node.path, change: 'reordered', fields: [] });
           continue;
         }
@@ -389,6 +391,12 @@ export function applyRemoteMoves(
     const recordedParent = base?.[fieldHashKey(id, PARENT_FIELD)];
     if (recordedParent !== undefined && mine.parentId !== recordedParent) {
       outgoingDetails.push({ id, path: [mine.node.name], change: 'moved', fields: [] });
+      // Os dois moveram, pra pastas diferentes: fica a pasta daqui — e isso
+      // é dito (mensagem do push e histórico), em vez de valer em silêncio.
+      if (theirs.parentId !== recordedParent && theirs.parentId !== mine.parentId) {
+        keptMine++;
+        keptMineNames.push(mine.node.name);
+      }
     }
     if (recordedParent === undefined || mine.parentId !== recordedParent || theirs.parentId === recordedParent) continue;
     mergedIndex = placeOf(merged);

@@ -76,9 +76,13 @@ function similar(a: string, b: string): boolean {
 }
 
 export function diffLines(before: string, after: string): DiffLine[] {
-  const a = before.split('\n');
-  const b = after.split('\n');
-  if (before === after) return a.map(text => ({ type: 'same', text }));
+  // CRLF ≡ LF: sem isto um body com CRLF de um lado e LF do outro aparecia
+  // com TODAS as linhas mudadas (cada uma terminava num \r invisível).
+  const a = before.split(/\r?\n/);
+  const b = after.split(/\r?\n/);
+  if (before === after || (a.length === b.length && a.every((line, i) => line === b[i]))) {
+    return a.map(text => ({ type: 'same', text }));
+  }
 
   const out: DiffLine[] = [];
   if ((a.length + 1) * (b.length + 1) > MAX_CELLS) {

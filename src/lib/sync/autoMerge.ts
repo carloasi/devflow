@@ -77,8 +77,12 @@ export function mergeText(base: string, mine: string, theirs: string): TextMerge
   const done = (text: string): TextMerge => ({ ok: true, text: crlf ? text.replace(/\n/g, '\r\n') : text });
   const [o, a, b] = [lf(base), lf(mine), lf(theirs)];
 
-  if (a === b || b === o) return done(a);
-  if (a === o) return done(b);
+  // Um lado inteiro vale: sai como ele é, com a quebra de linha dele. Antes
+  // o texto do GitHub adotado inteiro saía convertido pra quebra daqui — o
+  // CRLF do colega virava LF em silêncio, e o sync seguinte mostrava uma
+  // diferença só de quebra de linha.
+  if (a === b || b === o) return { ok: true, text: mine };
+  if (a === o) return { ok: true, text: theirs };
 
   const O = o.split('\n');
   const A = a.split('\n');

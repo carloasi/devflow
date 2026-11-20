@@ -47,11 +47,22 @@ describe('discardLocalChange', () => {
     expect(tree).toEqual(remote);
   });
 
-  it('pasta volta inteira, sem duplicar o filho que aqui foi movido pra fora', () => {
+  it('pasta volta com o que tinha lá, sem duplicar o filho que aqui foi movido pra fora', () => {
     const local = [folder('Settings', [folder('FiltersIp', [req('Novo')]), req('Other', '/other'), req('ListFilters')])];
     const { tree } = discardLocalChange(local, remote, 'FiltersIp');
     expect(ids(tree).filter(id => id === 'ListFilters')).toHaveLength(1);
-    expect(tree).toEqual(remote);
+    // O que foi criado aqui dentro dela fica (tem a própria linha na Central).
+    expect(tree).toEqual([folder('Settings', [folder('FiltersIp', [req('Novo'), req('ListFilters')]), req('Other', '/other')])]);
+  });
+
+  it('descartar a pasta não apaga a request nova de dentro dela (nem a subpasta nova)', () => {
+    const remoteTree = [folder('S', [folder('F', [req('a')])])];
+    const local = [folder('S', [{ ...folder('F renamed', [req('a'), req('nova'), folder('sub', [req('x')])]), id: 'F' }])];
+    const { tree, action } = discardLocalChange(local, remoteTree, 'F');
+    expect(action).toBe('reverted');
+    const f = tree[0].item![0];
+    expect(f.name).toBe('F');
+    expect(ids([f])).toEqual(expect.arrayContaining(['a', 'nova', 'sub', 'x']));
   });
 });
 

@@ -53,6 +53,13 @@ function FieldDiff({
   )
   // Começa como o merge automático faria: cada trecho com o lado que mudou.
   const [picks, setPicks] = useState<ChunkPick[] | null>(() => (chunks ? defaultPicks(chunks) : null))
+  // Trechos novos (o campo mudou com a janela aberta — a Central recarregou):
+  // as marcas eram dos trechos antigos, com outros índices. Recomeça.
+  const [picksFor, setPicksFor] = useState(chunks)
+  if (picksFor !== chunks) {
+    setPicksFor(chunks)
+    setPicks(chunks ? defaultPicks(chunks) : null)
+  }
   // A edição vale só sobre estas versões do campo (a daqui e a do GitHub):
   // se uma mudar até a revisão abrir, ela é descartada lá.
   const raw = field.raw
