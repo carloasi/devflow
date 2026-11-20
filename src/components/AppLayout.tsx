@@ -4692,56 +4692,65 @@ const handleGitHubPull = useCallback(async (rawData: unknown) => {
     const peek = lastSyncPeekRef.current;
     const failed = (message: string): SyncActionResult => ({ result: 'failed', messages: [{ type: 'error', message }] });
     if (!peek || peek.workspace !== workspace) return failed(syncText.scDiscardStale);
+    // Um sync por vez (lib/sync/syncLock): descartar grava a árvore (ou os
+    // environments) daqui, e no meio de um push começado fora da Central —
+    // que não desativa os botões dela — o push aplicava a mescla que montou
+    // antes, e o descarte se perdia sem aviso.
+    const lock = acquireSyncLock('discard');
+    if (!lock) return failed(SYNC_BUSY_MESSAGE);
+    try {
+      await takeUndoSnapshot(workspace);
+      const undo = { label: syncText.undo, run: () => void undoLastPull(true) };
 
-    await takeUndoSnapshot(workspace);
-    const undo = { label: syncText.undo, run: () => void undoLastPull(true) };
+      if (target.envName) {
+        const next = discardEnvironmentChange(environmentsRef.current, peek.remoteEnvs, target.envName);
+        if (next === environmentsRef.current) return failed(syncText.scDiscardNothing(target.label));
+        suppressEnvPendingMarkRef.current = true;
+        environmentsRef.current = next;
+        setEnvironments(next);
+        // Pendência dos environments: só o que ainda difere do GitHub.
+        const envName = target.envName.split(' › ')[0];
+        const env = next.find(e => e.name === envName);
+        const theirs = peek.remoteEnvs.find(e => e.name === envName);
+        if (env) {
+          const differs = !theirs || diffEnvironments(withoutSessionTokens([env]), withoutSessionTokens([theirs])).length > 0;
+          if (differs) markEnvironmentsPendingPush(workspace, [env.id]);
+          else {
+            clearEnvironmentsPendingPush(workspace, [env.id]);
+            markEnvironmentSynced(env.id);
+          }
+          setPendingPush(readPendingPush(workspace));
+        }
+        return { result: 'done', messages: [{ type: 'success', message: syncText.scDiscarded(target.label), action: undo }] };
+      }
 
-    if (target.envName) {
-      const next = discardEnvironmentChange(environmentsRef.current, peek.remoteEnvs, target.envName);
-      if (next === environmentsRef.current) return failed(syncText.scDiscardNothing(target.label));
-      suppressEnvPendingMarkRef.current = true;
-      environmentsRef.current = next;
-      setEnvironments(next);
-      // Pendência dos environments: só o que ainda difere do GitHub.
-      const envName = target.envName.split(' › ')[0];
-      const env = next.find(e => e.name === envName);
-      const theirs = peek.remoteEnvs.find(e => e.name === envName);
-      if (env) {
-        const differs = !theirs || diffEnvironments(withoutSessionTokens([env]), withoutSessionTokens([theirs])).length > 0;
-        if (differs) markEnvironmentsPendingPush(workspace, [env.id]);
-        else {
-          clearEnvironmentsPendingPush(workspace, [env.id]);
-          markEnvironmentSynced(env.id);
+      const { tree, action } = discardLocalChange(collectionsRef.current, peek.remoteTree, target.itemId!);
+      if (action === 'none') return failed(syncText.scDiscardNothing(target.label));
+      const rootOf = (forest: CollectionItem[]) =>
+        forest.find(c => c.id === target.itemId || !!findNodeById([c], target.itemId!));
+      const rootId = (rootOf(collectionsRef.current) ?? rootOf(peek.remoteTree))?.id;
+
+      suppressPendingMarkRef.current = true;
+      collectionsRef.current = tree;
+      setCollections(tree);
+      await saveWorkspaceCollections(workspace, tree);
+      // Pendência da collection: continua só se ainda sobrar diferença nela.
+      if (rootId) {
+        const mine = tree.find(c => c.id === rootId);
+        const theirs = peek.remoteTree.find(c => c.id === rootId);
+        if (mine && theirs) {
+          const still = compareWorkspaces([mine], [theirs]);
+          if (still.modified.length + still.onlyLocal.length > 0) markCollectionsPendingPush(workspace, [rootId]);
+          else clearCollectionsPendingPush(workspace, [rootId]);
+        } else if (!mine && !theirs) {
+          clearCollectionsPendingPush(workspace, [rootId]);
         }
         setPendingPush(readPendingPush(workspace));
       }
       return { result: 'done', messages: [{ type: 'success', message: syncText.scDiscarded(target.label), action: undo }] };
+    } finally {
+      releaseSyncLock(lock);
     }
-
-    const { tree, action } = discardLocalChange(collectionsRef.current, peek.remoteTree, target.itemId!);
-    if (action === 'none') return failed(syncText.scDiscardNothing(target.label));
-    const rootOf = (forest: CollectionItem[]) =>
-      forest.find(c => c.id === target.itemId || !!findNodeById([c], target.itemId!));
-    const rootId = (rootOf(collectionsRef.current) ?? rootOf(peek.remoteTree))?.id;
-
-    suppressPendingMarkRef.current = true;
-    collectionsRef.current = tree;
-    setCollections(tree);
-    await saveWorkspaceCollections(workspace, tree);
-    // Pendência da collection: continua só se ainda sobrar diferença nela.
-    if (rootId) {
-      const mine = tree.find(c => c.id === rootId);
-      const theirs = peek.remoteTree.find(c => c.id === rootId);
-      if (mine && theirs) {
-        const still = compareWorkspaces([mine], [theirs]);
-        if (still.modified.length + still.onlyLocal.length > 0) markCollectionsPendingPush(workspace, [rootId]);
-        else clearCollectionsPendingPush(workspace, [rootId]);
-      } else if (!mine && !theirs) {
-        clearCollectionsPendingPush(workspace, [rootId]);
-      }
-      setPendingPush(readPendingPush(workspace));
-    }
-    return { result: 'done', messages: [{ type: 'success', message: syncText.scDiscarded(target.label), action: undo }] };
   }, [setEnvironments, markEnvironmentSynced, takeUndoSnapshot, undoLastPull, syncText]);
 
   // "Abrir" da Central: a request (ou o example) numa aba. A Central continua
